@@ -139,9 +139,23 @@ if [ ! -f "$start_script" ] || ! cmp -s <(printf '%s\n' "$start_body") "$start_s
 fi
 
 # 7. Start the supervisor in its own pane unless one already watches this run.
-#    pgrep exits 1 when nothing matches, which `if` handles under `set -e`.
-#    The split carries CTC_RUN_DIR because a workspace --env does not reach it.
-if ! pgrep -f "supervise.ts $run_dir" >/dev/null 2>&1; then
+#    The command line ends with the run dir, so compare that exact literal
+#    suffix (quoted `case` pattern): a supervisor for …/runs/sup2 must not
+#    hide the one for …/runs/sup, and path metacharacters match literally.
+#    pgrep exits 1 when nothing matches; the loop and `if` handle it under
+#    `set -e`. The split carries CTC_RUN_DIR because a workspace --env does
+#    not reach it.
+supervisor_running() {
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      *"supervise.ts $run_dir") return 0 ;;
+    esac
+  done < <(pgrep -af 'supervise\.ts' 2>/dev/null || true)
+  return 1
+}
+
+if ! supervisor_running; then
   sup_split="$(herdr_session pane split --pane "$anchor" --direction right --cwd "$run_dir" \
     --env "CTC_RUN_DIR=$run_dir" --no-focus)"
   sup_pane="$(jq -r '.result.pane.pane_id' <<<"$sup_split")"
