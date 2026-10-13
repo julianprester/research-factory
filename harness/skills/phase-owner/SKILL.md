@@ -23,12 +23,14 @@ under it (groups: `patterns/`, `puzzles/`, `explanations/`, `framings/`,
      writes, never paste history.
    - Dispatch it:
      `subagent({ agent: "ctc-worker", async: true, cwd: "<node dir>", task: "Read brief.md and carry it out." })`
-   - `tree_update({ nodeId: "<id>", status: "active", runId: "<run id from the dispatch receipt>" })`.
+   - Append the ledger line for the dispatch, then immediately
+     `tree_update({ nodeId: "<id>", status: "active", runId: "<run id from the dispatch receipt>" })`.
 3. When a completion notification arrives, read the node's `handoff.md` and act
    on its status line:
-   - `DONE` / `DONE_WITH_CONCERNS` — `tree_update` to `submitted`, then hand the
-     node on: set `phase` to the next phase with `status: "ready"` so its next
-     owner picks it up, or set the status your phase skill names.
+   - `DONE` / `DONE_WITH_CONCERNS` — append the handoff ledger line, then
+     `tree_update` to `submitted`, then hand the node on: set `phase` to the
+     next phase with `status: "ready"` so its next owner picks it up, or set
+     the status your phase skill names.
    - `BLOCKED` — resume the same worker with the findings:
      `subagent({ action: "resume", id: "<run id>", message: "<the findings>" })`.
      Do this up to 3 times. Then up to 2 fresh workers on a stronger model
@@ -48,6 +50,12 @@ line each: node, what happened, run id. Every judgment call gets a ruling on
 its own line:
 
 `Ruling: <what> — <why> — <cost if wrong>`
+
+Write each ledger line immediately **before** the `tree_*` call it records.
+Tree commits run only on tree ops, so a line appended after the last `tree_*`
+call is never committed and leaves `git status` dirty. Never write a ledger
+line after your last `tree_*` call: record "phase complete" (or any final
+note) in the `note` of that final `tree_update` instead.
 
 ## Never
 

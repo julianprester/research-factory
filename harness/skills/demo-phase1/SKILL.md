@@ -25,5 +25,7 @@ and their briefs are.
      under the input is counted; `handoff.md` ends with `Status: DONE`.
 3. Dispatch each worker exactly as phase-owner says, with `cwd` set to the
    node folder.
-4. On `DONE`, `tree_update` the node to `submitted` and note it in the ledger.
-   Phase 1 is done when both nodes are submitted.
+4. On `DONE`, append the handoff ledger line and then `tree_update` the node to
+   `submitted`. Phase 1 is done when both nodes are submitted: record that in
+   the `note` of the second node's final `tree_update`, not as a trailing
+   ledger line.
