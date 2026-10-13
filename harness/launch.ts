@@ -102,6 +102,12 @@ export function ensureSession(runDir: string, herdr: Herdr, startServer?: () => 
     startServer ??
     (() => {
       const child = spawn("herdr", ["--session", name, "server"], { detached: true, stdio: "ignore" });
+      // A missing herdr binary emits 'error'; without this listener it would be
+      // an uncaught exception. The workspace-list poll below turns the missing
+      // server into "Herdr session <name> did not start" instead.
+      child.on("error", () => {
+        /* the poll reports it */
+      });
       child.unref();
     });
 

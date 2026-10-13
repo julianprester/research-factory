@@ -1,23 +1,32 @@
-// The supervisor loop: every tick, read the run's owned phases and their
-// owners' Herdr states, ask supervisor.ts's decide(), and carry the actions
-// out. The rules live in decide(); this file only talks to Herdr, git and the
-// run's start scripts. A failing Herdr or git call is logged and the loop
-// carries on to the next tick.
+// The supervisor loop: every tick, read the run's config.json, the owners'
+// Herdr states and the run's tree, ask supervisor.ts's decide(), and carry the
+// actions out with launch.ts. The rules live in decide(); this file only talks
+// to Herdr, git and the tree. A failing Herdr or git call is logged and the
+// loop carries on to the next tick.
 //
 //   node harness/supervise.ts <runDir>
 //
 // The tick is 60 s (CTC_TICK_MS overrides it for tests). A `done` action logs
 // and exits 0. Every line printed is `<ISO time> P<phase> <action> <detail>`.
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { decide, viewPhase, type Action, type Memory, type OwnerState } from "./supervisor.ts";
+import {
+  nudgeOwner,
+  ownerState,
+  readConfig,
+  realHerdr,
+  sessionName,
+  startOwner,
+  type Herdr,
+  type RunConfig,
+} from "./launch.ts";
+import { decide, viewPhase, type Action, type Memory, type OwnerState, type PhaseView } from "./supervisor.ts";
 import { listNodes } from "./tree.ts";
 
 const USAGE = "usage: node harness/supervise.ts <runDir>";
 const DEFAULT_TICK_MS = 60_000;
-const OWNER_STATES: readonly OwnerState[] = ["idle", "working", "blocked", "done", "unknown"];
 
 function iso(): string {
   return new Date().toISOString();
@@ -38,57 +47,6 @@ function tickMs(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TICK_MS;
 }
 
-/** The phases with an `owners/phase-N/start.sh`, in phase order. */
-function ownedPhases(runDir: string): number[] {
-  const ownersDir = path.join(runDir, "owners");
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(ownersDir, { withFileTypes: true });
-  } catch {
-    return []; // no owners yet: nothing to supervise
-  }
-  const phases: number[] = [];
-  for (const entry of entries) {
-    const match = /^phase-(\d+)$/.exec(entry.name);
-    if (!entry.isDirectory() || !match) continue;
-    if (fs.existsSync(path.join(ownersDir, entry.name, "start.sh"))) phases.push(Number(match[1]));
-  }
-  return phases.sort((a, b) => a - b);
-}
-
-/** A ready node in a phase with no owner is work nobody has picked up. */
-function unownedReady(runDir: string, owned: number[]): Record<number, number> {
-  const counts: Record<number, number> = {};
-  for (const node of listNodes(runDir)) {
-    if (node.status !== "ready" || owned.includes(node.phase)) continue;
-    counts[node.phase] = (counts[node.phase] ?? 0) + 1;
-  }
-  return counts;
-}
-
-/** Herdr exits non-zero when the agent does not exist: that is `gone`. */
-function ownerState(session: string, phase: number): OwnerState {
-  let out: string;
-  try {
-    out = execFileSync("herdr", ["--session", session, "agent", "get", `owner-p${phase}`], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 15_000,
-    });
-  } catch {
-    return "gone";
-  }
-  try {
-    const status = (JSON.parse(out) as { result?: { agent?: { agent_status?: unknown } } }).result?.agent
-      ?.agent_status;
-    return typeof status === "string" && (OWNER_STATES as readonly string[]).includes(status)
-      ? (status as OwnerState)
-      : "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
 function headOf(runDir: string): string {
   return execFileSync("git", ["-C", runDir, "rev-parse", "HEAD"], {
     encoding: "utf8",
@@ -97,39 +55,27 @@ function headOf(runDir: string): string {
   }).trim();
 }
 
-/** Start a gone owner by re-running the exact command run.sh recorded. */
-function start(runDir: string, phase: number): void {
-  const script = path.join(runDir, "owners", `phase-${phase}`, "start.sh");
-  const result = spawnSync("bash", [script], { cwd: runDir, encoding: "utf8", timeout: 120_000 });
-  if (result.error) {
-    log(phase, "start", `could not run ${script}: ${result.error.message}`);
-    return;
+/** The phases the tree has nodes in; the root (phase 0) is not a phase. */
+function phasesWithNodes(runDir: string): Set<number> {
+  const phases = new Set<number>();
+  for (const node of listNodes(runDir)) {
+    if (node.phase > 0) phases.add(node.phase);
   }
-  if (typeof result.status === "number" && result.status !== 0) {
-    log(phase, "start", `${script} exited ${result.status}`);
-  }
-  for (const text of [result.stdout ?? "", result.stderr ?? ""]) {
-    for (const line of text.split("\n")) {
-      if (line.trim() !== "") log(phase, "start", `output: ${line.trim()}`);
-    }
-  }
+  return phases;
 }
 
-/** Nudge an idle owner with the message decide() built; no --wait. */
-function nudge(session: string, phase: number, message: string): void {
-  try {
-    execFileSync("herdr", ["--session", session, "agent", "prompt", `owner-p${phase}`, message], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 30_000,
-    });
-  } catch (error) {
-    log(phase, "nudge", `prompt failed: ${error instanceof Error ? error.message : String(error)}`);
-  }
+function hasWork(view: PhaseView): boolean {
+  return view.ready.length > 0 || view.running.length > 0 || view.finished.length > 0;
 }
 
 /** Carry one decide() action out; returns true when the run is done. */
-function execute(runDir: string, session: string, action: Action): boolean {
+function execute(
+  runDir: string,
+  herdr: Herdr,
+  cfg: RunConfig,
+  started: Set<number>,
+  action: Action,
+): boolean {
   switch (action.kind) {
     case "done": {
       const waiting = Object.entries(action.waitingForUnconfiguredPhases)
@@ -138,14 +84,19 @@ function execute(runDir: string, session: string, action: Action): boolean {
       log("-", "done", waiting === "" ? "run finished" : `run finished; waiting for unconfigured phases: ${waiting}`);
       return true;
     }
-    case "start":
-      log(action.phase, "start", `owner-p${action.phase} ${action.reason}; running owners/phase-${action.phase}/start.sh`);
-      start(runDir, action.phase);
+    case "start": {
+      const result = startOwner(runDir, action.phase, cfg, herdr);
+      // An owner that exists (or was just started) must not be started again on
+      // the next tick, even before Herdr reports it working.
+      if (result !== "failed") started.add(action.phase);
+      log(action.phase, "start", `${action.reason}; owner-p${action.phase} ${result}`);
       return false;
-    case "nudge":
+    }
+    case "nudge": {
       log(action.phase, "nudge", action.message);
-      nudge(session, action.phase, action.message);
+      if (!nudgeOwner(herdr, action.phase, action.message)) log(action.phase, "nudge", "agent prompt failed");
       return false;
+    }
     case "stalled":
       log(action.phase, "stalled", "three nudges with no new commit; waiting for a new HEAD");
       return false;
@@ -157,32 +108,54 @@ interface TickResult {
   done: boolean;
 }
 
-/** One full tick; throws only on tree/git errors, which main() logs and survives. */
-function tick(runDir: string, session: string, memory: Memory): TickResult {
-  const owned = ownedPhases(runDir);
+/** One full tick; a bad config.json is logged and the tick skipped. */
+function tick(runDir: string, herdr: Herdr, started: Set<number>, memory: Memory): TickResult {
+  let cfg: RunConfig;
+  try {
+    cfg = readConfig(runDir);
+  } catch (error) {
+    log("-", "config", `${error instanceof Error ? error.message : String(error)}; skipping this tick`);
+    return { memory, done: false };
+  }
+
+  const configured = new Set<number>();
+  for (const key of Object.keys(cfg.phases)) configured.add(Number(key));
+  const phases = phasesWithNodes(runDir);
+  for (const phase of configured) phases.add(phase);
+  const ordered = [...phases].sort((a, b) => a - b);
+  const entry = configured.size > 0 ? Math.min(...configured) : -1;
+
   const states = new Map<number, OwnerState>();
-  for (const phase of owned) states.set(phase, ownerState(session, phase));
-  for (const phase of owned) {
-    if (states.get(phase) === "blocked") log(phase, "blocked", "owner reports blocked; leaving it alone");
-    if (states.get(phase) === "unknown") log(phase, "unknown", "owner state is unknown; leaving it alone");
+  for (const phase of ordered) {
+    const state = ownerState(herdr, phase);
+    states.set(phase, state);
+    if (state !== "gone") started.add(phase);
+  }
+
+  const views = ordered.map((phase) =>
+    viewPhase(runDir, phase, states.get(phase) ?? "unknown", {
+      configured: configured.has(phase),
+      started: started.has(phase),
+      entry: phase === entry,
+    }),
+  );
+
+  for (const view of views) {
+    if (view.owner === "blocked") log(view.phase, "blocked", "owner reports blocked; leaving it alone");
+    if (view.owner === "unknown") log(view.phase, "unknown", "owner state is unknown; leaving it alone");
+  }
+
+  // A phase with work but no skill in config.json waits for a human; report it
+  // every tick. Phases without work are not waiting for anything.
+  for (const view of views) {
+    if (!view.configured && hasWork(view)) log(view.phase, "waiting", "no skill configured");
   }
 
   const head = headOf(runDir);
-  const views = owned.map((phase) =>
-    viewPhase(runDir, phase, states.get(phase) ?? "unknown", { configured: true, started: true, entry: false }),
-  );
-  const unowned = unownedReady(runDir, owned);
   const { actions, memory: next } = decide(views, head, memory);
 
   let done = false;
-  for (const action of actions) done = execute(runDir, session, action) || done;
-
-  // Done reports the unowned phases itself; otherwise say what is waiting.
-  if (!done) {
-    for (const [phase, count] of Object.entries(unowned)) {
-      log(Number(phase), "unowned", `${count} ready node(s) with no owner; not starting one`);
-    }
-  }
+  for (const action of actions) done = execute(runDir, herdr, cfg, started, action) || done;
   return { memory: next, done };
 }
 
@@ -198,14 +171,16 @@ function main(args: string[]): number {
     return 2;
   }
 
-  const session = `ctc-${path.basename(runDir)}`;
+  const session = sessionName(runDir);
+  const herdr = realHerdr(session);
   const interval = tickMs();
   log("-", "start", `supervising ${runDir} every ${interval} ms in session ${session}`);
 
+  const started = new Set<number>();
   let memory: Memory = { head: "", nudges: {}, stalled: [], doneStreak: 0 };
   for (;;) {
     try {
-      const result = tick(runDir, session, memory);
+      const result = tick(runDir, herdr, started, memory);
       memory = result.memory;
       if (result.done) return 0;
     } catch (error) {

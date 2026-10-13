@@ -1,6 +1,7 @@
 // The phase-owner extension: an owner session's only way to touch the tree.
 //
-// Pi loads this with the run and phase in the environment (see harness/run.sh):
+// Pi loads this with the run and phase in the environment (see
+// harness/launch.ts's startOwner):
 // CTC_RUN_DIR is the run folder, CTC_PHASE the phase this session owns. Every
 // tool refuses nodes outside that phase, and a `tool_call` guard blocks
 // `write`/`edit` calls outside `owners/phase-<phase>/` and node briefs. The
