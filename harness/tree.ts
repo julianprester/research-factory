@@ -69,6 +69,7 @@ const LOCK_TIMEOUT_MS = 30_000;
 const LOCK_STALE_MS = 5_000;
 // The lock lives inside .git so that `git add -A` in commit() never sees it.
 const LOCK_DIR = ".git/ctc.lock";
+const PID_FILE = "pid";
 
 function slug(title: string): string {
   const words = title
@@ -110,10 +111,15 @@ function lockAgeMs(lockDir: string): number {
 /**
  * A lock is stale when its recorded holder is dead (kill throws ESRCH), or
  * when its pid file never appeared and the lock is older than 5 s. A live — or
- * unreadable and young — lock is honoured.
+ * unreadable and young — lock is honoured. An absent lock is not stale: there
+ * is nothing to break, and a missing directory must lead back to `mkdir`,
+ * never to a remove that could hit a lock another writer has just created.
+ *
+ * Exported for the lock unit tests; the rest of the module treats it as internal.
  */
-function isStaleLock(lockDir: string): boolean {
-  const pid = readPid(path.join(lockDir, "pid"));
+export function isStaleLock(lockDir: string): boolean {
+  if (!fs.existsSync(lockDir)) return false;
+  const pid = readPid(path.join(lockDir, PID_FILE));
   if (pid === undefined) return lockAgeMs(lockDir) > LOCK_STALE_MS;
   try {
     process.kill(pid, 0);
@@ -123,15 +129,38 @@ function isStaleLock(lockDir: string): boolean {
   }
 }
 
+/** Take the lock: the atomic `mkdir`, then the holder's pid. A failed pid write drops the fresh dir. */
+function createLock(lockDir: string): void {
+  fs.mkdirSync(lockDir);
+  try {
+    fs.writeFileSync(path.join(lockDir, PID_FILE), String(process.pid));
+  } catch (error) {
+    try {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    } catch {
+      /* the lock is already gone */
+    }
+    throw error;
+  }
+}
+
 /**
- * Remove a stale lock and report whether it is gone. Two processes can see the
- * same stale lock at once, and a plain remove-then-mkdir lets one of them
+ * Remove a stale lock and take it in the same breath. Two processes can see
+ * the same stale lock at once, and a plain remove-then-mkdir lets one of them
  * delete the lock the other has just re-created. Breaking is therefore
- * serialised by a short-lived `<lock>.breaker` mkdir. It is held for
- * microseconds and carries no pid, so one left behind by a crash is recovered
- * by the same 5 s age rule as any other lock without a pid file.
+ * serialised by a short-lived `<lock>.breaker` mkdir, and the breaker holder
+ * is the only process allowed to remove a lock: it re-checks staleness, and if
+ * the lock is stale it removes it and immediately creates (and so holds) its
+ * own before releasing the breaker. It therefore never removes a lock it does
+ * not then own. Returns true only when the caller now holds the lock.
+ *
+ * The breaker is held for microseconds and carries no pid, so one left behind
+ * by a crash is recovered by the same 5 s age rule as any lock whose pid file
+ * never appeared.
+ *
+ * Exported for the lock unit tests; the rest of the module treats it as internal.
  */
-function breakStaleLock(lockDir: string): boolean {
+export function breakStaleLock(lockDir: string): boolean {
   const breakDir = `${lockDir}.breaker`;
   try {
     fs.mkdirSync(breakDir);
@@ -141,8 +170,14 @@ function breakStaleLock(lockDir: string): boolean {
     return false; // another process is breaking it: let it finish
   }
   try {
-    if (!isStaleLock(lockDir)) return false;
+    if (!isStaleLock(lockDir)) return false; // live, absent, or too young to tell
     fs.rmSync(lockDir, { recursive: true, force: true });
+    try {
+      createLock(lockDir); // only a lock we immediately own is ever removed
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      return false; // another writer created the lock first: it won the race
+    }
     return true;
   } finally {
     try {
@@ -155,24 +190,22 @@ function breakStaleLock(lockDir: string): boolean {
 
 function withLock<T>(runDir: string, fn: () => T): T {
   const lockDir = path.join(runDir, LOCK_DIR);
-  const pidFile = path.join(lockDir, "pid");
   const timeout = lockTimeoutMs();
   const deadline = Date.now() + timeout;
   for (;;) {
     try {
-      fs.mkdirSync(lockDir);
-      fs.writeFileSync(pidFile, String(process.pid));
+      createLock(lockDir);
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      if (isStaleLock(lockDir) && breakStaleLock(lockDir)) {
-        continue; // retry the atomic mkdir immediately
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`Could not acquire ${lockDir} within ${timeout} ms`);
-      }
-      sleepSync(LOCK_STEP_MS);
     }
+    // Breaking takes the lock itself, so an absent lock can never be removed
+    // out from under a writer that is recreating it.
+    if (isStaleLock(lockDir) && breakStaleLock(lockDir)) break; // we now hold it
+    if (Date.now() >= deadline) {
+      throw new Error(`Could not acquire ${lockDir} within ${timeout} ms`);
+    }
+    sleepSync(LOCK_STEP_MS);
   }
   try {
     return fn();

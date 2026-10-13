@@ -6,7 +6,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { CHILD_TYPE, PREFIX, createChild, findNode, initRun, listNodes, readRun, updateNode } from "../tree.ts";
+import { CHILD_TYPE, PREFIX, breakStaleLock, createChild, findNode, initRun, isStaleLock, listNodes, readRun, updateNode } from "../tree.ts";
 
 const WRITER = fileURLToPath(new URL("./writer-child.ts", import.meta.url));
 const CREATE_CHILD = fileURLToPath(new URL("./create-child.ts", import.meta.url));
@@ -200,6 +200,28 @@ test("listNodes only reads node folders, never workspace, .git or owners", (t) =
     listNodes(run).map((node) => node.id),
     ["D01", "T01"],
   );
+});
+
+test("an absent lock is not stale and is never broken", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  const lockDir = path.join(run, ".git", "ctc.lock");
+
+  assert.equal(isStaleLock(lockDir), false, "a missing lock dir is not a stale lock");
+  assert.equal(breakStaleLock(lockDir), false, "there is nothing to break and nothing to own");
+  assert.equal(existsSync(lockDir), false, "breaking an absent lock does not create a lock");
+  assert.equal(existsSync(`${lockDir}.breaker`), false, "the breaker is released");
+});
+
+test("breaking a stale lock leaves the breaker holding it", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  const lockDir = staleLock(run);
+
+  assert.equal(breakStaleLock(lockDir), true, "a stale lock is broken");
+  assert.equal(existsSync(lockDir), true, "the breaker owns the lock it created");
+  assert.equal(readFileSync(path.join(lockDir, "pid"), "utf8"), String(process.pid), "the new lock names the breaker holder");
+  assert.equal(existsSync(`${lockDir}.breaker`), false, "the breaker is released");
 });
 
 test("a stale lock is broken and the next writer proceeds", (t) => {
