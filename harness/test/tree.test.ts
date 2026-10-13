@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { CHILD_TYPE, PREFIX, createChild, findNode, initRun, listNodes, readRun, updateNode } from "../tree.ts";
 
 const WRITER = fileURLToPath(new URL("./writer-child.ts", import.meta.url));
+const CREATE_CHILD = fileURLToPath(new URL("./create-child.ts", import.meta.url));
 
 function makeRun(t: TestContext): string {
   const runDir = mkdtempSync(path.join(tmpdir(), "ctc-tree-"));
@@ -28,9 +29,16 @@ function stored(runDir: string, relative: string): unknown {
   return JSON.parse(readFileSync(path.join(runDir, relative), "utf8"));
 }
 
-function runWriter(runDir: string): Promise<{ code: number | null; stderr: string }> {
+function runScript(
+  script: string,
+  runDir: string,
+  env: NodeJS.ProcessEnv = {},
+): Promise<{ code: number | null; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [WRITER, runDir], { stdio: ["ignore", "ignore", "pipe"] });
+    const child = spawn(process.execPath, [script, runDir], {
+      stdio: ["ignore", "ignore", "pipe"],
+      env: { ...process.env, ...env },
+    });
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
@@ -38,6 +46,30 @@ function runWriter(runDir: string): Promise<{ code: number | null; stderr: strin
     child.on("error", reject);
     child.on("close", (code) => resolve({ code, stderr }));
   });
+}
+
+function runWriter(runDir: string): Promise<{ code: number | null; stderr: string }> {
+  return runScript(WRITER, runDir);
+}
+
+function runCreateChild(runDir: string, env: NodeJS.ProcessEnv = {}): Promise<{ code: number | null; stderr: string }> {
+  return runScript(CREATE_CHILD, runDir, env);
+}
+
+/** A pid that is certainly dead: run `node -e ""` to completion and keep its pid. */
+function deadPid(): number {
+  const dead = spawnSync(process.execPath, ["-e", ""]);
+  assert.equal(dead.status, 0, dead.stderr?.toString());
+  assert.ok(dead.pid, "the dead process has a pid");
+  return dead.pid;
+}
+
+/** Leave a lock behind as a crashed holder would: a dir whose recorded pid is dead. */
+function staleLock(runDir: string): string {
+  const lockDir = path.join(runDir, ".git", "ctc.lock");
+  mkdirSync(lockDir, { recursive: true });
+  writeFileSync(path.join(lockDir, "pid"), String(deadPid()));
+  return lockDir;
 }
 
 test("the constants describe the node tree", () => {
@@ -167,6 +199,59 @@ test("listNodes only reads node folders, never workspace, .git or owners", (t) =
   assert.deepEqual(
     listNodes(run).map((node) => node.id),
     ["D01", "T01"],
+  );
+});
+
+test("a stale lock is broken and the next writer proceeds", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  const lockDir = staleLock(run);
+
+  const started = Date.now();
+  const node = createChild(run, "D01", "After the crash", "t");
+  assert.equal(node.id, "T01");
+  assert.ok(Date.now() - started < 2000, "a stale lock does not cost the 30 s timeout");
+  assert.equal(existsSync(lockDir), false, "the lock is released after the write");
+});
+
+test("two writers break the same stale lock only once", async (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  const lockDir = staleLock(run);
+
+  const [first, second] = await Promise.all([runWriter(run), runWriter(run)]);
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(second.code, 0, second.stderr);
+
+  const ids = listNodes(run).filter((node) => node.type === "pattern").map((node) => node.id).sort();
+  assert.deepEqual(ids, Array.from({ length: 20 }, (_, index) => `T${String(index + 1).padStart(2, "0")}`));
+  assert.equal(Number(git(run, "rev-list", "--count", "HEAD")), 21);
+  assert.equal(git(run, "status", "--porcelain"), "", "every write was committed");
+  assert.equal(existsSync(lockDir), false, "the stale lock is gone once both writers are done");
+});
+
+test("a live lock is respected until the timeout", async (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  const lockDir = path.join(run, ".git", "ctc.lock");
+  mkdirSync(lockDir, { recursive: true });
+  writeFileSync(path.join(lockDir, "pid"), String(process.pid));
+
+  const failed = await runCreateChild(run, { CTC_LOCK_TIMEOUT_MS: "1500" });
+  assert.notEqual(failed.code, 0, "the child could not take a live lock");
+  assert.match(failed.stderr, /Could not acquire/);
+  assert.equal(existsSync(lockDir), true, "a live lock is not stolen");
+});
+
+test("no lock or pid files are ever committed", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  createChild(run, "D01", "One", "t");
+
+  assert.deepEqual(
+    git(run, "ls-files").split("\n").filter((file) => file.includes("lock")),
+    [],
+    "the lock lives inside .git and is never tracked",
   );
 });
 

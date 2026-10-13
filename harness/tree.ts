@@ -7,8 +7,9 @@
 // holds the dataset path and research interest instead.
 //
 // There is no separate event log: every change is one git commit in the run's
-// own repository, authored by the actor, under a `mkdir` lock so parallel
-// writers stay consistent. `git log` is the event log.
+// own repository, authored by the actor, under a `mkdir` lock inside `.git/`
+// (which records the holder's pid, so a crashed writer's lock can be broken).
+// `git log` is the event log.
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -65,6 +66,9 @@ const TYPE_OF_PREFIX = Object.fromEntries(Object.entries(PREFIX).map(([type, pre
 const NODE_FOLDER = /^([A-Z])(\d+)-(.+)$/;
 const LOCK_STEP_MS = 100;
 const LOCK_TIMEOUT_MS = 30_000;
+const LOCK_STALE_MS = 5_000;
+// The lock lives inside .git so that `git add -A` in commit() never sees it.
+const LOCK_DIR = ".git/ctc.lock";
 
 function slug(title: string): string {
   const words = title
@@ -81,17 +85,91 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+function lockTimeoutMs(): number {
+  const override = Number(process.env.CTC_LOCK_TIMEOUT_MS);
+  return Number.isFinite(override) && override > 0 ? override : LOCK_TIMEOUT_MS;
+}
+
+function readPid(pidFile: string): number | undefined {
+  try {
+    const pid = Number.parseInt(fs.readFileSync(pidFile, "utf8"), 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined; // no pid file yet (or it is unreadable)
+  }
+}
+
+function lockAgeMs(lockDir: string): number {
+  try {
+    return Date.now() - fs.statSync(lockDir).mtimeMs;
+  } catch {
+    return Number.POSITIVE_INFINITY; // the lock vanished: retry mkdir
+  }
+}
+
+/**
+ * A lock is stale when its recorded holder is dead (kill throws ESRCH), or
+ * when its pid file never appeared and the lock is older than 5 s. A live — or
+ * unreadable and young — lock is honoured.
+ */
+function isStaleLock(lockDir: string): boolean {
+  const pid = readPid(path.join(lockDir, "pid"));
+  if (pid === undefined) return lockAgeMs(lockDir) > LOCK_STALE_MS;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+/**
+ * Remove a stale lock and report whether it is gone. Two processes can see the
+ * same stale lock at once, and a plain remove-then-mkdir lets one of them
+ * delete the lock the other has just re-created. Breaking is therefore
+ * serialised by a short-lived `<lock>.breaker` mkdir. It is held for
+ * microseconds and carries no pid, so one left behind by a crash is recovered
+ * by the same 5 s age rule as any other lock without a pid file.
+ */
+function breakStaleLock(lockDir: string): boolean {
+  const breakDir = `${lockDir}.breaker`;
+  try {
+    fs.mkdirSync(breakDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (lockAgeMs(breakDir) > LOCK_STALE_MS) fs.rmSync(breakDir, { recursive: true, force: true });
+    return false; // another process is breaking it: let it finish
+  }
+  try {
+    if (!isStaleLock(lockDir)) return false;
+    fs.rmSync(lockDir, { recursive: true, force: true });
+    return true;
+  } finally {
+    try {
+      fs.rmSync(breakDir, { recursive: true, force: true });
+    } catch {
+      /* the breaker dir is already gone */
+    }
+  }
+}
+
 function withLock<T>(runDir: string, fn: () => T): T {
-  const lockDir = path.join(runDir, ".lock");
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  const lockDir = path.join(runDir, LOCK_DIR);
+  const pidFile = path.join(lockDir, "pid");
+  const timeout = lockTimeoutMs();
+  const deadline = Date.now() + timeout;
   for (;;) {
     try {
       fs.mkdirSync(lockDir);
+      fs.writeFileSync(pidFile, String(process.pid));
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (isStaleLock(lockDir) && breakStaleLock(lockDir)) {
+        continue; // retry the atomic mkdir immediately
+      }
       if (Date.now() >= deadline) {
-        throw new Error(`Could not acquire ${lockDir} within ${LOCK_TIMEOUT_MS} ms`);
+        throw new Error(`Could not acquire ${lockDir} within ${timeout} ms`);
       }
       sleepSync(LOCK_STEP_MS);
     }
@@ -99,7 +177,12 @@ function withLock<T>(runDir: string, fn: () => T): T {
   try {
     return fn();
   } finally {
-    fs.rmdirSync(lockDir);
+    // Best effort: a failed release must not mask an error thrown by fn.
+    try {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    } catch {
+      /* the lock is already gone */
+    }
   }
 }
 
@@ -231,10 +314,11 @@ export function updateNode(
 export function initRun(runDir: string, dataset: string, interest: string): void {
   fs.mkdirSync(runDir, { recursive: true });
   if (fs.existsSync(path.join(runDir, "node.json"))) throw new Error(`${runDir} is already a run`);
+  // The lock lives in .git, so the repository must exist before it is taken.
+  git(runDir, ["init", "--quiet"]);
   withLock(runDir, () => {
     const info: RunInfo = { dataset, interest };
     fs.writeFileSync(path.join(runDir, "node.json"), JSON.stringify(info, null, 2) + "\n");
-    git(runDir, ["init", "--quiet"]);
     commit(runDir, "ctc", `[P0:init] ${ROOT_ID} — create run`);
   });
 }
