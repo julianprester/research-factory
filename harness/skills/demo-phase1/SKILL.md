@@ -11,7 +11,7 @@ and their briefs are.
 
 1. `tree_list({ phase: 1 })`. If there are no `pattern` nodes, create two under
    `D01`, titled after two top-level folders of the dataset:
-   - read `D01`'s card (`node.json` in the run dir) for the dataset path;
+   - read the run's root `node.json` (in the run dir) for the dataset path;
    - list that folder's top-level directories and take two;
    - `tree_create({ parentId: "D01", title: "<folder>" })` for each.
 2. One worker per node. Write its `brief.md`:

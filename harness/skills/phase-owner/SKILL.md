@@ -23,8 +23,9 @@ under it (groups: `patterns/`, `puzzles/`, `explanations/`, `framings/`,
      writes, never paste history.
    - Dispatch it:
      `subagent({ agent: "ctc-worker", async: true, cwd: "<node dir>", task: "Read brief.md and carry it out." })`
-   - Append the ledger line for the dispatch, then immediately
-     `tree_update({ nodeId: "<id>", status: "active", runId: "<run id from the dispatch receipt>" })`.
+   - Append the ledger line for the dispatch (it names the run id from the
+     dispatch receipt — the ledger is where run ids are kept), then immediately
+     `tree_update({ nodeId: "<id>", status: "active" })`.
 3. When a completion notification arrives, read the node's `handoff.md` and act
    on its status line:
    - `DONE` / `DONE_WITH_CONCERNS` — append the handoff ledger line, then

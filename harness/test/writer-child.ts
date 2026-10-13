@@ -9,5 +9,5 @@ if (!runDir) {
 }
 
 for (let index = 0; index < 10; index++) {
-  createChild(runDir, "D01", `Child ${index}`, { index }, `writer-${process.pid}`);
+  createChild(runDir, "D01", `Child ${index}`, `writer-${process.pid}`);
 }

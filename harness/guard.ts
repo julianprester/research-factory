@@ -8,8 +8,10 @@
 // `patterns/T01-a/puzzles/P01-b/brief.md`, ...).
 import * as path from "node:path";
 
+import { CHILD_DIR } from "./tree.ts";
+
 /** Folders that hold node directories, one per child type in tree.ts. */
-const NODE_DIRS = new Set(["patterns", "puzzles", "explanations", "framings", "papers"]);
+const NODE_DIRS = new Set(Object.values(CHILD_DIR));
 
 /**
  * The path of `absPath` relative to `root`, or undefined when the resolved

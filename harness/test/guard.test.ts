@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -67,10 +68,8 @@ function withOwnerEnv(t: TestContext, runDir: string, phase: number, fn: () => v
   fn();
 }
 
-function eventLineCount(runDir: string): number {
-  return readFileSync(path.join(runDir, "events.jsonl"), "utf8")
-    .split("\n")
-    .filter((line) => line.trim().length > 0).length;
+function commitCount(runDir: string): number {
+  return Number(execFileSync("git", ["-C", runDir, "rev-list", "--count", "HEAD"], { encoding: "utf8" }).trim());
 }
 
 function captureTools(phase: number, runDir: string, t: TestContext): Map<string, CapturedTool> {
@@ -92,7 +91,7 @@ test("workerMayWrite only allows workspace, rounds.md and handoff.md inside the 
 test("worker tool_call guard runs the extension handler against cwd", (t) => {
   const run = makeTempDir(t);
   initRun(run, "data", "work on all-remote platforms");
-  createChild(run, "D01", "Self Presentation", {}, "owner-p1");
+  createChild(run, "D01", "Self Presentation", "owner-p1");
   const nodeDir = findNode(run, "T01").dir;
   assert.ok(nodeDir);
 
@@ -169,10 +168,10 @@ test("ownerMayWrite allows its own phase dir and any node brief", (t) => {
 test("tree_update refuses a node outside the owner's phase and writes nothing", async (t) => {
   const run = makeTempDir(t);
   initRun(run, "data", "work on all-remote platforms");
-  const node = createChild(run, "D01", "Self Presentation", {}, "owner-p1");
+  const node = createChild(run, "D01", "Self Presentation", "owner-p1");
   assert.equal(node.phase, 1);
 
-  const before = eventLineCount(run);
+  const before = commitCount(run);
   assert.equal(before, 2);
 
   const tools = captureTools(2, run, t);
@@ -183,14 +182,14 @@ test("tree_update refuses a node outside the owner's phase and writes nothing", 
     () => update.execute("call-1", { nodeId: "T01", status: "active" }),
     /Not your phase \(node in P1, you own P2\)/,
   );
-  assert.equal(eventLineCount(run), before, "a refused update appends no event");
+  assert.equal(commitCount(run), before, "a refused update makes no commit");
 });
 
 test("tree_create refuses a parent outside the owner's phase", async (t) => {
   const run = makeTempDir(t);
   initRun(run, "data", "work on all-remote platforms");
-  createChild(run, "D01", "Self Presentation", {}, "owner-p1");
-  const before = eventLineCount(run);
+  createChild(run, "D01", "Self Presentation", "owner-p1");
+  const before = commitCount(run);
 
   const tools = captureTools(2, run, t);
   const create = tools.get("tree_create");
@@ -200,7 +199,7 @@ test("tree_create refuses a parent outside the owner's phase", async (t) => {
     () => create.execute("call-1", { parentId: "T01", title: "A Puzzle" }),
     /Not your phase \(node in P1, you own P2\)/,
   );
-  assert.equal(eventLineCount(run), before, "a refused create appends no event");
+  assert.equal(commitCount(run), before, "a refused create makes no commit");
 });
 
 test("tree_create and tree_update work in the owner's own phase", async (t) => {
@@ -213,28 +212,28 @@ test("tree_create and tree_update work in the owner's own phase", async (t) => {
   assert.ok(create && update);
 
   const created = await create.execute("call-1", { parentId: "D01", title: "Self Presentation" });
-  assert.equal(created.content[0].text, "created T01 pattern 1 ready Self Presentation");
-  assert.equal(findNode(run, "T01").node.phase, 1);
+  assert.equal(created.content[0].text, "created T01 pattern 1 ready self-presentation");
+  assert.equal(findNode(run, "T01").phase, 1);
 
   const updated = await update.execute("call-2", { nodeId: "T01", status: "active" });
-  assert.equal(updated.content[0].text, "updated T01 pattern 1 active Self Presentation");
-  assert.equal(findNode(run, "T01").node.status, "active");
+  assert.equal(updated.content[0].text, "updated T01 pattern 1 active self-presentation");
+  assert.equal(findNode(run, "T01").status, "active");
 });
 
 test("tree_list prints compact lines and filters", async (t) => {
   const run = makeTempDir(t);
   initRun(run, "data", "work on all-remote platforms");
-  createChild(run, "D01", "Self Presentation", {}, "owner-p1");
+  createChild(run, "D01", "Self Presentation", "owner-p1");
 
   const tools = captureTools(1, run, t);
   const list = tools.get("tree_list");
   assert.ok(list);
 
   const all = await list.execute("call-1", {});
-  assert.equal(all.content[0].text, "D01 dataset 0 ready data\nT01 pattern 1 ready Self Presentation");
+  assert.equal(all.content[0].text, "D01 dataset 0 - data\nT01 pattern 1 ready self-presentation");
 
   const phase1 = await list.execute("call-2", { phase: 1, status: "ready" });
-  assert.equal(phase1.content[0].text, "T01 pattern 1 ready Self Presentation");
+  assert.equal(phase1.content[0].text, "T01 pattern 1 ready self-presentation");
 
   const none = await list.execute("call-3", { phase: 4 });
   assert.equal(none.content[0].text, "(no nodes)");

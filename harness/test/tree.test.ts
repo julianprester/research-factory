@@ -1,29 +1,12 @@
 import { execFileSync, spawn } from "node:child_process";
 import assert from "node:assert/strict";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import {
-  CHILD_TYPE,
-  PREFIX,
-  createChild,
-  findNode,
-  initRun,
-  listNodes,
-  updateNode,
-  type Node,
-  type NodeRef,
-} from "../tree.ts";
+import { CHILD_TYPE, PREFIX, createChild, findNode, initRun, listNodes, readRun, updateNode } from "../tree.ts";
 
 const WRITER = fileURLToPath(new URL("./writer-child.ts", import.meta.url));
 
@@ -38,26 +21,16 @@ function git(runDir: string, ...args: string[]): string {
 }
 
 function subjects(runDir: string): string[] {
-  return git(runDir, "log", "--format=%s")
-    .split("\n")
-    .filter((line) => line.length > 0);
+  return git(runDir, "log", "--format=%s").split("\n").filter((line) => line.length > 0);
 }
 
-function readNode(runDir: string, relative: string): Node {
-  return JSON.parse(readFileSync(path.join(runDir, relative), "utf8")) as Node;
-}
-
-function refOf(runDir: string, id: string): NodeRef {
-  const found = listNodes(runDir).find((entry) => entry.node.id === id);
-  assert.ok(found, `node ${id} not found`);
-  return found;
+function stored(runDir: string, relative: string): unknown {
+  return JSON.parse(readFileSync(path.join(runDir, relative), "utf8"));
 }
 
 function runWriter(runDir: string): Promise<{ code: number | null; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [WRITER, runDir], {
-      stdio: ["ignore", "ignore", "pipe"],
-    });
+    const child = spawn(process.execPath, [WRITER, runDir], { stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
@@ -75,186 +48,129 @@ test("the constants describe the node tree", () => {
     explanation: "framing",
     framing: "paper",
   });
-  assert.deepEqual(PREFIX, {
-    dataset: "D",
-    pattern: "T",
-    puzzle: "P",
-    explanation: "E",
-    framing: "F",
-    paper: "W",
-  });
+  assert.deepEqual(PREFIX, { dataset: "D", pattern: "T", puzzle: "P", explanation: "E", framing: "F", paper: "W" });
 });
 
-test("initRun creates the root dataset node, owners and one commit", (t) => {
+test("initRun stores only the dataset and interest, and makes one commit", (t) => {
   const run = makeRun(t);
   initRun(run, "data", "work on all-remote platforms");
 
-  const node = readNode(run, "node.json");
-  assert.deepEqual(node, {
-    id: "D01",
-    type: "dataset",
-    phase: 0,
-    status: "ready",
-    parent: null,
-    derivedFrom: [],
-    title: "data",
-    card: { dataset: "data", interest: "work on all-remote platforms" },
-    runIds: [],
-  });
-
-  assert.ok(existsSync(path.join(run, "events.jsonl")));
-  const events = readFileSync(path.join(run, "events.jsonl"), "utf8").trim().split("\n");
-  assert.equal(events.length, 1);
-  const initEvent = JSON.parse(events[0]) as Record<string, unknown>;
-  assert.equal(initEvent.op, "init");
-  assert.equal(initEvent.nodeId, "D01");
-
-  for (let phase = 0; phase <= 5; phase++) {
-    assert.ok(
-      existsSync(path.join(run, "owners", `phase-${phase}`, "ledger.md")),
-      `owners/phase-${phase}/ledger.md missing`,
-    );
-  }
-
-  const commits = subjects(run);
-  assert.equal(commits.length, 1);
-  assert.equal(commits[0], "[P0:init] D01 — create run");
+  assert.deepEqual(stored(run, "node.json"), { dataset: "data", interest: "work on all-remote platforms" });
+  assert.deepEqual(readRun(run), { dataset: "data", interest: "work on all-remote platforms" });
+  assert.deepEqual(readdirSync(run).sort(), [".git", "node.json"], "no event log, no owner folders up front");
+  assert.deepEqual(subjects(run), ["[P0:init] D01 — create run"]);
 });
 
-test("createChild creates T01 under the dataset with the right slug and commit", (t) => {
+test("initRun refuses to overwrite an existing run", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  assert.throws(() => initRun(run, "other", "other"), /already a run/);
+  assert.deepEqual(readRun(run), { dataset: "data", interest: "interest" });
+});
+
+test("createChild stores only phase and status; id, type, parent and title come from the folder", (t) => {
   const run = makeRun(t);
   initRun(run, "data", "interest");
 
-  const node = createChild(run, "D01", "Self Presentation!", {}, "t");
+  const node = createChild(run, "D01", "Self Presentation!", "owner-p1");
+  assert.deepEqual(stored(run, "patterns/T01-self-presentation/node.json"), { phase: 1, status: "ready" });
   assert.equal(node.id, "T01");
   assert.equal(node.type, "pattern");
-  assert.equal(node.phase, 1);
-  assert.equal(node.status, "ready");
+  assert.equal(node.title, "self-presentation");
   assert.equal(node.parent, "D01");
-  assert.deepEqual(node.derivedFrom, []);
-  assert.deepEqual(node.runIds, []);
-
-  const relative = "patterns/T01-self-presentation/node.json";
-  assert.ok(existsSync(path.join(run, relative)));
-  assert.deepEqual(readNode(run, relative), node);
-  assert.equal(refOf(run, "T01").dir, path.join(run, "patterns", "T01-self-presentation"));
+  assert.equal(node.dir, path.join(run, "patterns", "T01-self-presentation"));
 
   assert.equal(subjects(run)[0], "[P1:createChild] T01 — Self Presentation!");
+  assert.equal(git(run, "log", "-1", "--format=%an"), "owner-p1", "the actor is the commit author");
 });
 
 test("the ID counter is per type across the whole run", (t) => {
   const run = makeRun(t);
   initRun(run, "data", "interest");
-
-  createChild(run, "D01", "First", {}, "t");
-  const second = createChild(run, "D01", "Second", {}, "t");
-  assert.equal(second.id, "T02");
-  assert.ok(existsSync(path.join(run, "patterns", "T02-second", "node.json")));
+  createChild(run, "D01", "First", "t");
+  assert.equal(createChild(run, "D01", "Second", "t").id, "T02");
 });
 
-test("createChild under a pattern nests a puzzle and keeps the parent phase", (t) => {
+test("children nest under their parent and keep its phase", (t) => {
   const run = makeRun(t);
   initRun(run, "data", "interest");
-  createChild(run, "D01", "Self Presentation!", {}, "t");
+  createChild(run, "D01", "Self Presentation!", "t");
+  updateNode(run, "T01", { phase: 2 }, "t");
 
-  const puzzle = createChild(run, "T01", "Why?", {}, "t");
+  const puzzle = createChild(run, "T01", "Why?", "t");
   assert.equal(puzzle.id, "P01");
   assert.equal(puzzle.type, "puzzle");
-  assert.equal(puzzle.phase, 1);
   assert.equal(puzzle.parent, "T01");
-  assert.ok(
-    existsSync(
-      path.join(run, "patterns", "T01-self-presentation", "puzzles", "P01-why", "node.json"),
-    ),
-  );
+  assert.equal(puzzle.phase, 2);
+  assert.ok(existsSync(path.join(run, "patterns", "T01-self-presentation", "puzzles", "P01-why", "node.json")));
 });
 
-test("createChild records derivedFrom", (t) => {
+test("derivedFrom is stored only for forks", (t) => {
   const run = makeRun(t);
   initRun(run, "data", "interest");
-  createChild(run, "D01", "First", {}, "t");
+  createChild(run, "D01", "First", "t");
+  createChild(run, "D01", "Fork", "t", ["T01"]);
 
-  const second = createChild(run, "D01", "Fork", {}, "t", ["T01"]);
-  assert.deepEqual(second.derivedFrom, ["T01"]);
-  assert.deepEqual(readNode(run, "patterns/T02-fork/node.json").derivedFrom, ["T01"]);
+  assert.deepEqual(stored(run, "patterns/T02-fork/node.json"), { phase: 1, status: "ready", derivedFrom: ["T01"] });
+  updateNode(run, "T02", { status: "active" }, "t");
+  assert.deepEqual(findNode(run, "T02").derivedFrom, ["T01"], "updates keep derivedFrom");
 });
 
 test("slugs are lowercase, hyphenated, at most 40 characters", (t) => {
   const run = makeRun(t);
   initRun(run, "data", "interest");
 
-  const long = createChild(
-    run,
-    "D01",
-    "  A  Very Long TITLE!!! That Keeps Going And Going  ",
-    {},
-    "t",
-  );
-  const longFolder = path.basename(refOf(run, long.id).dir);
-  assert.match(longFolder, /^T01-[a-z0-9-]+$/);
-  assert.ok(longFolder.slice("T01-".length).length <= 40, longFolder);
-
-  const empty = createChild(run, "D01", "!!!", {}, "t");
-  assert.equal(path.basename(refOf(run, empty.id).dir), "T02-untitled");
-
-  const accented = createChild(run, "D01", "Étude — Café", {}, "t");
-  assert.equal(path.basename(refOf(run, accented.id).dir), "T03-etude-cafe");
+  const long = createChild(run, "D01", "  A  Very Long TITLE!!! That Keeps Going And Going  ", "t");
+  assert.match(path.basename(long.dir), /^T01-[a-z0-9-]+$/);
+  assert.ok(long.title.length <= 40, long.title);
+  assert.equal(path.basename(createChild(run, "D01", "!!!", "t").dir), "T02-untitled");
+  assert.equal(path.basename(createChild(run, "D01", "Étude — Café", "t").dir), "T03-etude-cafe");
 });
 
-test("updateNode patches fields, pushes runId and commits", (t) => {
+test("updateNode changes status and phase, and puts the note in the commit body", (t) => {
   const run = makeRun(t);
   initRun(run, "data", "interest");
-  createChild(run, "D01", "Self Presentation!", {}, "t");
+  createChild(run, "D01", "Self Presentation!", "t");
 
-  const node = updateNode(run, "T01", { status: "active", runId: "r1" }, "t");
-  assert.equal(node.status, "active");
-  assert.deepEqual(node.runIds, ["r1"]);
-  assert.equal(node.phase, 1);
-
-  const stored = readNode(run, "patterns/T01-self-presentation/node.json");
-  assert.equal(stored.status, "active");
-  assert.deepEqual(stored.runIds, ["r1"]);
-
-  assert.match(subjects(run)[0], /^\[P1:updateNode\] T01 —/);
-});
-
-test("updateNode can move a node to the next phase", (t) => {
-  const run = makeRun(t);
-  initRun(run, "data", "interest");
-  createChild(run, "D01", "Self Presentation!", {}, "t");
-
-  const node = updateNode(run, "T01", { phase: 2, note: "handed on" }, "t");
+  const node = updateNode(run, "T01", { status: "submitted", phase: 2 }, "owner-p1", "handed on to phase 2");
+  assert.equal(node.status, "submitted");
   assert.equal(node.phase, 2);
-  assert.equal(node.note, "handed on");
-  assert.equal(readNode(run, "patterns/T01-self-presentation/node.json").phase, 2);
-  assert.match(subjects(run)[0], /^\[P2:updateNode\] T01 —/);
+  assert.deepEqual(stored(run, "patterns/T01-self-presentation/node.json"), { phase: 2, status: "submitted" });
+  assert.equal(subjects(run)[0], "[P2:updateNode] T01 — status submitted, phase 2, note");
+  assert.equal(git(run, "log", "-1", "--format=%b"), "handed on to phase 2");
 });
 
-test("findNode throws for unknown ids", (t) => {
+test("the dataset root cannot be updated", (t) => {
   const run = makeRun(t);
   initRun(run, "data", "interest");
+  assert.throws(() => updateNode(run, "D01", { status: "active" }, "t"), /dataset root/);
+});
 
-  assert.equal(findNode(run, "D01").node.type, "dataset");
+test("findNode throws for unknown ids; the root is D01", (t) => {
+  const run = makeRun(t);
+  initRun(run, "/somewhere/mini-dataset", "interest");
+  const root = findNode(run, "D01");
+  assert.equal(root.type, "dataset");
+  assert.equal(root.title, "mini-dataset");
   assert.throws(() => findNode(run, "X9"), /Unknown node X9/);
 });
 
-test("listNodes walks the tree and skips workspace, .git and owners", (t) => {
+test("listNodes only reads node folders, never workspace, .git or owners", (t) => {
   const run = makeRun(t);
   initRun(run, "data", "interest");
-  createChild(run, "D01", "One", {}, "t");
+  createChild(run, "D01", "One", "t");
 
-  const decoy = path.join(run, "patterns", "T01-one", "workspace", "decoy");
-  mkdirSync(decoy, { recursive: true });
-  writeFileSync(
-    path.join(decoy, "node.json"),
-    JSON.stringify({ id: "HACK", type: "pattern" }),
+  for (const decoy of ["patterns/T01-one/workspace/patterns/T09-decoy", "owners/patterns/T08-decoy", "patterns/not-a-node"]) {
+    mkdirSync(path.join(run, decoy), { recursive: true });
+    writeFileSync(path.join(run, decoy, "node.json"), JSON.stringify({ phase: 1, status: "ready" }));
+  }
+  assert.deepEqual(
+    listNodes(run).map((node) => node.id),
+    ["D01", "T01"],
   );
-
-  const ids = listNodes(run).map((entry) => entry.node.id);
-  assert.deepEqual(ids, ["D01", "T01"]);
 });
 
-test("parallel writers: 20 nodes, 21 consistent events and 21 commits", async (t) => {
+test("parallel writers: 20 nodes and 21 commits, no lost writes", async (t) => {
   const run = makeRun(t);
   initRun(run, "data", "interest");
 
@@ -262,23 +178,8 @@ test("parallel writers: 20 nodes, 21 consistent events and 21 commits", async (t
   assert.equal(first.code, 0, first.stderr);
   assert.equal(second.code, 0, second.stderr);
 
-  const patterns = listNodes(run).filter((entry) => entry.node.type === "pattern");
-  assert.deepEqual(
-    patterns.map((entry) => entry.node.id).sort(),
-    Array.from({ length: 20 }, (_, index) => `T${String(index + 1).padStart(2, "0")}`),
-  );
-
-  const lines = readFileSync(path.join(run, "events.jsonl"), "utf8").trim().split("\n");
-  assert.equal(lines.length, 21);
-  for (const line of lines) {
-    const event = JSON.parse(line) as Record<string, unknown>;
-    assert.equal(typeof event.at, "string");
-    assert.equal(typeof event.op, "string");
-    assert.equal(typeof event.nodeId, "string");
-    assert.equal(typeof event.phase, "number");
-    assert.equal(typeof event.actor, "string");
-    assert.equal(typeof event.data, "object");
-  }
-
+  const ids = listNodes(run).filter((node) => node.type === "pattern").map((node) => node.id).sort();
+  assert.deepEqual(ids, Array.from({ length: 20 }, (_, index) => `T${String(index + 1).padStart(2, "0")}`));
   assert.equal(Number(git(run, "rev-list", "--count", "HEAD")), 21);
+  assert.equal(git(run, "status", "--porcelain"), "", "every write was committed");
 });

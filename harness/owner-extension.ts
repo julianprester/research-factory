@@ -10,7 +10,7 @@ import * as path from "node:path";
 import { Type } from "typebox";
 
 import { ownerMayWrite } from "./guard.ts";
-import { createChild, findNode, listNodes, updateNode, type Node } from "./tree.ts";
+import { createChild, findNode, listNodes, updateNode, type NodeRef } from "./tree.ts";
 
 interface ToolCallEventLike {
   toolName: string;
@@ -29,11 +29,8 @@ const TreeListParams = Type.Object({
 
 const TreeCreateParams = Type.Object({
   parentId: Type.String({ description: "Id of the parent node, e.g. D01 or T01" }),
-  title: Type.String({ description: "Title of the new node" }),
-  card: Type.Optional(
-    Type.Record(Type.String(), Type.Unknown(), { description: "Card fields for the new node" }),
-  ),
-  derivedFrom: Type.Optional(Type.Array(Type.String(), { description: "Ids of nodes this one derives from" })),
+  title: Type.String({ description: "Short title; it becomes the node's folder name" }),
+  derivedFrom: Type.Optional(Type.Array(Type.String(), { description: "For a fork: ids of the nodes it derives from" })),
 });
 
 const TreeUpdateParams = Type.Object({
@@ -42,9 +39,7 @@ const TreeUpdateParams = Type.Object({
   phase: Type.Optional(
     Type.Number({ description: "New phase; moving a node to the next phase hands it on" }),
   ),
-  note: Type.Optional(Type.String({ description: "Note to record on the node" })),
-  card: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Replacement card" })),
-  runId: Type.Optional(Type.String({ description: "Worker run id to push onto the node" })),
+  note: Type.Optional(Type.String({ description: "Why: recorded in the commit message, not on the node" })),
 });
 
 interface TreeListInput {
@@ -55,7 +50,6 @@ interface TreeListInput {
 interface TreeCreateInput {
   parentId: string;
   title: string;
-  card?: Record<string, unknown>;
   derivedFrom?: string[];
 }
 
@@ -64,8 +58,6 @@ interface TreeUpdateInput {
   status?: string;
   phase?: number;
   note?: string;
-  card?: Record<string, unknown>;
-  runId?: string;
 }
 
 function env(name: string): string {
@@ -97,7 +89,7 @@ function result(text: string) {
   return { content: [{ type: "text", text }], details: undefined };
 }
 
-function line(node: Node): string {
+function line(node: NodeRef): string {
   return `${node.id} ${node.type} ${node.phase} ${node.status} ${node.title}`;
 }
 
@@ -109,7 +101,7 @@ export default function ownerExtension(pi: PiLike): void {
       "List the run's research nodes as `id type phase status title` lines, optionally filtered by phase or status.",
     parameters: TreeListParams,
     async execute(_toolCallId: string, params: TreeListInput) {
-      let nodes = listNodes(runDir()).map(({ node }) => node);
+      let nodes = listNodes(runDir());
       if (params.phase !== undefined) nodes = nodes.filter((node) => node.phase === params.phase);
       if (params.status !== undefined) nodes = nodes.filter((node) => node.status === params.status);
       nodes.sort((a, b) => a.id.localeCompare(b.id));
@@ -127,16 +119,9 @@ export default function ownerExtension(pi: PiLike): void {
       const dir = runDir();
       const phase = ownerPhase();
       const parent = findNode(dir, params.parentId);
-      const allowed = parent.node.type === "dataset" ? phase === 1 : parent.node.phase === phase;
-      if (!allowed) throw refuseNotYourPhase(parent.node.phase, phase);
-      const node = createChild(
-        dir,
-        params.parentId,
-        params.title,
-        params.card ?? {},
-        actor(phase),
-        params.derivedFrom ?? [],
-      );
+      const allowed = parent.type === "dataset" ? phase === 1 : parent.phase === phase;
+      if (!allowed) throw refuseNotYourPhase(parent.phase, phase);
+      const node = createChild(dir, params.parentId, params.title, actor(phase), params.derivedFrom ?? []);
       return result(`created ${line(node)}`);
     },
   });
@@ -151,17 +136,8 @@ export default function ownerExtension(pi: PiLike): void {
       const dir = runDir();
       const phase = ownerPhase();
       const found = findNode(dir, params.nodeId);
-      if (found.node.phase !== phase) throw refuseNotYourPhase(found.node.phase, phase);
-
-      const patch: { status?: string; phase?: number; note?: string; card?: Record<string, unknown>; runId?: string } =
-        {};
-      if (params.status !== undefined) patch.status = params.status;
-      if (params.phase !== undefined) patch.phase = params.phase;
-      if (params.note !== undefined) patch.note = params.note;
-      if (params.card !== undefined) patch.card = params.card;
-      if (params.runId !== undefined) patch.runId = params.runId;
-
-      const node = updateNode(dir, params.nodeId, patch, actor(phase));
+      if (found.phase !== phase) throw refuseNotYourPhase(found.phase, phase);
+      const node = updateNode(dir, params.nodeId, { status: params.status, phase: params.phase }, actor(phase), params.note);
       return result(`updated ${line(node)}`);
     },
   });

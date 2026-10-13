@@ -1,43 +1,49 @@
 #!/usr/bin/env bash
-# Launch a phase owner for a run in Herdr.
+# Start a phase owner for a run in Herdr, creating the run first if needed.
 #
-#   harness/run.sh <runDir> <phase> <skillDir>
+#   harness/run.sh <runDir> <phase> <skillDir> [<dataset> "<interest>"]
+#
+# The first time, pass the dataset and research interest: the run folder is
+# created (node harness/init.ts) and then the owner starts. To add another
+# phase's owner to an existing run, leave them out.
 #
 # The run lives in Herdr session `ctc-<basename runDir>` and in the workspace
 # labelled `ctc-<basename runDir>`; an existing workspace is reused. See
 # docs/notes/herdr.md for the verified Herdr commands and JSON paths.
 set -euo pipefail
 
-usage='usage: harness/run.sh <runDir> <phase> <skillDir>'
+usage='usage: harness/run.sh <runDir> <phase> <skillDir> [<dataset> "<interest>"]'
 
-if [ "$#" -ne 3 ]; then
+if [ "$#" -ne 3 ] && [ "$#" -ne 5 ]; then
   echo "$usage" >&2
   exit 2
 fi
 
-if ! run_dir="$(realpath "$1")"; then
-  echo "run.sh: run directory does not exist: $1" >&2
-  exit 1
-fi
 phase="$2"
-if ! skill_dir="$(realpath "$3")"; then
-  echo "run.sh: skill directory does not exist: $3" >&2
-  exit 1
-fi
 if ! [[ "$phase" =~ ^[0-9]+$ ]]; then
   echo "run.sh: phase must be a number, got: $phase" >&2
   exit 2
 fi
-if [ ! -f "$run_dir/node.json" ]; then
-  echo "run.sh: $run_dir is not a run (no node.json); run node harness/init.ts first" >&2
-  exit 1
-fi
-if [ ! -f "$skill_dir/SKILL.md" ]; then
-  echo "run.sh: $skill_dir is not a skill directory (no SKILL.md)" >&2
+if ! skill_dir="$(realpath "$3")" || [ ! -f "$skill_dir/SKILL.md" ]; then
+  echo "run.sh: $3 is not a skill directory (no SKILL.md)" >&2
   exit 1
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ ! -f "$1/node.json" ]; then
+  if [ "$#" -ne 5 ]; then
+    echo "run.sh: $1 is not a run yet; pass <dataset> \"<interest>\" to create it" >&2
+    exit 2
+  fi
+  node "$script_dir/init.ts" "$1" "$4" "$5"
+  echo "created run $1" >&2
+elif [ "$#" -eq 5 ]; then
+  echo "run.sh: $1 is already a run; leave out <dataset> \"<interest>\" to add an owner to it" >&2
+  exit 2
+fi
+run_dir="$(realpath "$1")"
+
 owner_extension="$script_dir/owner-extension.ts"
 phase_owner_skill="$script_dir/skills/phase-owner"
 model="opencode-go/deepseek-v4.1-flash"
