@@ -97,20 +97,20 @@ function headOf(runDir: string): string {
   }).trim();
 }
 
-/** Restart a gone owner by re-running the exact command run.sh recorded. */
-function restart(runDir: string, phase: number): void {
+/** Start a gone owner by re-running the exact command run.sh recorded. */
+function start(runDir: string, phase: number): void {
   const script = path.join(runDir, "owners", `phase-${phase}`, "start.sh");
   const result = spawnSync("bash", [script], { cwd: runDir, encoding: "utf8", timeout: 120_000 });
   if (result.error) {
-    log(phase, "restart", `could not run ${script}: ${result.error.message}`);
+    log(phase, "start", `could not run ${script}: ${result.error.message}`);
     return;
   }
   if (typeof result.status === "number" && result.status !== 0) {
-    log(phase, "restart", `${script} exited ${result.status}`);
+    log(phase, "start", `${script} exited ${result.status}`);
   }
   for (const text of [result.stdout ?? "", result.stderr ?? ""]) {
     for (const line of text.split("\n")) {
-      if (line.trim() !== "") log(phase, "restart", `output: ${line.trim()}`);
+      if (line.trim() !== "") log(phase, "start", `output: ${line.trim()}`);
     }
   }
 }
@@ -132,15 +132,15 @@ function nudge(session: string, phase: number, message: string): void {
 function execute(runDir: string, session: string, action: Action): boolean {
   switch (action.kind) {
     case "done": {
-      const waiting = Object.entries(action.waitingForUnownedPhases)
+      const waiting = Object.entries(action.waitingForUnconfiguredPhases)
         .map(([phase, count]) => `P${phase} (${count} ready)`)
         .join(", ");
-      log("-", "done", waiting === "" ? "run finished" : `run finished; waiting for unowned phases: ${waiting}`);
+      log("-", "done", waiting === "" ? "run finished" : `run finished; waiting for unconfigured phases: ${waiting}`);
       return true;
     }
-    case "restart":
-      log(action.phase, "restart", `owner-p${action.phase} is gone; running owners/phase-${action.phase}/start.sh`);
-      restart(runDir, action.phase);
+    case "start":
+      log(action.phase, "start", `owner-p${action.phase} ${action.reason}; running owners/phase-${action.phase}/start.sh`);
+      start(runDir, action.phase);
       return false;
     case "nudge":
       log(action.phase, "nudge", action.message);
@@ -168,9 +168,11 @@ function tick(runDir: string, session: string, memory: Memory): TickResult {
   }
 
   const head = headOf(runDir);
-  const views = owned.map((phase) => viewPhase(runDir, phase, states.get(phase) ?? "unknown"));
+  const views = owned.map((phase) =>
+    viewPhase(runDir, phase, states.get(phase) ?? "unknown", { configured: true, started: true, entry: false }),
+  );
   const unowned = unownedReady(runDir, owned);
-  const { actions, memory: next } = decide(views, unowned, head, memory);
+  const { actions, memory: next } = decide(views, head, memory);
 
   let done = false;
   for (const action of actions) done = execute(runDir, session, action) || done;
