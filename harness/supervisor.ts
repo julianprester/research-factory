@@ -9,7 +9,8 @@
 // restart a gone owner; nudge an idle/done owner when work is waiting; leave an
 // owner alone while its workers run; stall a phase after three nudges without a
 // new commit; and call the run done before anything else when no owned phase has
-// work and no owner is working.
+// work and no owner is working. Done has to hold on two consecutive ticks, so a
+// just-started, not-yet-prompted owner (idle, empty tree) cannot end the run.
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -29,6 +30,7 @@ export interface Memory {
   head: string;
   nudges: Record<number, number>;
   stalled: number[];
+  doneStreak: number; // consecutive ticks the done condition has held
 }
 
 export type Action =
@@ -59,16 +61,25 @@ export function decide(
   memory: Memory,
 ): { actions: Action[]; memory: Memory } {
   // A new HEAD is a new run of attempts: forget every nudge count and stall.
+  // The done streak survives a HEAD change: a commit does not make a finished
+  // run unfinished, and the owner may commit while the run is quiet.
   const current: Memory =
     head === memory.head
-      ? { head, nudges: { ...memory.nudges }, stalled: [...memory.stalled] }
-      : { head, nudges: {}, stalled: [] };
+      ? { head, nudges: { ...memory.nudges }, stalled: [...memory.stalled], doneStreak: memory.doneStreak }
+      : { head, nudges: {}, stalled: [], doneStreak: memory.doneStreak };
 
   // Done is checked first: a finished run is never nudged, restarted or stalled,
-  // even by an owner that has gone away.
+  // even by an owner that has gone away. It must hold on two consecutive ticks:
+  // `agent start` leaves the owner idle until it is prompted, and one quiet tick
+  // is not a finished run (run.sh starts this loop right after the prompt).
   if (!views.some(hasWork) && !views.some((view) => view.owner === "working")) {
-    return { actions: [{ kind: "done", waitingForUnownedPhases: unowned }], memory: current };
+    current.doneStreak += 1;
+    if (current.doneStreak >= 2) {
+      return { actions: [{ kind: "done", waitingForUnownedPhases: unowned }], memory: current };
+    }
+    return { actions: [], memory: current };
   }
+  current.doneStreak = 0;
 
   const actions: Action[] = [];
   for (const view of views) {

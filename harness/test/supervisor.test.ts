@@ -18,7 +18,7 @@ function view(partial: Partial<PhaseView> & { phase: number }): PhaseView {
 }
 
 function memory(head = "head-1"): Memory {
-  return { head, nudges: {}, stalled: [] };
+  return { head, nudges: {}, stalled: [], doneStreak: 0 };
 }
 
 test("a gone owner is restarted", () => {
@@ -66,7 +66,7 @@ test("blocked and unknown owners are left alone", () => {
 
 test("an owner stalls after three nudges at the same head", () => {
   const phase1 = view({ phase: 1, ready: ["T01"] });
-  let state: Memory = { head: "head-1", nudges: {}, stalled: [] };
+  let state: Memory = { head: "head-1", nudges: {}, stalled: [], doneStreak: 0 };
   for (let call = 1; call <= 3; call++) {
     const result = decide([phase1], {}, "head-1", state);
     assert.equal(result.actions[0]?.kind, "nudge", `call ${call} nudges`);
@@ -83,17 +83,48 @@ test("an owner stalls after three nudges at the same head", () => {
 
   const moved = decide([phase1], {}, "head-2", fifth.memory);
   assert.equal(moved.actions[0]?.kind, "nudge", "a new head starts nudging again");
-  assert.deepEqual(moved.memory, { head: "head-2", nudges: { 1: 1 }, stalled: [] });
+  assert.deepEqual(moved.memory, { head: "head-2", nudges: { 1: 1 }, stalled: [], doneStreak: 0 });
 });
 
-test("the run is done when no owned phase has work", () => {
-  const result = decide([view({ phase: 1 })], { 2: 2 }, "head-1", memory());
-  assert.deepEqual(result.actions, [{ kind: "done", waitingForUnownedPhases: { 2: 2 } }]);
+test("the run is done after two consecutive empty ticks", () => {
+  const empty = view({ phase: 1 });
+  const first = decide([empty], { 2: 2 }, "head-1", memory());
+  assert.deepEqual(first.actions, [], "one empty tick is not enough");
+  assert.equal(first.memory.doneStreak, 1);
+  const second = decide([empty], { 2: 2 }, "head-1", first.memory);
+  assert.deepEqual(second.actions, [{ kind: "done", waitingForUnownedPhases: { 2: 2 } }]);
 });
 
 test("done wins over restart, even for a gone owner", () => {
-  const result = decide([view({ phase: 1, owner: "gone" })], {}, "head-1", memory());
-  assert.deepEqual(result.actions, [{ kind: "done", waitingForUnownedPhases: {} }]);
+  const gone = view({ phase: 1, owner: "gone" });
+  const first = decide([gone], {}, "head-1", memory());
+  assert.deepEqual(first.actions, [], "no done yet, and no restart either");
+  const second = decide([gone], {}, "head-1", first.memory);
+  assert.deepEqual(second.actions, [{ kind: "done", waitingForUnownedPhases: {} }]);
+});
+
+test("an owned phase with no nodes and an idle owner is not done on the first tick", () => {
+  // Regression: run.sh used to start the supervisor before prompting the owner,
+  // so the first tick saw exactly this and ended the run unsupervised.
+  const result = decide([view({ phase: 1, owner: "idle" })], {}, "head-1", memory());
+  assert.deepEqual(result.actions, []);
+  assert.equal(result.memory.doneStreak, 1);
+});
+
+test("work between two empty ticks resets the done streak", () => {
+  const empty = view({ phase: 1 });
+  const first = decide([empty], {}, "head-1", memory());
+  assert.deepEqual(first.actions, []);
+  assert.equal(first.memory.doneStreak, 1);
+
+  const withWork = decide([view({ phase: 1, ready: ["T01"] })], {}, "head-1", first.memory);
+  assert.equal(withWork.actions[0]?.kind, "nudge");
+  assert.equal(withWork.memory.doneStreak, 0, "work resets the streak");
+
+  const third = decide([empty], {}, "head-1", withWork.memory);
+  assert.deepEqual(third.actions, [], "the streak starts over at one");
+  const fourth = decide([empty], {}, "head-1", third.memory);
+  assert.deepEqual(fourth.actions, [{ kind: "done", waitingForUnownedPhases: {} }]);
 });
 
 test("viewPhase splits a phase's nodes into ready, running and finished", (t) => {

@@ -138,7 +138,15 @@ if [ ! -f "$start_script" ] || ! cmp -s <(printf '%s\n' "$start_body") "$start_s
   chmod +x "$start_script"
 fi
 
-# 7. Start the supervisor in its own pane unless one already watches this run.
+# 7. Kick the owner off before the supervisor starts. `agent start` leaves it
+#    idle until prompted, and a supervisor tick that beats the prompt sees an
+#    owned phase with no nodes and an idle owner. The decision logic also
+#    debounces done for one tick; the prompt goes first so the run is moving by
+#    the time the loop's first tick lands.
+herdr_session agent prompt "$owner" \
+  "You own phase $phase of the run in $run_dir. Follow phase-owner and your phase skill. Start now." >/dev/null
+
+# 8. Start the supervisor in its own pane unless one already watches this run.
 #    The command line ends with the run dir, so compare that exact literal
 #    suffix (quoted `case` pattern): a supervisor for …/runs/sup2 must not
 #    hide the one for …/runs/sup, and path metacharacters match literally.
@@ -161,9 +169,5 @@ if ! supervisor_running; then
   sup_pane="$(jq -r '.result.pane.pane_id' <<<"$sup_split")"
   herdr_session pane run "$sup_pane" "node $script_dir/supervise.ts $run_dir" >/dev/null
 fi
-
-# 8. Hand it the kick-off prompt and return without waiting.
-herdr_session agent prompt "$owner" \
-  "You own phase $phase of the run in $run_dir. Follow phase-owner and your phase skill. Start now." >/dev/null
 
 printf 'attach: herdr session attach %s\n' "$run_name"

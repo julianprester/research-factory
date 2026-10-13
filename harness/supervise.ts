@@ -200,7 +200,7 @@ function main(args: string[]): number {
   const interval = tickMs();
   log("-", "start", `supervising ${runDir} every ${interval} ms in session ${session}`);
 
-  let memory: Memory = { head: "", nudges: {}, stalled: [] };
+  let memory: Memory = { head: "", nudges: {}, stalled: [], doneStreak: 0 };
   for (;;) {
     try {
       const result = tick(runDir, session, memory);
