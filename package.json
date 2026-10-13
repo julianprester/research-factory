@@ -1,0 +1,12 @@
+{
+  "name": "scifi-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"harness/test/*.test.ts\""
+  },
+  "dependencies": {
+    "typebox": "1.3.27"
+  }
+}
