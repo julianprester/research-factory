@@ -12,7 +12,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { init, latestRun, parseCommand, resume, runCommand, status, stop, type FactoryDeps } from "../factory.ts";
-import { HARNESS_ROOT, supervisorPid, type Herdr } from "../launch.ts";
+import { HARNESS_ROOT, sessionServerStarter, supervisorPid, type Herdr } from "../launch.ts";
 import { initRun } from "../tree.ts";
 
 type Answer = { ok: boolean; stdout: string };
@@ -29,27 +29,47 @@ function json(value: unknown): string {
   return JSON.stringify(value);
 }
 
+interface FakeOptions {
+  /** When true, `workspace list` fails until the server has been started. */
+  serverDown?: boolean;
+  /** When false, deps.startServer stays undefined (the real default spawn path). */
+  injectStartServer?: boolean;
+}
+
 interface FakeDeps extends FactoryDeps {
   calls: Array<{ session: string; args: string[] }>;
   rootCalls: string[][];
+  /** The sessions passed to the injected startServer, in order. */
+  startCalls: string[];
+  /** Make `workspace list` answer: the fake server coming up. */
+  bringUp(): void;
 }
 
 /**
  * A generic Herdr: one workspace created on demand and reused by label, a
  * single pane split off w1:p1, owners all gone, server stop ok, session delete
- * ok. `states` maps `owner-pN` to an agent_status for `agent get`.
+ * ok. `states` maps `owner-pN` to an agent_status for `agent get`. With
+ * `serverDown` the first `workspace list` fails until the server is started
+ * (by the injected `startServer`, or by bringUp() from a spy on the real one).
  */
-function fakeDeps(states: Record<string, string> = {}): FakeDeps {
+function fakeDeps(states: Record<string, string> = {}, options: FakeOptions = {}): FakeDeps {
   const calls: FakeDeps["calls"] = [];
   const rootCalls: string[][] = [];
+  const startCalls: string[] = [];
   let workspace: string | null = null;
-  return {
+  let serverUp = options.serverDown !== true;
+  const deps: FakeDeps = {
     calls,
     rootCalls,
+    startCalls,
+    bringUp: () => {
+      serverUp = true;
+    },
     herdr: (session) => (args) => {
       calls.push({ session, args });
       const cmd = args.join(" ");
       if (cmd === "workspace list") {
+        if (!serverUp) return fail();
         return workspace === null
           ? ok(json({ result: { workspaces: [] } }))
           : ok(json({ result: { workspaces: [{ label: session, workspace_id: workspace }] } }));
@@ -71,6 +91,33 @@ function fakeDeps(states: Record<string, string> = {}): FakeDeps {
     rootHerdr: (args) => {
       rootCalls.push(args);
       return ok(json({ deleted: true }));
+    },
+  };
+  if (options.serverDown === true && options.injectStartServer !== false) {
+    deps.startServer = (session) => {
+      startCalls.push(session);
+      serverUp = true;
+    };
+  }
+  return deps;
+}
+
+/**
+ * Replace the default detached server start (`sessionServerStarter.start`) with
+ * a spy; `onStart` lets a test fake the server coming up. The spy records the
+ * session a caller would have started.
+ */
+function spyServerStart(onStart?: (session: string) => void): { calls: string[]; restore: () => void } {
+  const original = sessionServerStarter.start;
+  const calls: string[] = [];
+  sessionServerStarter.start = (session: string) => {
+    calls.push(session);
+    onStart?.(session);
+  };
+  return {
+    calls,
+    restore: () => {
+      sessionServerStarter.start = original;
     },
   };
 }
@@ -209,6 +256,52 @@ test("stop records server stop and session delete even with no supervisor", (t) 
   const text = stop(runDir, deps);
   assert.deepEqual(seen, ["scoped server stop", `root session delete ${session}`]);
   assert.match(text, /not running/i);
+});
+
+test("init starts the session when it is down: the injected startServer runs once, then workspace and supervisor", (t) => {
+  const dir = workDir(t);
+  const runDir = path.join(dir, "runs", "fac");
+  const deps = fakeDeps({}, { serverDown: true });
+
+  const text = init({ dataset: DATASET, interest: "work on platforms", runDir }, deps);
+
+  assert.deepEqual(deps.startCalls, ["ctc-fac"], "the injected startServer ran exactly once");
+  assert.ok(text.includes("supervisor started"), text);
+  const creates = deps.calls.filter(({ args }) => args[0] === "workspace" && args[1] === "create");
+  assert.equal(creates.length, 1, "the workspace was created once the server answered");
+  const supervisorRun = deps.calls.find(({ args }) => args[0] === "pane" && args[1] === "run");
+  assert.ok(supervisorRun, "the supervisor pane run was recorded");
+  assert.ok(supervisorRun.args[3].includes(SUPERVISE), supervisorRun.args[3]);
+});
+
+test("init uses the real detached server start when deps injects no startServer", (t) => {
+  const dir = workDir(t);
+  const runDir = path.join(dir, "runs", "fac");
+  const deps = fakeDeps({}, { serverDown: true, injectStartServer: false });
+  const spy = spyServerStart(() => deps.bringUp());
+  t.after(() => spy.restore());
+
+  const text = init({ dataset: DATASET, interest: "work on platforms", runDir }, deps);
+
+  assert.deepEqual(spy.calls, ["ctc-fac"], "the default startServer path ran exactly once");
+  assert.ok(text.includes("supervisor started"), text);
+  const creates = deps.calls.filter(({ args }) => args[0] === "workspace" && args[1] === "create");
+  assert.equal(creates.length, 1, "the workspace was created after the default start came up");
+  const supervisorRun = deps.calls.find(({ args }) => args[0] === "pane" && args[1] === "run");
+  assert.ok(supervisorRun, "the supervisor pane run was recorded");
+});
+
+test("resume starts the session server after a stop", (t) => {
+  const dir = workDir(t);
+  const runDir = makeRun(dir);
+  const deps = fakeDeps({}, { serverDown: true });
+
+  const text = resume(runDir, deps);
+
+  assert.deepEqual(deps.startCalls, [`ctc-${path.basename(runDir)}`], "the injected startServer ran once");
+  assert.ok(text.includes("supervisor started"), text);
+  const supervisorRun = deps.calls.find(({ args }) => args[0] === "pane" && args[1] === "run");
+  assert.ok(supervisorRun, "the supervisor pane run was recorded");
 });
 
 test("resume refuses while a supervisor runs and starts one when it does not", async (t) => {

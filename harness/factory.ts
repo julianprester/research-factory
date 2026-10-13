@@ -126,9 +126,15 @@ function resolveRun(runDir: string | undefined, deps: FactoryDeps): string {
   return dir;
 }
 
-/** ensureSession with the deps' startServer; the workspace id is not needed. */
+/**
+ * Bring the run's session up (init and resume only). An injected startServer is
+ * used when present; otherwise `ensureSession`'s default detached
+ * `herdr --session S server` spawn runs. The supervisor and the owners it
+ * starts never come through here.
+ */
 function openSession(runDir: string, session: string, deps: FactoryDeps): void {
-  ensureSession(runDir, deps.herdr(session), () => deps.startServer?.(session));
+  const start = deps.startServer;
+  ensureSession(runDir, deps.herdr(session), start === undefined ? undefined : () => start(session));
 }
 
 /** Start the supervisor, reporting a pane failure instead of throwing. */

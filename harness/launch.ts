@@ -67,7 +67,7 @@ function parseJson(stdout: string): unknown {
 }
 
 /** `.result.workspaces[]` → the first workspace_id whose label matches. */
-function findWorkspace(stdout: string, label: string): string | null {
+function labelledWorkspace(stdout: string, label: string): string | null {
   const parsed = parseJson(stdout) as {
     result?: { workspaces?: Array<{ label?: unknown; workspace_id?: unknown }> };
   } | null;
@@ -89,27 +89,50 @@ function paneId(stdout: string, where: "panes" | "pane"): string | null {
 }
 
 /**
- * The run's Herdr workspace, started and created if needed. If `workspace list`
- * fails the named session has no server (verified 0.9.3), so startServer (by
- * default `herdr --session S server` detached) is called and `workspace list`
- * is polled every 200 ms up to 20 s. Then the workspace labelled sessionName is
- * reused, or created with the run dir and CTC_RUN_DIR. Port of run.sh steps 2-3.
+ * The run's existing workspace id: one `workspace list`, and `null` when the
+ * session server does not answer or no workspace carries the run's label. It
+ * never starts a server and never creates anything, so `startOwner` and
+ * `startSupervisor` can use it without a session of their own: only init and
+ * resume may bring a session up.
+ */
+export function findWorkspace(runDir: string, herdr: Herdr): string | null {
+  const list = herdr(["workspace", "list"]);
+  return list.ok ? labelledWorkspace(list.stdout, sessionName(path.resolve(runDir))) : null;
+}
+
+/**
+ * The one place a Herdr session server is started: a detached
+ * `herdr --session <session> server`, stdio ignored and unref'd. It is
+ * `ensureSession`'s default when no `startServer` is injected; `findWorkspace`,
+ * `startOwner` and `startSupervisor` never call it. Exported as an object so
+ * tests can replace `start` with a spy and prove no server is ever started.
+ */
+export const sessionServerStarter = {
+  start(session: string): void {
+    const child = spawn("herdr", ["--session", session, "server"], { detached: true, stdio: "ignore" });
+    // A missing herdr binary emits 'error'; without this listener it would be
+    // an uncaught exception. The workspace-list poll in ensureSession turns the
+    // missing server into "Herdr session <name> did not start" instead.
+    child.on("error", () => {
+      /* the poll reports it */
+    });
+    child.unref();
+  },
+};
+
+/**
+ * The run's Herdr workspace, started and created if needed. **Init and resume
+ * only** — the supervisor must never call this (it uses `findWorkspace`). If
+ * `workspace list` fails the named session has no server (verified 0.9.3), so
+ * startServer (by default the detached `sessionServerStarter`) is called and
+ * `workspace list` is polled every 200 ms up to 20 s. Then the workspace
+ * labelled sessionName is reused, or created with the run dir and CTC_RUN_DIR.
+ * Port of run.sh steps 2-3.
  */
 export function ensureSession(runDir: string, herdr: Herdr, startServer?: () => void): string {
   const dir = path.resolve(runDir);
   const name = sessionName(dir);
-  const server =
-    startServer ??
-    (() => {
-      const child = spawn("herdr", ["--session", name, "server"], { detached: true, stdio: "ignore" });
-      // A missing herdr binary emits 'error'; without this listener it would be
-      // an uncaught exception. The workspace-list poll below turns the missing
-      // server into "Herdr session <name> did not start" instead.
-      child.on("error", () => {
-        /* the poll reports it */
-      });
-      child.unref();
-    });
+  const server = startServer ?? (() => sessionServerStarter.start(name));
 
   let list = herdr(["workspace", "list"]);
   if (!list.ok) {
@@ -122,7 +145,7 @@ export function ensureSession(runDir: string, herdr: Herdr, startServer?: () => 
     if (!list.ok) throw new Error(`Herdr session ${name} did not start`);
   }
 
-  const existing = findWorkspace(list.stdout, name);
+  const existing = labelledWorkspace(list.stdout, name);
   if (existing !== null) return existing;
 
   const created = herdr([
@@ -184,7 +207,11 @@ function kickOff(runDir: string, phase: number): string {
  * Start the phase's owner, or refuse when one is alive. The `agent get` guard
  * comes before any pane is split or agent started (Plan Review Focus 2), so a
  * duplicate start leaves the session untouched: an owner that is not `gone`
- * means `already-running`. Any failing step is `failed` and stops the launch.
+ * means `already-running`. Only an existing session workspace is used
+ * (`findWorkspace`): the supervisor runs inside the session that init/resume
+ * started and must never bring a server up itself, so a missing workspace is
+ * `failed` at once. A failure after the pane split closes that pane, so the
+ * next tick does not split another one beside a discarded one.
  */
 export function startOwner(
   runDir: string,
@@ -198,12 +225,25 @@ export function startOwner(
   const skill = cfg.phases[String(phase)];
   if (typeof skill !== "string" || skill === "") return "failed";
 
-  try {
-    const workspace = ensureSession(dir, herdr);
-    const pane = splitPane(herdr, workspace, dir);
-    if (pane === null) return "failed";
+  const workspace = findWorkspace(dir, herdr);
+  if (workspace === null) return "failed";
 
-    if (!herdr(["pane", "run", pane, `export CTC_PHASE=${phase}`]).ok) return "failed";
+  const pane = splitPane(herdr, workspace, dir);
+  if (pane === null) return "failed";
+
+  const closePane = (): void => {
+    try {
+      herdr(["pane", "close", pane]);
+    } catch {
+      /* the pane is already gone */
+    }
+  };
+
+  try {
+    if (!herdr(["pane", "run", pane, `export CTC_PHASE=${phase}`]).ok) {
+      closePane();
+      return "failed";
+    }
 
     const started = herdr([
       "agent",
@@ -223,11 +263,18 @@ export function startOwner(
       "--skill",
       path.join(HARNESS_ROOT, skill),
     ]);
-    if (!started.ok) return "failed";
+    if (!started.ok) {
+      closePane();
+      return "failed";
+    }
 
-    if (!herdr(["agent", "prompt", `owner-p${phase}`, kickOff(dir, phase)]).ok) return "failed";
+    if (!herdr(["agent", "prompt", `owner-p${phase}`, kickOff(dir, phase)]).ok) {
+      closePane();
+      return "failed";
+    }
     return "started";
   } catch {
+    closePane();
     return "failed";
   }
 }
@@ -289,7 +336,10 @@ export function startSupervisor(runDir: string, herdr: Herdr): "started" | "alre
   const dir = path.resolve(runDir);
   if (supervisorPid(dir) !== null) return "already-running";
 
-  const workspace = ensureSession(dir, herdr);
+  const workspace = findWorkspace(dir, herdr);
+  if (workspace === null) {
+    throw new Error(`no Herdr workspace ${sessionName(dir)}; start the session with init or resume first`);
+  }
   const pane = splitPane(herdr, workspace, dir);
   if (pane === null) throw new Error(`could not split a pane for the supervisor in Herdr workspace ${workspace}`);
 

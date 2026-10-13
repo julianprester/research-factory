@@ -13,10 +13,12 @@ import test, { type TestContext } from "node:test";
 import {
   HARNESS_ROOT,
   ensureSession,
+  findWorkspace,
   nudgeOwner,
   ownerState,
   readConfig,
   sessionName,
+  sessionServerStarter,
   startOwner,
   startSupervisor,
   supervisorPid,
@@ -50,6 +52,27 @@ function fakeHerdr(answer: (args: string[]) => Answer): FakeHerdr {
     herdr: (args) => {
       calls.push(args);
       return answer(args);
+    },
+  };
+}
+
+/**
+ * Replace the default detached server start (`sessionServerStarter.start`) with
+ * a spy. Tests use this to prove that `startOwner` / `startSupervisor` never
+ * bring a session up: the spy records the session a buggy caller would start
+ * and does nothing else.
+ */
+function spyServerStart(onStart?: (session: string) => void): { calls: string[]; restore: () => void } {
+  const original = sessionServerStarter.start;
+  const calls: string[] = [];
+  sessionServerStarter.start = (session: string) => {
+    calls.push(session);
+    onStart?.(session);
+  };
+  return {
+    calls,
+    restore: () => {
+      sessionServerStarter.start = original;
     },
   };
 }
@@ -143,7 +166,58 @@ test("startOwner starts a gone owner: split, export CTC_PHASE, agent start, prom
   ]);
 });
 
-test("startOwner reports failed when agent start fails and sends no prompt", () => {
+test("findWorkspace reads only the labelled workspace and never starts a server", () => {
+  const { herdr, calls } = fakeHerdr((args) => {
+    if (args.join(" ") === "workspace list") {
+      return ok(
+        json({
+          result: {
+            workspaces: [
+              { label: "other", workspace_id: "w9" },
+              { label: SESSION, workspace_id: "w7" },
+            ],
+          },
+        }),
+      );
+    }
+    throw new Error(`unexpected herdr call: ${args.join(" ")}`);
+  });
+  assert.equal(findWorkspace(RUN_DIR, herdr), "w7");
+  assert.deepEqual(calls, [["workspace", "list"]], "one list, nothing else");
+
+  const down = fakeHerdr(() => fail("server_not_running"));
+  assert.equal(findWorkspace(RUN_DIR, down.herdr), null, "a server that does not answer is null");
+  assert.deepEqual(down.calls, [["workspace", "list"]]);
+
+  const unlabelled = fakeHerdr(() => ok(json({ result: { workspaces: [{ label: "other", workspace_id: "w9" }] } })));
+  assert.equal(findWorkspace(RUN_DIR, unlabelled.herdr), null, "a server without the label is null");
+});
+
+test("startOwner fails fast when no session answers and never starts a server", () => {
+  const { herdr, calls } = fakeHerdr((args) => {
+    const cmd = args.join(" ");
+    if (cmd === "agent get owner-p1") return fail();
+    if (cmd === "workspace list") return fail("server_not_running");
+    throw new Error(`unexpected herdr call: ${cmd}`);
+  });
+
+  const spy = spyServerStart();
+  const before = Date.now();
+  let result: string;
+  try {
+    result = startOwner(RUN_DIR, 1, CONFIG, herdr);
+  } finally {
+    spy.restore();
+  }
+  const elapsed = Date.now() - before;
+
+  assert.equal(result, "failed");
+  assert.ok(elapsed < 5000, `no 20 s session poll (took ${elapsed} ms)`);
+  assert.deepEqual(spy.calls, [], "startOwner never starts a session server");
+  assert.deepEqual(calls, [["agent", "get", "owner-p1"], ["workspace", "list"]], "no pane split and no agent start");
+});
+
+test("startOwner reports failed when agent start fails, sends no prompt and closes the pane", () => {
   const { herdr, calls } = fakeHerdr((args) => {
     const cmd = args.join(" ");
     if (cmd === "agent get owner-p1") return fail();
@@ -152,12 +226,34 @@ test("startOwner reports failed when agent start fails and sends no prompt", () 
     if (args[0] === "pane" && args[1] === "split") return ok(json({ result: { pane: { pane_id: "w1:p2" } } }));
     if (args[0] === "pane" && args[1] === "run") return ok(json({ result: { type: "ok" } }));
     if (args[0] === "agent" && args[1] === "start") return fail("pi: model not found");
+    if (args[0] === "pane" && args[1] === "close") return ok(json({ result: { type: "ok" } }));
     if (args[0] === "agent" && args[1] === "prompt") throw new Error("a failed start must not prompt the owner");
     throw new Error(`unexpected herdr call: ${cmd}`);
   });
 
   assert.equal(startOwner(RUN_DIR, 1, CONFIG, herdr), "failed");
-  assert.deepEqual(calls.at(-1)?.slice(0, 2), ["agent", "start"], "the failed start is the last call");
+  assert.ok(
+    !calls.some((args) => args[0] === "agent" && args[1] === "prompt"),
+    "the failed start must not prompt the owner",
+  );
+  assert.deepEqual(calls.at(-1), ["pane", "close", "w1:p2"], "the split pane is closed again");
+});
+
+test("startOwner closes the split pane when the pane run fails", () => {
+  const { herdr, calls } = fakeHerdr((args) => {
+    const cmd = args.join(" ");
+    if (cmd === "agent get owner-p1") return fail();
+    if (cmd === "workspace list") return ok(json({ result: { workspaces: [{ label: SESSION, workspace_id: "w1" }] } }));
+    if (cmd === "pane list --workspace w1") return ok(json({ result: { panes: [{ pane_id: "w1:p1" }] } }));
+    if (args[0] === "pane" && args[1] === "split") return ok(json({ result: { pane: { pane_id: "w1:p2" } } }));
+    if (args[0] === "pane" && args[1] === "run") return fail("no such pane");
+    if (args[0] === "pane" && args[1] === "close") return ok(json({ result: { type: "ok" } }));
+    if (args[0] === "agent") throw new Error("a failed pane run must not touch agents");
+    throw new Error(`unexpected herdr call: ${cmd}`);
+  });
+
+  assert.equal(startOwner(RUN_DIR, 1, CONFIG, herdr), "failed");
+  assert.deepEqual(calls.at(-1), ["pane", "close", "w1:p2"]);
 });
 
 test("nudgeOwner prompts the owner and reports success or failure", () => {
@@ -272,6 +368,19 @@ test("startSupervisor splits a pane and runs the quoted supervisor command", () 
     ],
     ["pane", "run", "w1:p4", `'node' '${SUPERVISE}' '${runDir}'`],
   ]);
+});
+
+test("startSupervisor fails fast when no workspace exists and never starts a server", () => {
+  const runDir = path.resolve(tmpdir(), "ctc-launch-supervisor-down");
+  const { herdr, calls } = fakeHerdr(() => fail("server_not_running"));
+  const spy = spyServerStart();
+  try {
+    assert.throws(() => startSupervisor(runDir, herdr), /workspace/);
+  } finally {
+    spy.restore();
+  }
+  assert.deepEqual(spy.calls, [], "startSupervisor never starts a session server");
+  assert.deepEqual(calls, [["workspace", "list"]], "no pane split and no pane run");
 });
 
 test("readConfig reads the model and the phases", (t) => {
