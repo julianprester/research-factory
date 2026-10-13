@@ -51,6 +51,18 @@ model="opencode-go/deepseek-v4.1-flash"
 run_name="ctc-$(basename "$run_dir")"
 owner="owner-p$phase"
 
+# 1. Refuse to start a second owner for a phase that is already running. This
+#    comes before any pane is split or any agent started, so a duplicate run
+#    leaves the session untouched. `agent get` exits non-zero when the agent is
+#    gone, and that is the only state in which an owner may be started again.
+if agent_json="$(herdr --session "$run_name" agent get "$owner" 2>/dev/null)"; then
+  agent_status="$(jq -r '.result.agent.agent_status // empty' <<<"$agent_json" 2>/dev/null || true)"
+  if [ -n "$agent_status" ] && [ "$agent_status" != "gone" ]; then
+    echo "$owner is already running" >&2
+    exit 1
+  fi
+fi
+
 # Run one herdr command against this run's named session; print stderr and stop
 # on failure so a broken step is never mistaken for success.
 herdr_session() {
@@ -67,7 +79,7 @@ session_running() {
     jq -e --arg s "$run_name" '.sessions[]? | select(.name == $s and .running)' >/dev/null 2>&1
 }
 
-# 1. A named Herdr session does not start its own server (verified 0.9.3:
+# 2. A named Herdr session does not start its own server (verified 0.9.3:
 #    `herdr --session X workspace list` fails with server_not_running).
 if ! session_running; then
   echo "starting Herdr session $run_name" >&2
@@ -93,7 +105,7 @@ else
   echo "reusing Herdr workspace $ws_id" >&2
 fi
 
-# 2. A workspace --env does not reach split panes (verified 0.9.3), so the
+# 3. A workspace --env does not reach split panes (verified 0.9.3), so the
 #    split carries CTC_RUN_DIR itself.
 anchor="$(herdr_session pane list --workspace "$ws_id" | jq -r '.result.panes[0].pane_id')"
 if [ -z "$anchor" ] || [ "$anchor" = "null" ]; then
@@ -104,17 +116,39 @@ split="$(herdr_session pane split --pane "$anchor" --direction right --cwd "$run
   --env "CTC_RUN_DIR=$run_dir" --no-focus)"
 pane="$(jq -r '.result.pane.pane_id' <<<"$split")"
 
-# 3. Set the phase in the shell the owner will start from.
+# 4. Set the phase in the shell the owner will start from.
 herdr_session pane run "$pane" "export CTC_PHASE=$phase" >/dev/null
 
-# 4. Start the owner. It reads CTC_RUN_DIR/CTC_PHASE from the pane's env.
+# 5. Start the owner. It reads CTC_RUN_DIR/CTC_PHASE from the pane's env.
 herdr_session agent start "$owner" --kind pi --pane "$pane" -- \
   --model "$model" \
   --extension "$owner_extension" \
   --skill "$phase_owner_skill" \
   --skill "$skill_dir" >/dev/null
 
-# 5. Hand it the kick-off prompt and return without waiting.
+# 6. Record the exact command that starts this phase again, so the supervisor
+#    can restart a gone owner. The file belongs to the run (the owner may write
+#    into owners/phase-N too) and is committed with the next tree change.
+start_script="$run_dir/owners/phase-$phase/start.sh"
+start_body="#!/usr/bin/env bash
+exec \"$script_dir/run.sh\" \"$run_dir\" $phase \"$skill_dir\""
+mkdir -p "$run_dir/owners/phase-$phase"
+if [ ! -f "$start_script" ] || ! cmp -s <(printf '%s\n' "$start_body") "$start_script"; then
+  printf '%s\n' "$start_body" > "$start_script"
+  chmod +x "$start_script"
+fi
+
+# 7. Start the supervisor in its own pane unless one already watches this run.
+#    pgrep exits 1 when nothing matches, which `if` handles under `set -e`.
+#    The split carries CTC_RUN_DIR because a workspace --env does not reach it.
+if ! pgrep -f "supervise.ts $run_dir" >/dev/null 2>&1; then
+  sup_split="$(herdr_session pane split --pane "$anchor" --direction right --cwd "$run_dir" \
+    --env "CTC_RUN_DIR=$run_dir" --no-focus)"
+  sup_pane="$(jq -r '.result.pane.pane_id' <<<"$sup_split")"
+  herdr_session pane run "$sup_pane" "node $script_dir/supervise.ts $run_dir" >/dev/null
+fi
+
+# 8. Hand it the kick-off prompt and return without waiting.
 herdr_session agent prompt "$owner" \
   "You own phase $phase of the run in $run_dir. Follow phase-owner and your phase skill. Start now." >/dev/null
 
