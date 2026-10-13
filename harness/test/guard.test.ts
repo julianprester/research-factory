@@ -6,6 +6,7 @@ import test, { type TestContext } from "node:test";
 
 import { ownerMayWrite, workerMayWrite } from "../guard.ts";
 import ownerExtension from "../owner-extension.ts";
+import workerExtension from "../worker-extension.ts";
 import { createChild, findNode, initRun } from "../tree.ts";
 
 interface CapturedTool {
@@ -86,6 +87,70 @@ test("workerMayWrite only allows workspace, rounds.md and handoff.md inside the 
   assert.equal(workerMayWrite(node, path.join(node, "node.json")), false);
   assert.equal(workerMayWrite(node, path.join(node, "..", "T02-x", "workspace", "a")), false);
   assert.equal(workerMayWrite(node, path.join(node, "workspace", "..", "..", "x")), false);
+});
+
+test("worker tool_call guard runs the extension handler against cwd", (t) => {
+  const run = makeTempDir(t);
+  initRun(run, "data", "work on all-remote platforms");
+  createChild(run, "D01", "Self Presentation", {}, "owner-p1");
+  const nodeDir = findNode(run, "T01").dir;
+  assert.ok(nodeDir);
+
+  const handlers = new Map<string, ToolCallHandler>();
+  workerExtension({
+    registerTool() {},
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+  });
+  const guard = handlers.get("tool_call");
+  assert.ok(guard, "the worker registers a tool_call handler");
+
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+  process.chdir(nodeDir);
+
+  assert.equal(
+    guard({
+      type: "tool_call",
+      toolCallId: "call-1",
+      toolName: "write",
+      input: { path: "workspace/x.csv" },
+    }),
+    undefined,
+    "a write inside the node's workspace is allowed",
+  );
+  assert.equal(
+    guard({ type: "tool_call", toolCallId: "call-2", toolName: "edit", input: { path: "handoff.md" } }),
+    undefined,
+    "an edit of handoff.md is allowed",
+  );
+  assert.equal(
+    guard({ type: "tool_call", toolCallId: "call-3", toolName: "write", input: { path: "node.json" } })?.block,
+    true,
+    "a write to node.json is blocked",
+  );
+  assert.equal(
+    guard({
+      type: "tool_call",
+      toolCallId: "call-4",
+      toolName: "write",
+      input: { path: "../T02-x/workspace/a" },
+    })?.block,
+    true,
+    "a write outside the node is blocked",
+  );
+  const noPath = guard({ type: "tool_call", toolCallId: "call-5", toolName: "write" });
+  assert.equal(noPath?.block, true, "a write without a path is blocked");
+  assert.ok(typeof noPath?.reason === "string" && noPath.reason.length > 0);
+
+  const outside = makeTempDir(t);
+  process.chdir(outside);
+  assert.equal(
+    guard({ type: "tool_call", toolCallId: "call-6", toolName: "write", input: { path: "workspace/x.csv" } })?.block,
+    true,
+    "a write from outside any node is blocked",
+  );
 });
 
 test("ownerMayWrite allows its own phase dir and any node brief", (t) => {

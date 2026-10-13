@@ -169,7 +169,9 @@ export default function ownerExtension(pi: PiLike): void {
   pi.on("tool_call", (event) => {
     if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
     const filePath = event.input?.path;
-    if (typeof filePath !== "string" || filePath.length === 0) return undefined;
+    if (typeof filePath !== "string" || filePath.length === 0) {
+      return { block: true, reason: "owner-extension: write/edit without a path is not allowed" };
+    }
 
     let allowed = false;
     let reason = "The owner extension has no CTC_RUN_DIR/CTC_PHASE to check against";

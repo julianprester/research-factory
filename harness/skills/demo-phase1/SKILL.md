@@ -22,7 +22,7 @@ and their briefs are.
    - **Definition of Done:** `workspace/counts.csv` has a header
      `folder,files`, one row per immediate subfolder of the input with the
      number of files anywhere under it, and a final `.,<total>` row; every file
-     under the input is counted; `handoff.md` ends with `Status: DONE`.
+     under the input is counted; the first line of `handoff.md` is `Status: DONE`.
 3. Dispatch each worker exactly as phase-owner says, with `cwd` set to the
    node folder.
 4. On `DONE`, append the handoff ledger line and then `tree_update` the node to

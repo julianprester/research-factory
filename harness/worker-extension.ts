@@ -35,7 +35,9 @@ export default function workerExtension(pi: PiLike): void {
   pi.on("tool_call", (event) => {
     if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
     const filePath = event.input?.path;
-    if (typeof filePath !== "string" || filePath.length === 0) return undefined;
+    if (typeof filePath !== "string" || filePath.length === 0) {
+      return { block: true, reason: "worker-extension: write/edit without a path is not allowed" };
+    }
 
     const nodeDir = findNodeDir(process.cwd());
     if (nodeDir === undefined) {
