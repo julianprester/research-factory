@@ -1,1 +1,1 @@
-../../harness/research-factory-extension.ts
+export { default } from "../../harness/research-factory-extension.ts";
