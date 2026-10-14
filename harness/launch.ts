@@ -25,6 +25,8 @@ export interface RunConfig {
 }
 
 const OWNER_STATES: readonly OwnerState[] = ["idle", "working", "blocked", "done", "unknown"];
+/** Canonical phase keys: non-negative integers without leading zeros. */
+const PHASE_KEY = /^(0|[1-9]\d*)$/;
 const HERDR_TIMEOUT_MS = 30_000;
 const SESSION_POLL_MS = 200;
 const SESSION_POLL_LIMIT = 100; // 20 s, as run.sh's 100 x 0.2 s
@@ -199,6 +201,15 @@ function splitPane(herdr: Herdr, workspace: string, dir: string): string | null 
   return split.ok ? paneId(split.stdout, "pane") : null;
 }
 
+/** Close a pane that was split but could not be used; a failed close is ignored. */
+function closePane(herdr: Herdr, pane: string): void {
+  try {
+    herdr(["pane", "close", pane]);
+  } catch {
+    /* the pane is already gone */
+  }
+}
+
 function kickOff(runDir: string, phase: number): string {
   return `You own phase ${phase} of the run in ${runDir}. Follow phase-owner and your phase skill. Start now.`;
 }
@@ -231,17 +242,9 @@ export function startOwner(
   const pane = splitPane(herdr, workspace, dir);
   if (pane === null) return "failed";
 
-  const closePane = (): void => {
-    try {
-      herdr(["pane", "close", pane]);
-    } catch {
-      /* the pane is already gone */
-    }
-  };
-
   try {
     if (!herdr(["pane", "run", pane, `export CTC_PHASE=${phase}`]).ok) {
-      closePane();
+      closePane(herdr, pane);
       return "failed";
     }
 
@@ -264,17 +267,17 @@ export function startOwner(
       path.join(HARNESS_ROOT, skill),
     ]);
     if (!started.ok) {
-      closePane();
+      closePane(herdr, pane);
       return "failed";
     }
 
     if (!herdr(["agent", "prompt", `owner-p${phase}`, kickOff(dir, phase)]).ok) {
-      closePane();
+      closePane(herdr, pane);
       return "failed";
     }
     return "started";
   } catch {
-    closePane();
+    closePane(herdr, pane);
     return "failed";
   }
 }
@@ -345,6 +348,7 @@ export function startSupervisor(runDir: string, herdr: Herdr): "started" | "alre
 
   const command = `${shellQuote("node")} ${shellQuote(path.join(HARNESS_ROOT, "harness", "supervise.ts"))} ${shellQuote(dir)}`;
   if (!herdr(["pane", "run", pane, command]).ok) {
+    closePane(herdr, pane);
     throw new Error(`could not run the supervisor in Herdr pane ${pane}`);
   }
   return "started";
@@ -383,6 +387,9 @@ export function readConfig(runDir: string): RunConfig {
 
   const skills: Record<string, string> = {};
   for (const [phase, skill] of Object.entries(phases as Record<string, unknown>)) {
+    if (!PHASE_KEY.test(phase)) {
+      throw new Error(`${file}: phase key "${phase}" must be a whole number like "1"`);
+    }
     if (typeof skill !== "string" || skill === "") throw new Error(`${file}: phase ${phase} needs a skill path (a string)`);
     skills[phase] = skill;
   }

@@ -370,6 +370,24 @@ test("startSupervisor splits a pane and runs the quoted supervisor command", () 
   ]);
 });
 
+test("startSupervisor closes the split pane when the pane run fails", () => {
+  const runDir = path.resolve(tmpdir(), "ctc-launch-supervisor-runfail");
+  const { herdr, calls } = fakeHerdr((args) => {
+    const cmd = args.join(" ");
+    if (cmd === "workspace list") {
+      return ok(json({ result: { workspaces: [{ label: `ctc-${path.basename(runDir)}`, workspace_id: "w1" }] } }));
+    }
+    if (cmd === "pane list --workspace w1") return ok(json({ result: { panes: [{ pane_id: "w1:p1" }] } }));
+    if (args[0] === "pane" && args[1] === "split") return ok(json({ result: { pane: { pane_id: "w1:p4" } } }));
+    if (args[0] === "pane" && args[1] === "run") return fail("no such pane");
+    if (args[0] === "pane" && args[1] === "close") return ok(json({ result: { type: "ok" } }));
+    throw new Error(`unexpected herdr call: ${cmd}`);
+  });
+
+  assert.throws(() => startSupervisor(runDir, herdr), /could not run the supervisor/);
+  assert.deepEqual(calls.at(-1), ["pane", "close", "w1:p4"], "the split pane is closed again");
+});
+
 test("startSupervisor fails fast when no workspace exists and never starts a server", () => {
   const runDir = path.resolve(tmpdir(), "ctc-launch-supervisor-down");
   const { herdr, calls } = fakeHerdr(() => fail("server_not_running"));
@@ -381,6 +399,29 @@ test("startSupervisor fails fast when no workspace exists and never starts a ser
   }
   assert.deepEqual(spy.calls, [], "startSupervisor never starts a session server");
   assert.deepEqual(calls, [["workspace", "list"]], "no pane split and no pane run");
+});
+
+test("readConfig rejects non-canonical phase keys and names the bad key", (t) => {
+  for (const key of ["01", "one", "-1"]) {
+    const dir = configDir(t);
+    writeFileSync(path.join(dir, "config.json"), JSON.stringify({ model: "m1", phases: { [key]: "harness/skills/demo-phase1" } }));
+    assert.throws(
+      () => readConfig(dir),
+      new RegExp(`config\\.json: phase key "${key}" must be a whole number like "1"`),
+      `phase key ${key} is rejected and named`,
+    );
+  }
+});
+
+test("readConfig accepts canonical non-negative integer phase keys", (t) => {
+  const dir = configDir(t);
+  const phases = {
+    "0": "harness/skills/demo-phase0",
+    "1": "harness/skills/demo-phase1",
+    "12": "harness/skills/demo-phase12",
+  };
+  writeFileSync(path.join(dir, "config.json"), JSON.stringify({ model: "m1", phases }));
+  assert.deepEqual(readConfig(dir), { model: "m1", phases });
 });
 
 test("readConfig reads the model and the phases", (t) => {
