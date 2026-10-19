@@ -141,16 +141,19 @@ export interface BadQuote extends QuotedCitation {
 }
 
 /**
- * Lowercase, unify quote marks and apostrophes (single or double, straight or
- * curly) to one character, unify dashes, collapse whitespace and strip trailing
+ * Lowercase, unify quote marks and apostrophes, unify dashes, join source
+ * hyphenation across a line break, collapse whitespace and strip trailing
  * punctuation. Comparing quotes through this makes an attribution robust to the
- * typography and line wrapping of the citation.
+ * typography and line wrapping of the citation. Apostrophes stay distinct from
+ * double quotation marks.
  */
 export function normaliseForQuote(s: string): string {
   return s
     .toLowerCase()
-    .replace(/[\u2018\u2019\u201a\u201b\u2032\u02bc\u201c\u201d\u201e\u201f\u2033'"`]/g, '"')
+    .replace(/[\u2018\u2019\u201a\u201b\u2032\u02bc']/g, "'")
+    .replace(/[\u201c\u201d\u201e\u201f\u2033"`]/g, '"')
     .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+    .replace(/-\s*\n\s*/g, "")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/[.,;:!?")\]]+$/, "")
@@ -158,9 +161,10 @@ export function normaliseForQuote(s: string): string {
 }
 
 /**
- * The form a quote is matched in: normalised, then with every quote mark and
- * apostrophe dropped. Inner quotation marks are the source's typography, not its
- * words, so `the organization "is"` and `the organization 'is'` agree.
+ * The form a quote is matched in: normalised, then with every double quote mark
+ * dropped. Inner double quotation marks are the source's typography, not its
+ * words, so `the organization "is"` and `the organization is` agree; apostrophes
+ * are words and stay.
  */
 function quoteKey(s: string): string {
   return normaliseForQuote(s).replace(/"/g, "");
@@ -171,7 +175,7 @@ function stripFences(markdown: string): string {
   return markdown.replace(/```[\s\S]*?```/g, (fence) => fence.replace(/[^\n]/g, " "));
 }
 
-/** The quoted spans of a markdown document, paired left to right. */
+/** The quoted spans of a markdown document, paired left to right, one paragraph at a time. */
 function quotedSpans(markdown: string): { start: number; end: number }[] {
   const clean = stripFences(markdown);
   const spans: { start: number; end: number }[] = [];
@@ -179,6 +183,11 @@ function quotedSpans(markdown: string): { start: number; end: number }[] {
   let curlyOpen = -1;
   for (let i = 0; i < clean.length; i++) {
     const char = clean[i];
+    if (char === "\n" && /^\n[ \t]*\n/.test(clean.slice(i))) {
+      // A paragraph break resets straight-quote pairing: one stray `"` must not
+      // flip every later pair in the file.
+      straightOpen = -1;
+    }
     if (char === "\u201c") {
       curlyOpen = i;
     } else if (char === "\u201d") {
@@ -198,57 +207,140 @@ function quotedSpans(markdown: string): { start: number; end: number }[] {
   return spans;
 }
 
-/** Quote marks that end a quote's attachment: whatever follows is a new quoted span. */
-const QUOTE_MARKS = new Set(['"', "\u201c", "\u201d"]);
+/** One citation group: brackets separated only by whitespace and `,`/`;`, so `[@1] [@2]` and `[@1], [@2]` are one group. */
+interface CitationGroup {
+  start: number;
+  end: number;
+  ids: string[];
+}
 
 /**
- * The citation bracket a quote at `from` attaches to, or null when none does.
- * The quote reaches the first citation bracket that follows it before its
- * sentence ends: a `.`, `!` or `?` followed by whitespace or end of line, or a
- * blank line. The search is capped at `CITATION_WINDOW` characters, and a
- * quotation mark ends it, so a second quoted span starts its own attachment.
+ * The citation groups of the sentence `[start, end)`, skipping any brackets that
+ * fall inside a quoted span. Two citation brackets are in the same group when
+ * only whitespace and `,`/`;` separate them.
  */
-function citationAfter(clean: string, from: number): RegExpExecArray | null {
-  const capped = Math.min(from + CITATION_WINDOW, clean.length);
-  for (let i = from; i < capped; i++) {
+function citationGroupsIn(
+  clean: string,
+  start: number,
+  end: number,
+  spans: { start: number; end: number }[],
+): CitationGroup[] {
+  const brackets: { start: number; end: number; ids: string[] }[] = [];
+  for (let i = start; i < end; i++) {
+    const span = spans.find((candidate) => i >= candidate.start && i <= candidate.end);
+    if (span !== undefined) {
+      i = span.end;
+      continue;
+    }
+    if (clean[i] !== "[") continue;
+    const bracket = /^\[[^\]]*\]/.exec(clean.slice(i, end));
+    if (bracket === null) continue;
+    const ids = citationIdsInBracket(bracket[0].slice(1, -1));
+    if (ids.length > 0) brackets.push({ start: i, end: i + bracket[0].length, ids });
+    i += bracket[0].length - 1;
+  }
+
+  const groups: CitationGroup[] = [];
+  for (const bracket of brackets) {
+    const previous = groups.at(-1);
+    if (previous !== undefined && /^[\s,;]*$/.test(clean.slice(previous.end, bracket.start))) {
+      previous.end = bracket.end;
+      previous.ids.push(...bracket.ids);
+    } else {
+      groups.push({ ...bracket });
+    }
+  }
+  return groups;
+}
+
+/** True when `index` is inside one of the quoted spans. */
+function insideSpan(spans: { start: number; end: number }[], index: number): boolean {
+  return spans.some((span) => index >= span.start && index <= span.end);
+}
+
+/** The start of the sentence containing `from`, skipping quotes and brackets. */
+function sentenceStart(clean: string, spans: { start: number; end: number }[], from: number): number {
+  let start = 0;
+  for (let i = 0; i < from; i++) {
+    if (insideSpan(spans, i)) continue;
     const char = clean[i];
     if (char === "[") {
-      const bracket = /^\[[^\]]*@\d+[^\]]*\]/.exec(clean.slice(i));
-      if (bracket !== null) return bracket;
-      const close = clean.indexOf("]", i); // a prose bracket is skipped whole
+      const close = clean.indexOf("]", i);
       if (close >= 0) i = close;
-    } else if (QUOTE_MARKS.has(char ?? "")) {
-      return null;
-    } else if (
+      continue;
+    }
+    if (
       (char === "." || char === "!" || char === "?") &&
       (i + 1 >= clean.length || /\s/.test(clean[i + 1] ?? ""))
     ) {
-      return null;
+      start = i + 1;
     } else if (char === "\n" && /^\n[ \t]*\n/.test(clean.slice(i))) {
-      return null;
+      start = i + 1;
     }
   }
+  return start;
+}
+
+/** The end of the sentence containing `from`, skipping quotes and brackets. */
+function sentenceEnd(clean: string, spans: { start: number; end: number }[], from: number): number {
+  for (let i = from; i < clean.length; i++) {
+    if (insideSpan(spans, i)) continue;
+    const char = clean[i];
+    if (char === "[") {
+      const close = clean.indexOf("]", i);
+      if (close >= 0) i = close;
+      continue;
+    }
+    if (
+      (char === "." || char === "!" || char === "?") &&
+      (i + 1 >= clean.length || /\s/.test(clean[i + 1] ?? ""))
+    ) {
+      return i + 1;
+    }
+    if (char === "\n" && /^\n[ \t]*\n/.test(clean.slice(i))) return i;
+  }
+  return clean.length;
+}
+
+/**
+ * The citation group a quote at `span` attaches to in its sentence. The quote
+ * takes the first group that follows it, or the nearest group that precedes it
+ * when none follows; a group further than `CITATION_WINDOW` characters away is
+ * not attached.
+ */
+function groupForQuote(
+  clean: string,
+  spans: { start: number; end: number }[],
+  span: { start: number; end: number },
+): CitationGroup | null {
+  const start = sentenceStart(clean, spans, span.start);
+  const end = sentenceEnd(clean, spans, span.end + 1);
+  const groups = citationGroupsIn(clean, start, end, spans);
+  const following = groups.find((group) => group.start >= span.end);
+  if (following !== undefined && following.start - span.end <= CITATION_WINDOW) return following;
+  const preceding = groups.filter((group) => group.end <= span.start).at(-1);
+  if (preceding !== undefined && span.start - preceding.end <= CITATION_WINDOW) return preceding;
   return null;
 }
 
 /**
  * The quotes of `markdown` that attach to a citation. Quotes are paired left to
- * right - a short quotation inside a sentence never mismatches the spans around
- * it - spans are 15-600 characters, and fenced code blocks are ignored. A quote
- * attaches to the first citation bracket that follows it before its sentence
- * ends (see `citationAfter`).
+ * right within a paragraph - a short quotation inside a sentence never
+ * mismatches the spans around it - spans are 15-600 characters, and fenced code
+ * blocks are ignored. Every quote in a sentence attaches to the first citation
+ * group that follows it in that sentence, or to the nearest group before it when
+ * none follows (see `groupForQuote`).
  */
 export function extractQuotedCitations(markdown: string): QuotedCitation[] {
   const clean = stripFences(markdown);
+  const spans = quotedSpans(markdown);
   const found: QuotedCitation[] = [];
-  for (const span of quotedSpans(markdown)) {
+  for (const span of spans) {
     const quote = clean.slice(span.start + 1, span.end);
     if (quote.length < 15 || quote.length > 600) continue;
-    const bracket = citationAfter(clean, span.end + 1);
-    if (bracket === null) continue;
-    const ids = citationIdsInBracket(bracket[0].slice(1, -1));
-    if (ids.length === 0) continue;
-    found.push({ quote, ids, line: clean.slice(0, span.start).split("\n").length });
+    const group = groupForQuote(clean, spans, span);
+    if (group === null) continue;
+    found.push({ quote, ids: group.ids, line: clean.slice(0, span.start).split("\n").length });
   }
   return found;
 }
@@ -257,13 +349,17 @@ export function extractQuotedCitations(markdown: string): QuotedCitation[] {
  * The quote's fragments that are long enough to check: split at `...`/`\u2026` and
  * at editorial insertions in square brackets such as `[their]` - a bracketed word
  * is the quoting author's, not the source's, exactly as an ellipsis marks elided
- * text - then keep \u2265 8 normalised chars.
+ * text - then keep \u2265 8 normalised chars. When every fragment is shorter than
+ * that, the whole quote is the fragment: a quote must never pass vacuously.
  */
 function quoteFragments(quote: string): string[] {
-  return quote
+  const fragments = quote
     .split(/\.\.\.|\u2026|\[[^\]]*\]/)
     .map((fragment) => quoteKey(fragment))
     .filter((fragment) => fragment.length >= 8);
+  if (fragments.length > 0) return fragments;
+  const whole = quoteKey(quote);
+  return whole.length > 0 ? [whole] : [];
 }
 
 /**
@@ -332,9 +428,12 @@ function deepisContext(id: string, before: number, after: number): DeepisChunk[]
     throw new DeepisUnavailable(`deepis did not answer within ${DEEPIS_TIMEOUT_MS / 1000}s`);
   }
   if (result.status !== 0) {
-    throw new DeepisUnavailable(
-      `deepis context exited ${result.status}: ${(result.stderr ?? "").trim()}`,
-    );
+    const stderr = (result.stderr ?? "").trim();
+    // `deepis context <unknown id>` exits 1 with `Error: Chunk <id> not found`.
+    // That is an absent chunk, not an unreachable deepis: return no chunks so the
+    // quote check reports it as missing rather than telling the worker to retry.
+    if (/chunk\b.*\bnot found/i.test(stderr) || /chunk\b.*\bnot found/i.test(result.stdout ?? "")) return [];
+    throw new DeepisUnavailable(`deepis context exited ${result.status}: ${stderr}`);
   }
   let payload: unknown;
   try {
@@ -413,7 +512,11 @@ function main(argv: string[]): number {
 
   let bad: BadQuote[] = [];
   try {
-    if (quoted.length > 0) bad = checkQuotes(quoted, deepisChunk, deepisNeighbours).bad;
+    const missingSet = new Set(missing);
+    const checked = quoted
+      .map((item) => ({ ...item, ids: item.ids.filter((id) => !missingSet.has(id)) }))
+      .filter((item) => item.ids.length > 0);
+    if (checked.length > 0) bad = checkQuotes(checked, deepisChunk, deepisNeighbours).bad;
   } catch (error) {
     if (error instanceof DeepisUnavailable) {
       console.error(`check-citations: deepis is not reachable: ${error.message}`);

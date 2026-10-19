@@ -53,10 +53,11 @@ if (args[0] === "context") {
   log("context " + id);
   const contents = JSON.parse(process.env.STUB_CONTEXT || "{}");
   const neighbours = JSON.parse(process.env.STUB_NEIGHBOURS || "{}");
-  const chunks = [];
-  if (contents[id] !== undefined) {
-    chunks.push({ chunk_id: Number(id), target: true, content: contents[id] });
+  if (contents[id] === undefined) {
+    console.error("Error: Chunk " + id + " not found");
+    process.exit(1);
   }
+  const chunks = [{ chunk_id: Number(id), target: true, content: contents[id] }];
   if (before > 0 || after > 0) {
     for (const neighbour of neighbours[id] || []) {
       chunks.push({ chunk_id: Number(neighbour[0]), target: false, content: neighbour[1] });
@@ -130,6 +131,36 @@ test("the CLI exits 1 and names the unknown id", (t) => {
   assert.match(result.stderr, /999999999/);
   assert.match(result.stderr, /missing chunk id 999999999/);
   assert.doesNotMatch(result.stdout, /ok/);
+});
+
+test("the CLI exits 1 with missing chunk id, not 2, when a quoted citation is unknown", (t) => {
+  const root = makeTempDir(t);
+  const file = path.join(root, "paper.md");
+  writeFileSync(file, 'States "a rule is written down and filed" [@999999999].\n');
+  const stub = stubDeepis(t, ["111"]);
+
+  const result = spawnSync(process.execPath, [CHECK, file], { encoding: "utf8", env: stub.env });
+
+  assert.equal(result.status, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(result.stderr, /missing chunk id 999999999/);
+  assert.doesNotMatch(result.stderr, /deepis is not reachable/);
+  assert.deepEqual(stub.calls(), [1], "the unresolved id is never fetched for a quote check");
+});
+
+test("the CLI treats a context not-found as an absent chunk, not an unreachable deepis", (t) => {
+  const root = makeTempDir(t);
+  const file = path.join(root, "paper.md");
+  writeFileSync(file, 'States "a rule is written down and filed" [@111].\n');
+  // 111 resolves in metadata but has no context text: the stub answers like real
+  // deepis, exit 1 with `Error: Chunk 111 not found`.
+  const stub = stubDeepis(t, ["111"]);
+
+  const result = spawnSync(process.execPath, [CHECK, file], { encoding: "utf8", env: stub.env });
+
+  assert.equal(result.status, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(result.stderr, /quote not in cited chunk 111/);
+  assert.match(result.stderr, /not found nearby/);
+  assert.doesNotMatch(result.stderr, /deepis is not reachable/);
 });
 
 test("the CLI resolves 120 ids in batches of at most 50", (t) => {
@@ -229,11 +260,13 @@ test("normaliseForQuote unifies case, whitespace, quote marks, dashes and traili
     normaliseForQuote("  The \u201cRule\u201d  Is\u2014Stated\u2026.  "),
     'the "rule" is-stated\u2026',
   );
-  assert.equal(normaliseForQuote("The organisation\u2019s rule, filed. "), 'the organisation"s rule, filed');
+  assert.equal(normaliseForQuote("The organisation\u2019s rule, filed. "), "the organisation's rule, filed");
   assert.equal(
     normaliseForQuote("what the organization \u2018is\u2019 means"),
-    'what the organization "is" means',
+    "what the organization 'is' means",
   );
+  // Hyphenation across a source line break is joined, so either spelling matches.
+  assert.equal(normaliseForQuote("the prac-\n  tices of the organisation"), "the practices of the organisation");
 });
 
 test("extractQuotedCitations pairs a quote with the citation that follows it", () => {
@@ -320,6 +353,56 @@ test("extractQuotedCitations does not mispair quotes around a shorter quotation"
 
   assert.deepEqual(found, [
     { quote: "the centrality of human participants", ids: ["9"], line: 1 },
+  ]);
+});
+
+test("extractQuotedCitations treats adjacent brackets as one citation group", () => {
+  const markdown =
+    'States "a rule is written down and filed" [@417029] [@417030], and "another rule for the record" [@1], [@2]; [@3].';
+  const found = extractQuotedCitations(markdown);
+
+  assert.deepEqual(found, [
+    { quote: "a rule is written down and filed", ids: ["417029", "417030"], line: 1 },
+    { quote: "another rule for the record", ids: ["1", "2", "3"], line: 1 },
+  ]);
+});
+
+test("extractQuotedCitations attaches every quote in a sentence to the same following group", () => {
+  const markdown =
+    'Two claims "the first rule is written down" and "the second rule is filed away" [@1;@2] hold.';
+
+  assert.deepEqual(extractQuotedCitations(markdown), [
+    { quote: "the first rule is written down", ids: ["1", "2"], line: 1 },
+    { quote: "the second rule is filed away", ids: ["1", "2"], line: 1 },
+  ]);
+});
+
+test("extractQuotedCitations attaches to the nearest group before a quote in its sentence", () => {
+  const markdown = 'According to [@1], "a rule is written down and filed" remains true.';
+
+  assert.deepEqual(extractQuotedCitations(markdown), [
+    { quote: "a rule is written down and filed", ids: ["1"], line: 1 },
+  ]);
+});
+
+test("extractQuotedCitations does not join citation groups across prose", () => {
+  const markdown =
+    'First [@1], see the appendix, and then "a rule is written down and filed" [@2].';
+
+  assert.deepEqual(extractQuotedCitations(markdown), [
+    { quote: "a rule is written down and filed", ids: ["2"], line: 1 },
+  ]);
+});
+
+test("extractQuotedCitations resets straight-quote pairing at a paragraph break", () => {
+  const markdown = [
+    'A stray " mark must not flip every later pair.',
+    '',
+    'He said "a rule is written down and filed" [@7].',
+  ].join('\n');
+
+  assert.deepEqual(extractQuotedCitations(markdown), [
+    { quote: "a rule is written down and filed", ids: ["7"], line: 3 },
   ]);
 });
 
@@ -430,6 +513,70 @@ test("checkQuotes rejects a quote whose bracketed fragments are not in the chunk
       line: 1,
       foundIn: null,
     },
+  ]);
+});
+
+test("checkQuotes passes a quote that is in any chunk of its citation group", () => {
+  const items = [{ quote: "a rule is written down and filed", ids: ["1", "2"], line: 1 }];
+  const { bad } = checkQuotes(
+    items,
+    chunkFetcher({ "1": "nothing of the sort here", "2": "a rule is written down and filed." }),
+    noNeighbours,
+  );
+
+  assert.deepEqual(bad, []);
+});
+
+test("checkQuotes joins hyphenation across a line break on either side", () => {
+  const plain = [{ quote: "the practices of the organisation", ids: ["1"], line: 1 }];
+  const hyphenated = [{ quote: "the prac-\ntices of the organisation", ids: ["1"], line: 1 }];
+
+  assert.deepEqual(
+    checkQuotes(plain, chunkFetcher({ "1": "the prac-\ntices of the organisation." }), noNeighbours).bad,
+    [],
+    "quote plain, source hyphenated",
+  );
+  assert.deepEqual(
+    checkQuotes(hyphenated, chunkFetcher({ "1": "the practices of the organisation." }), noNeighbours).bad,
+    [],
+    "quote hyphenated, source plain",
+  );
+});
+
+test("checkQuotes does not match the whole quote when every fragment is too short", () => {
+  const items = [{ quote: "rules ... rules ... rules", ids: ["1"], line: 1 }];
+  const { bad } = checkQuotes(
+    items,
+    chunkFetcher({ "1": "completely unrelated text that happens to contain rules." }),
+    noNeighbours,
+  );
+
+  assert.deepEqual(bad, [
+    { quote: "rules ... rules ... rules", ids: ["1"], line: 1, foundIn: null },
+  ]);
+});
+
+test("checkQuotes matches a short-fragment quote as a whole string when it is verbatim", () => {
+  const items = [{ quote: "rules ... rules ... rules", ids: ["1"], line: 1 }];
+  const { bad } = checkQuotes(
+    items,
+    chunkFetcher({ "1": "it says rules ... rules ... rules in the source." }),
+    noNeighbours,
+  );
+
+  assert.deepEqual(bad, []);
+});
+
+test("checkQuotes keeps apostrophes distinct from double quotation marks", () => {
+  const items = [{ quote: "the controllers rule", ids: ["1"], line: 1 }];
+  const { bad } = checkQuotes(
+    items,
+    chunkFetcher({ "1": "the controller's rule" }),
+    noNeighbours,
+  );
+
+  assert.deepEqual(bad, [
+    { quote: "the controllers rule", ids: ["1"], line: 1, foundIn: null },
   ]);
 });
 
