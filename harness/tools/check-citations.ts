@@ -34,8 +34,8 @@ import * as path from "node:path";
 const BATCH_SIZE = 50;
 /** Every deepis call is bounded; a hung database must not hang the tool. */
 const DEEPIS_TIMEOUT_MS = 60_000;
-/** A quote attaches to a citation later in its sentence, up to this many characters. */
-const CITATION_WINDOW = 250;
+/** Safety cap for a citation that follows a quote: beyond this it is not the quote's citation. */
+const CITATION_DISTANCE = 1_500;
 /** How far on each side of a cited chunk the neighbour search looks. */
 const NEIGHBOUR_WINDOW = 4;
 
@@ -141,11 +141,13 @@ export interface BadQuote extends QuotedCitation {
 }
 
 /**
- * Lowercase, unify quote marks and apostrophes, unify dashes, drop the quote
- * marks that are punctuation, join hyphenation (`self- promote`, `prac-\ntices`
- * and a plain `selfpromote` all agree), collapse whitespace and strip trailing
- * punctuation. Comparing quotes through this makes an attribution robust to the
- * typography and line wrapping of the citation.
+ * Lowercase, unify quote marks and apostrophes, unify hyphens and dashes, drop
+ * the quote marks that are punctuation, join a hyphen to what follows it
+ * (`self- promote` and `prac-\ntices` become `self-promote` and `prac-tices`),
+ * collapse whitespace and strip trailing punctuation. Comparing quotes through
+ * this makes an attribution robust to the typography and line wrapping of the
+ * citation without ever dropping an intra-word hyphen: `re-sign` stays
+ * `re-sign`, so a quote of `resign` cannot match it.
  *
  * A quotation mark that is not between two letters is typography, not words -
  * `about 'who we are' as an organization` and `about "who we are" as an
@@ -160,9 +162,9 @@ export function normaliseForQuote(s: string): string {
     // An en/em dash set off by spaces is punctuation standing in for a space.
     .replace(/\s+[\u2013\u2014\u2015]\s+/g, " ")
     .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
-    // A hyphen, and any whitespace after it, is line-break or compound
-    // punctuation: `self- promote` and `prac-\ntices` join up on both sides.
-    .replace(/-\s*/g, "")
+    // A hyphen keeps its place but loses the whitespace after it, so
+    // `self- promote`, `prac-\ntices` and their unbroken spellings agree.
+    .replace(/-\s+/g, "-")
     // Keep only apostrophes that sit between two letters; every other quotation
     // mark is the source's typography and is dropped.
     .replace(/(?<!\p{L})['"]|['"](?!\p{L})/gu, "")
@@ -179,6 +181,22 @@ export function normaliseForQuote(s: string): string {
  */
 function quoteKey(s: string): string {
   return normaliseForQuote(s).replace(/"/g, "");
+}
+
+/**
+ * Every form of a text that a quote may be compared against: the plain
+ * normalised key, plus - when the *original* text hyphenates across a line break
+ * - the key with each hyphen that was followed by whitespace removed entirely.
+ * That second key is what lets a quote of `practices` match a source written
+ * `prac-\ntices`. A hyphen the original does not follow with whitespace
+ * (`re-sign`, `co-op`, an unspaced en dash `10\u201320`) yields no such key, so a
+ * quote that drops or changes it can never match.
+ */
+function quoteKeys(s: string): string[] {
+  const keys = [quoteKey(s)];
+  const joined = quoteKey(s.replace(/[-\u2010\u2011\u2012\u2013\u2014\u2015\u2212]\s+/g, ""));
+  if (!keys.includes(joined)) keys.push(joined);
+  return keys;
 }
 
 /** Fenced code is not prose: blank it out, but keep every newline so line numbers survive. */
@@ -315,9 +333,11 @@ function sentenceEnd(clean: string, spans: { start: number; end: number }[], fro
 
 /**
  * The citation group a quote at `span` attaches to in its sentence. The quote
- * takes the first group that follows it, or the nearest group that precedes it
- * when none follows; a group further than `CITATION_WINDOW` characters away is
- * not attached.
+ * takes the first group that follows it in that sentence, however far away it
+ * is; only when the sentence cites nothing after the quote does the nearest
+ * preceding group carry it. A following group more than `CITATION_DISTANCE`
+ * characters away means the quote has no citation, rather than being an excuse
+ * to fall back to an earlier group the sentence does not attribute it to.
  */
 function groupForQuote(
   clean: string,
@@ -328,10 +348,10 @@ function groupForQuote(
   const end = sentenceEnd(clean, spans, span.end + 1);
   const groups = citationGroupsIn(clean, start, end, spans);
   const following = groups.find((group) => group.start >= span.end);
-  if (following !== undefined && following.start - span.end <= CITATION_WINDOW) return following;
-  const preceding = groups.filter((group) => group.end <= span.start).at(-1);
-  if (preceding !== undefined && span.start - preceding.end <= CITATION_WINDOW) return preceding;
-  return null;
+  if (following !== undefined) {
+    return following.start - span.end <= CITATION_DISTANCE ? following : null;
+  }
+  return groups.filter((group) => group.end <= span.start).at(-1) ?? null;
 }
 
 /**
@@ -339,8 +359,9 @@ function groupForQuote(
  * right within a paragraph - a short quotation inside a sentence never
  * mismatches the spans around it - spans are 15-600 characters, and fenced code
  * blocks are ignored. Every quote in a sentence attaches to the first citation
- * group that follows it in that sentence, or to the nearest group before it when
- * none follows (see `groupForQuote`).
+ * group *after* it in that sentence at any distance, and only to the nearest
+ * group *before* it when the sentence cites nothing after it (see
+ * `groupForQuote`).
  */
 export function extractQuotedCitations(markdown: string): QuotedCitation[] {
   const clean = stripFences(markdown);
@@ -388,7 +409,7 @@ export function checkQuotes(
   for (const item of items) {
     const fragments = quoteFragments(item.quote);
     if (fragments.length === 0) continue;
-    const texts = item.ids.map((id) => quoteKey(fetchChunk(id) ?? ""));
+    const texts = item.ids.flatMap((id) => quoteKeys(fetchChunk(id) ?? ""));
     const passes = fragments.every((fragment) => texts.some((text) => text.includes(fragment)));
     if (passes) continue;
 
@@ -396,8 +417,8 @@ export function checkQuotes(
     for (const id of item.ids) {
       for (const neighbour of fetchNeighbours(id)) {
         if (neighbour.id === id) continue;
-        const text = quoteKey(neighbour.text);
-        if (fragments.every((fragment) => text.includes(fragment))) {
+        const texts = quoteKeys(neighbour.text);
+        if (fragments.every((fragment) => texts.some((text) => text.includes(fragment)))) {
           foundIn = neighbour.id;
           break;
         }

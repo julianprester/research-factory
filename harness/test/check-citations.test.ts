@@ -258,7 +258,7 @@ test("the CLI exits 2 with a clear message when deepis is unreachable", (t) => {
 test("normaliseForQuote unifies case, whitespace, quote marks, dashes and trailing punctuation", () => {
   assert.equal(
     normaliseForQuote("  The \u201cRule\u201d  Is\u2014Stated\u2026.  "),
-    "the rule isstated\u2026",
+    "the rule is-stated\u2026",
   );
   assert.equal(normaliseForQuote("The organisation\u2019s rule, filed. "), "the organisation's rule, filed");
   // A quotation mark around a word is typography, not part of the word.
@@ -266,8 +266,9 @@ test("normaliseForQuote unifies case, whitespace, quote marks, dashes and traili
     normaliseForQuote("what the organization \u2018is\u2019 means"),
     "what the organization is means",
   );
-  // Hyphenation across a source line break is joined, so either spelling matches.
-  assert.equal(normaliseForQuote("the prac-\n  tices of the organisation"), "the practices of the organisation");
+  // A hyphen keeps its place and loses the whitespace after it, so line-wrapped
+  // and spaced hyphenation normalise to one form; an intra-word hyphen stays.
+  assert.equal(normaliseForQuote("the prac-\n  tices of the organisation"), "the prac-tices of the organisation");
 });
 
 test("normaliseForQuote drops nested quotation marks of either kind but keeps apostrophes", () => {
@@ -280,11 +281,12 @@ test("normaliseForQuote drops nested quotation marks of either kind but keeps ap
   assert.notEqual(normaliseForQuote("it's"), normaliseForQuote("its"));
 });
 
-test("normaliseForQuote joins a hyphen and the whitespace after it, and turns a spaced dash into a space", () => {
-  assert.equal(normaliseForQuote("to self-promote and sustain"), "to selfpromote and sustain");
-  assert.equal(normaliseForQuote("to self- promote and sustain"), "to selfpromote and sustain");
-  assert.equal(normaliseForQuote("to self-\n  promote and sustain"), "to selfpromote and sustain");
-  assert.equal(normaliseForQuote("selfpromote"), "selfpromote");
+test("normaliseForQuote joins a hyphen to the whitespace after it, and turns a spaced dash into a space", () => {
+  assert.equal(normaliseForQuote("to self-promote and sustain"), "to self-promote and sustain");
+  assert.equal(normaliseForQuote("to self- promote and sustain"), "to self-promote and sustain");
+  assert.equal(normaliseForQuote("to self-\n  promote and sustain"), "to self-promote and sustain");
+  // Every hyphen-like character becomes `-`, so an unspaced en dash is a hyphen.
+  assert.equal(normaliseForQuote("pages 10\u201320"), "pages 10-20");
   assert.equal(normaliseForQuote("rules \u2014 written down"), "rules written down");
   assert.equal(normaliseForQuote("rules \u2013 written down"), "rules written down");
 });
@@ -311,8 +313,18 @@ test("extractQuotedCitations reports the line the quote starts on", () => {
   assert.equal(extractQuotedCitations(markdown)[0]?.line, 3);
 });
 
-test("extractQuotedCitations ignores a quote whose citation is more than 250 characters away", () => {
-  const markdown = `A "rule written down and filed for the record" is discussed at length, over ${"many ".repeat(60)}words, before [@123].`;
+test("extractQuotedCitations attaches a quote to a citation far later in the same sentence", () => {
+  // A citation routinely closes a long sentence: `Intro [@1] ... "quote" ... [@2].`
+  // must attach to [@2], the first group *after* the quote, not the [@1] before it.
+  const markdown = `Intro [@1] runs on for ${"many words ".repeat(30)}and then says "a rule written down and filed for the record" before citing ${"more filler ".repeat(30)}[@2].`;
+  const found = extractQuotedCitations(markdown);
+
+  assert.equal(found.length, 1);
+  assert.deepEqual(found[0]?.ids, ["2"]);
+});
+
+test("extractQuotedCitations ignores a quote whose only following citation is beyond the safety cap", () => {
+  const markdown = `A "rule written down and filed for the record" is discussed at length, over ${"many ".repeat(320)}words, before [@123].`;
 
   assert.deepEqual(extractQuotedCitations(markdown), []);
 });
@@ -403,6 +415,15 @@ test("extractQuotedCitations attaches to the nearest group before a quote in its
   assert.deepEqual(extractQuotedCitations(markdown), [
     { quote: "a rule is written down and filed", ids: ["1"], line: 1 },
   ]);
+});
+
+test("extractQuotedCitations prefers a following group to a nearer preceding one", () => {
+  // `[@1] "quote" <300 chars> [@2]` used to attach to [@1] purely because [@2]
+  // fell outside the old 250-char cap - a false attribution to the wrong chunk.
+  const markdown = `Per [@1] "a rule is written down and filed" ${"and more filler ".repeat(20)}[@2].`;
+  const found = extractQuotedCitations(markdown);
+
+  assert.deepEqual(found.map((item) => item.ids), [["2"]]);
 });
 
 test("extractQuotedCitations does not join citation groups across prose", () => {
@@ -547,20 +568,49 @@ test("checkQuotes passes a quote that is in any chunk of its citation group", ()
   assert.deepEqual(bad, []);
 });
 
-test("checkQuotes joins hyphenation across a line break on either side", () => {
-  const plain = [{ quote: "the practices of the organisation", ids: ["1"], line: 1 }];
-  const hyphenated = [{ quote: "the prac-\ntices of the organisation", ids: ["1"], line: 1 }];
+test("checkQuotes forgives a source's line-break hyphen but not a substantive one", () => {
+  // A source hyphen followed by whitespace may vanish: `prac-\ntices` in the
+  // source is the line wrap of `practices`, so both spellings of the quote match.
+  const source = chunkFetcher({ "1": "the prac-\ntices of the organisation." });
 
   assert.deepEqual(
-    checkQuotes(plain, chunkFetcher({ "1": "the prac-\ntices of the organisation." }), noNeighbours).bad,
+    checkQuotes([{ quote: "the practices of the organisation", ids: ["1"], line: 1 }], source, noNeighbours).bad,
     [],
-    "quote plain, source hyphenated",
+    "quote plain, source hyphenated across a line break",
   );
   assert.deepEqual(
-    checkQuotes(hyphenated, chunkFetcher({ "1": "the practices of the organisation." }), noNeighbours).bad,
+    checkQuotes([{ quote: "the prac-tices of the organisation", ids: ["1"], line: 1 }], source, noNeighbours).bad,
     [],
-    "quote hyphenated, source plain",
+    "quote keeps the hyphen, source hyphenated across a line break",
   );
+  // A hyphen the source does not follow with whitespace is part of the word.
+  assert.deepEqual(
+    checkQuotes([{ quote: "the practices of the organisation", ids: ["1"], line: 1 }], chunkFetcher({ "1": "the prac-tices of the organisation." }), noNeighbours).bad,
+    [{ quote: "the practices of the organisation", ids: ["1"], line: 1, foundIn: null }],
+    "a source's intra-word hyphen cannot be dropped by the quote",
+  );
+});
+
+test("checkQuotes will not pass a quote that rewrites or drops an intra-word hyphen", () => {
+  const badFor = (source: string, quote: string): string[] => {
+    const items = [{ quote, ids: ["1"], line: 1 }];
+    return checkQuotes(items, chunkFetcher({ "1": source }), noNeighbours).bad.map((item) => item.quote);
+  };
+
+  assert.deepEqual(badFor("the minister will re-sign the deal today", "the minister will resign the deal today"), [
+    "the minister will resign the deal today",
+  ]);
+  assert.deepEqual(badFor("a co-op bank opened in town", "a coop bank opened in town"), [
+    "a coop bank opened in town",
+  ]);
+  // An unspaced en dash is a hyphen, and `10-20` is not `1020`.
+  assert.deepEqual(badFor("pages 10\u201320 of the report", "pages 1020 of the report"), [
+    "pages 1020 of the report",
+  ]);
+  // The same three pass when the spelling really is in the source.
+  assert.deepEqual(badFor("the minister will re-sign the deal today", "the minister will re-sign the deal today"), []);
+  assert.deepEqual(badFor("a co-op bank opened in town", "a co-op bank opened in town"), []);
+  assert.deepEqual(badFor("pages 10\u201320 of the report", "pages 10-20 of the report"), []);
 });
 
 test("checkQuotes passes a quote whose nested quote marks differ in kind from the source's", () => {
