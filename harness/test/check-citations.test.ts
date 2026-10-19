@@ -258,10 +258,47 @@ test("extractQuotedCitations reports the line the quote starts on", () => {
   assert.equal(extractQuotedCitations(markdown)[0]?.line, 3);
 });
 
-test("extractQuotedCitations ignores a quote whose citation is more than 60 characters away", () => {
-  const markdown = `A "rule written down and filed for the record" is discussed at length, over ${"many ".repeat(12)}words, before [@123].`;
+test("extractQuotedCitations ignores a quote whose citation is more than 250 characters away", () => {
+  const markdown = `A "rule written down and filed for the record" is discussed at length, over ${"many ".repeat(60)}words, before [@123].`;
 
   assert.deepEqual(extractQuotedCitations(markdown), []);
+});
+
+test("extractQuotedCitations attaches a quote to a citation later in the same sentence", () => {
+  const markdown =
+    'The role is "contingent on the rights and responsibilities possessed or transferred", and a delegator may hand over a right (say, to retry a job) while retaining responsibilities [@98885].';
+
+  assert.deepEqual(extractQuotedCitations(markdown), [
+    {
+      quote: "contingent on the rights and responsibilities possessed or transferred",
+      ids: ["98885"],
+      line: 1,
+    },
+  ]);
+});
+
+test("extractQuotedCitations ignores a quote whose sentence ends before any citation", () => {
+  const markdown = 'He called it "a rule written down and filed for the record". The next sentence cites [@123].';
+
+  assert.deepEqual(extractQuotedCitations(markdown), []);
+});
+
+test("extractQuotedCitations attaches each of two quotes in one sentence to its own bracket", () => {
+  const markdown =
+    'Bots "weaken the centrality of human participants" as they act [@11], and they "take actions the pages still say who answers for" [@22].';
+
+  assert.deepEqual(extractQuotedCitations(markdown), [
+    { quote: "weaken the centrality of human participants", ids: ["11"], line: 1 },
+    { quote: "take actions the pages still say who answers for", ids: ["22"], line: 1 },
+  ]);
+});
+
+test("extractQuotedCitations attaches a quote across a paged citation bracket", () => {
+  const markdown = 'States "a rule is written down and filed" [-@3, p. 4].';
+
+  assert.deepEqual(extractQuotedCitations(markdown), [
+    { quote: "a rule is written down and filed", ids: ["3"], line: 1 },
+  ]);
 });
 
 test("extractQuotedCitations ignores a quote with no following citation at all", () => {

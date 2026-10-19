@@ -34,8 +34,8 @@ import * as path from "node:path";
 const BATCH_SIZE = 50;
 /** Every deepis call is bounded; a hung database must not hang the tool. */
 const DEEPIS_TIMEOUT_MS = 60_000;
-/** A quoted sentence must be followed by its citation within this many characters. */
-const CITATION_WINDOW = 60;
+/** A quote attaches to a citation later in its sentence, up to this many characters. */
+const CITATION_WINDOW = 250;
 /** How far on each side of a cited chunk the neighbour search looks. */
 const NEIGHBOUR_WINDOW = 4;
 
@@ -198,11 +198,45 @@ function quotedSpans(markdown: string): { start: number; end: number }[] {
   return spans;
 }
 
+/** Quote marks that end a quote's attachment: whatever follows is a new quoted span. */
+const QUOTE_MARKS = new Set(['"', "\u201c", "\u201d"]);
+
 /**
- * The quotes of `markdown` that are followed, within 60 characters on the same
- * paragraph, by a citation bracket. Quotes are paired left to right - a short
- * quotation inside a sentence never mismatches the spans around it - spans are
- * 15-600 characters, and fenced code blocks are ignored.
+ * The citation bracket a quote at `from` attaches to, or null when none does.
+ * The quote reaches the first citation bracket that follows it before its
+ * sentence ends: a `.`, `!` or `?` followed by whitespace or end of line, or a
+ * blank line. The search is capped at `CITATION_WINDOW` characters, and a
+ * quotation mark ends it, so a second quoted span starts its own attachment.
+ */
+function citationAfter(clean: string, from: number): RegExpExecArray | null {
+  const capped = Math.min(from + CITATION_WINDOW, clean.length);
+  for (let i = from; i < capped; i++) {
+    const char = clean[i];
+    if (char === "[") {
+      const bracket = /^\[[^\]]*@\d+[^\]]*\]/.exec(clean.slice(i));
+      if (bracket !== null) return bracket;
+      const close = clean.indexOf("]", i); // a prose bracket is skipped whole
+      if (close >= 0) i = close;
+    } else if (QUOTE_MARKS.has(char ?? "")) {
+      return null;
+    } else if (
+      (char === "." || char === "!" || char === "?") &&
+      (i + 1 >= clean.length || /\s/.test(clean[i + 1] ?? ""))
+    ) {
+      return null;
+    } else if (char === "\n" && /^\n[ \t]*\n/.test(clean.slice(i))) {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * The quotes of `markdown` that attach to a citation. Quotes are paired left to
+ * right - a short quotation inside a sentence never mismatches the spans around
+ * it - spans are 15-600 characters, and fenced code blocks are ignored. A quote
+ * attaches to the first citation bracket that follows it before its sentence
+ * ends (see `citationAfter`).
  */
 export function extractQuotedCitations(markdown: string): QuotedCitation[] {
   const clean = stripFences(markdown);
@@ -210,12 +244,7 @@ export function extractQuotedCitations(markdown: string): QuotedCitation[] {
   for (const span of quotedSpans(markdown)) {
     const quote = clean.slice(span.start + 1, span.end);
     if (quote.length < 15 || quote.length > 600) continue;
-    const paragraphEnd = clean.indexOf("\n\n", span.end + 1);
-    const windowEnd = Math.min(
-      span.end + 1 + CITATION_WINDOW,
-      paragraphEnd < 0 ? clean.length : paragraphEnd,
-    );
-    const bracket = /\[[^\]]*@\d+[^\]]*\]/.exec(clean.slice(span.end + 1, windowEnd));
+    const bracket = citationAfter(clean, span.end + 1);
     if (bracket === null) continue;
     const ids = citationIdsInBracket(bracket[0].slice(1, -1));
     if (ids.length === 0) continue;
