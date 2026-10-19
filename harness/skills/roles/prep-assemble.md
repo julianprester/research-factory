@@ -28,9 +28,9 @@ scanner, and an entry that cannot be measured poisons a whole Phase 1 node.
    **Area:** <the theoretical area>
    ```
 
-   Keep the rest of each entry's five fields — **Theory**, **Prediction**,
+   Keep the entry's other four fields — **Theory**, **Prediction**,
    **Measurable implication here**, **Rival** — verbatim unless rule 3 or 4 makes
-   you change them.
+   you change them. With **Area**, the merged entry has five fields.
 3. **De-duplicate by prediction, not by title.** Two entries with different
    theories but the same predicted pattern and the same measure are one entry:
    keep the one whose citation is stronger, fold the other's theory into its
@@ -86,5 +86,5 @@ starts with `Status: DONE` (or `DONE_WITH_CONCERNS`, naming any area whose
 entries were mostly dropped) and gives the entry count on the Summary line — the
 owner writes that number into the tree.
 
-Write only inside this node's `workspace/`, `rounds.md` and `handoff.md`; never
-read another node.
+Write only inside this node's `workspace/`, `rounds.md` and `handoff.md`. Read
+only the input paths the brief lists, even when they are another node's files.

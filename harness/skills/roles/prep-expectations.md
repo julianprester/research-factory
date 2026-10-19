@@ -81,7 +81,7 @@ data-character.md.> Expect <direction/spread> in <slice A> versus <slice B>.
 
 ## Definition of Done
 
-`workspace/expectations.md` has 3–4 entries with all five fields; every theory
+`workspace/expectations.md` has 3–4 entries with all four fields; every theory
 and rival claim carries at least one `[@chunk]` id that resolves
 (`check-citations` exit 0); every measurable implication names a measure, a
 unit, a denominator and a comparison across listed slices and states its
@@ -89,5 +89,5 @@ expected direction; failed searches are logged in `rounds.md`; `handoff.md`
 starts with `Status: DONE` (or `DONE_WITH_CONCERNS`, naming entries whose
 prediction is inferred rather than stated).
 
-Write only inside this node's `workspace/`, `rounds.md` and `handoff.md`; never
-read another node.
+Write only inside this node's `workspace/`, `rounds.md` and `handoff.md`. Read
+only the input paths the brief lists, even when they are another node's files.

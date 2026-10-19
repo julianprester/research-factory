@@ -15,7 +15,8 @@ you do not search the literature.
 - `workspace/profile.md`
 - `workspace/glossary.md`
 - `workspace/data-character.md`
-- `workspace/split/holdout.txt` and `workspace/split/exploration.txt`
+- `workspace/split/holdout.txt` and `workspace/split/exploration.txt` (or
+  `workspace/split-<ext>/…` when the corpus has several extensions)
 - `workspace/scripts/` — one saved script per number you report
 
 ## profile.md
@@ -78,9 +79,11 @@ ceremony, a role), say so in the meaning.
   Handbook: `handbook/` has 4168 of 4604 files), depth 1 puts ~90% of the corpus
   in one stratum and the split stops being stratified at all: use `--depth 2`
   there. Both lists hold dataset-relative paths. The tool counts one extension
-  at a time (`--ext`, default `.md`), so if the corpus has several, run it per
-  extension or say which one is the corpus. Record the choice and the table; a
-  reader must be able to see that no meaningful slice is entirely held out.
+  at a time (`--ext`, default `.md`). If the corpus has several extensions, run
+  it once per extension into a distinct output directory
+  (`workspace/split-<ext>/`) and say in `data-character.md` which one is the
+  corpus the phases analyse. Record the choice and the table; a reader must be
+  able to see that no meaningful slice is entirely held out.
 
 ## Definition of Done
 

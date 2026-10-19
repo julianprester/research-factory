@@ -31,7 +31,7 @@ command below is capped, timed out and compacted.
    chunk per paper):
 
    ```bash
-   timeout 60 deepis search "algorithmic governance of documentation" -n 10 -f json \
+   timeout 60 deepis search "coordination in distributed teams" -n 10 -f json \
      | jq -r '.results[] | "\(.chunk_id): \(.content[0:200])"'
    ```
 
@@ -65,17 +65,18 @@ command below is capped, timed out and compacted.
 `--fts` takes PostgreSQL web-search syntax; the positional query is hybrid.
 
 ```bash
-timeout 60 deepis search --fts '"algorithmic control" OR "algorithmic management" -platform' \
+timeout 60 deepis search --fts '"team coordination" OR "distributed collaboration" -platform' \
   -n 10 -f json --no-rerank | jq -r '.results[] | "\(.chunk_id): \(.content[0:200])"'
 ```
 
 - `"..."` quotes a phrase. Quote a hyphenated term you mean literally
-  (`'"socio-technical"'`) so the hyphen is not misread.
+  (`'"sense-making"'`) so the hyphen is not misread.
 - `OR` (upper case) widens; a space between terms narrows (they are ANDed).
 - `-term` excludes, and only as a separate word. A hyphen inside a word is not
   an exclusion.
-- Not supported: proximity operators (`term/k term`) return nothing, silently,
-  and wildcard prefixes ignore the star. Use a quoted phrase instead.
+- Not supported: proximity operators (NEAR) and wildcard prefixes return
+  nothing or are ignored, silently — do not use them. Use a quoted phrase
+  instead.
 - `--vector "..."` is the semantic leg; combine both flags to word the legs
   differently, and add `--chunk-level` for several chunks of one paper.
 

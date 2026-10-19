@@ -85,10 +85,36 @@ test("roles/deepis.md keeps every search bounded", () => {
   const markdown = read("harness/skills/roles/deepis.md");
   assert.ok(markdown.includes("--no-rerank"), "names the --no-rerank retry");
   assert.ok(markdown.includes("timeout 60"), "names the 60 s timeout");
-  assert.ok(!markdown.includes("NEAR"), "does not suggest NEAR, which websearch syntax lacks");
+  assert.ok(!markdown.includes("NEAR/"), "gives no NEAR proximity example, which websearch syntax lacks");
+  // NEAR may be named only to say it does not work; otherwise it reads as advice.
+  const nearLines = markdown.split("\n").filter((line) => line.includes("NEAR"));
+  assert.ok(nearLines.length > 0, "names NEAR as unsupported so a reader does not try it");
+  for (const line of nearLines) {
+    assert.match(line, /(nothing|ignored|not supported)/i, "NEAR appears only where it is called unsupported");
+  }
   assert.ok(markdown.includes("--fts"), "names the websearch --fts form");
   assert.match(markdown, /deepis context/, "names progressive disclosure's second step");
   assert.match(markdown, /deepis metadata/, "names progressive disclosure's third step");
+});
+
+test("role files and ctc-worker allow reads only of the brief's listed paths", () => {
+  const files = [
+    "harness/agents/ctc-worker.md",
+    ...ROLES.map((role) => `harness/skills/roles/${role}.md`),
+  ];
+  for (const file of files) {
+    const prose = read(file).replace(/\s+/g, " ");
+    assert.ok(
+      !prose.includes("never read another node"),
+      `${file} does not ban cross-node reads outright`,
+    );
+  }
+  const worker = read("harness/agents/ctc-worker.md");
+  assert.match(
+    worker,
+    /read only the (input )?paths the brief lists/i,
+    "ctc-worker.md says to read the paths the brief lists",
+  );
 });
 
 test("DEFAULT_CONFIG configures Phase 0", () => {

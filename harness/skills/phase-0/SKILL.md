@@ -9,17 +9,27 @@ You are the Phase 0 owner. Follow **phase-owner** for the loop, ledger, dispatch
 form, fix loop and handoff statuses; this skill only says what Phase 0's nodes
 are, in what order, and when it ends.
 
-Phase 0 runs once per dataset and exits. It produces the run's job list: a
+Phase 0 runs once per dataset, then ends. It produces the run's job list: a
 profile, a practice glossary, an honest account of what the data can support, a
 hold-out split, and an expectations list that Phase 1 turns into pattern nodes.
 Your job is to get that list made by workers and handed on.
 
-## 0. Read the run before you plan
+## 0. Resume, then read the run
+
+After a restart, call `tree_list({})` — all phases, not just phase 0 — and
+continue from the furthest point that already exists. Do not recreate work:
+
+- The assembler node is already in `phase: 1`: Phase 0 is complete. Do nothing;
+  the Phase 1 owner has the job list.
+- The assembler node exists in phase 0: do not create another. Resume or
+  re-brief it, and do not create area nodes again.
+- Area nodes exist: do not create them again — resume or re-brief them — and
+  create only the areas that are missing.
+- None of the above: start at Z01 below.
 
 Read `node.json` in the run dir: it holds `dataset` and `interest`. The interest
 is the researcher's question — take it from there and never from memory or from
-this skill. Then `tree_list({ phase: 0 })` to see what already exists: after a
-restart, prep nodes may already be dispatched.
+this skill.
 
 ## 1. Z01 profile
 
@@ -61,9 +71,10 @@ titled the area) and a brief for each:
 - **Outputs:** `workspace/expectations.md`.
 - **Definition of Done:** the role file's DoD, copied in.
 
-**At most 3 prep workers at a time.** An earlier run's 20 parallel unbounded
-literature searchers reached 257k tokens; the cap is what keeps the phase
-bounded.
+**At most 3 prep workers at a time.** This Phase 0 limit of 3 overrides
+phase-owner's limit of 4: phase-owner's loop applies here, but its cap gives way
+to this one. An earlier run's 20 parallel unbounded literature searchers reached
+257k tokens; the cap is what keeps the phase bounded.
 
 ## 3. The assembler
 
@@ -84,16 +95,18 @@ not stop the phase.
 
 ## 4. Hand-off
 
-On the assembler's `DONE`, close the phase in this order:
+On the assembler's `DONE` or `DONE_WITH_CONCERNS`, close the phase in this order:
 
 1. `tree_update` Z01 and every area node to `status: "closed"`.
 2. Then, as the **last** tree call,
    `tree_update({ nodeId: "<assembler>", phase: 1, status: "ready", note: "Phase 0 complete: <n> expectations" })`
-   with `<n>` from the assembler's handoff.
+   with `<n>` from the assembler's handoff. If the handoff is
+   `DONE_WITH_CONCERNS`, carry its concern into the note:
+   `Phase 0 complete: <n> expectations — <concern>`.
 
 Ledger each line before its `tree_*` call, as phase-owner requires. Then stop:
-Phase 0 has no queue left, its owner exits, and the Phase 1 owner treats the
-assembler node as the job list.
+Phase 0 has no queue left, so the owner ends its turn and the supervisor finishes
+the run; the Phase 1 owner treats the assembler node as the job list.
 
 ## Never
 
