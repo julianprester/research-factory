@@ -6,7 +6,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { splitHoldout } from "../tools/holdout.ts";
+import { splitHoldout, stratumOf as toolStratumOf } from "../tools/holdout.ts";
 
 const HOLDOUT = fileURLToPath(new URL("../tools/holdout.ts", import.meta.url));
 
@@ -119,6 +119,105 @@ test("a stratum is never entirely held out, even at fraction 1", () => {
   assert.equal(exploration.length, 2, "one exploration file per stratum");
   assert.equal(holdout.length, 2);
   assert.ok(exploration.includes("README.md"));
+});
+
+test("stratumOf takes a depth: the file's first n directory segments, or fewer", () => {
+  assert.equal(toolStratumOf("handbook/engineering/a.md"), "handbook", "depth defaults to 1");
+  assert.equal(toolStratumOf("handbook/engineering/a.md", 1), "handbook");
+  assert.equal(toolStratumOf("handbook/engineering/a.md", 2), "handbook/engineering");
+  assert.equal(toolStratumOf("handbook/people/b.md", 2), "handbook/people");
+  assert.notEqual(toolStratumOf("handbook/engineering/a.md", 2), toolStratumOf("handbook/people/b.md", 2));
+  assert.equal(toolStratumOf("teamops/x.md", 2), "teamops", "one directory level uses all of them");
+  assert.equal(toolStratumOf("handbook/eng/x/a.md", 2), "handbook/eng", "deeper paths truncate");
+  assert.equal(toolStratumOf("README.md", 2), ".", "top-level files stay a single stratum");
+});
+
+test("depth 2 separates the sections of one top-level stratum", () => {
+  const files = ["handbook/engineering/a.md", "handbook/people/b.md", "teamops/x.md"];
+
+  // Depth 1: handbook has two files, so one of them is held out.
+  const shallow = splitHoldout(files, { fraction: 0.5, seed: SEED });
+  assert.equal(shallow.holdout.length, 1);
+
+  // Depth 2: three one-file strata, so nothing is held out.
+  const deep = splitHoldout(files, { fraction: 0.5, seed: SEED, depth: 2 });
+  assert.deepEqual(deep.holdout, []);
+  assert.deepEqual(deep.exploration, [...files].sort());
+});
+
+test("at depth 2 every stratum keeps at least one exploration file", () => {
+  const files: string[] = [];
+  for (const section of ["engineering", "people", "product", "sales"]) {
+    for (let i = 1; i <= 5; i++) files.push(`handbook/${section}/doc${i}.md`);
+  }
+  for (let i = 1; i <= 4; i++) files.push(`job-description-library/jd${i}.md`);
+  files.push("teamops/one.md", "README.md");
+
+  const { holdout, exploration } = splitHoldout(files, { fraction: FRACTION, seed: SEED, depth: 2 });
+  assert.deepEqual([...holdout, ...exploration].sort(), [...files].sort());
+  assert.equal(new Set(holdout).size, holdout.length, "no duplicates across strata");
+
+  const totals = new Map<string, number>();
+  for (const file of files) totals.set(toolStratumOf(file, 2), (totals.get(toolStratumOf(file, 2)) ?? 0) + 1);
+  const held = new Map<string, number>();
+  for (const file of holdout) held.set(toolStratumOf(file, 2), (held.get(toolStratumOf(file, 2)) ?? 0) + 1);
+
+  // The four handbook sections are four strata, not the single depth-1 stratum.
+  for (const section of ["engineering", "people", "product", "sales"]) {
+    assert.equal(totals.get(`handbook/${section}`), 5, `handbook/${section} is its own stratum`);
+  }
+  assert.equal(totals.get("."), 1);
+
+  for (const [stratum, total] of totals) {
+    const taken = held.get(stratum) ?? 0;
+    assert.ok(total - taken >= 1, `stratum ${stratum}: ${total} files, ${taken} held out, needs 1 exploration`);
+    assert.equal(taken, Math.min(Math.round(total * FRACTION), Math.max(total - 1, 0)), `stratum ${stratum}: exact count`);
+  }
+  // And the exploration side really carries the survivors of every stratum.
+  const explored = new Set(exploration.map((file) => toolStratumOf(file, 2)));
+  assert.deepEqual([...explored].sort(), [...totals.keys()].sort());
+});
+
+test("holdout.ts accepts --flag=value forms and --depth", (t) => {
+  const root = makeTempDir(t);
+  const dataset = path.join(root, "dataset");
+  const outDir = path.join(root, "out");
+  const markdown = [
+    "handbook/engineering/e1.md",
+    "handbook/engineering/e2.md",
+    "handbook/people/p1.md",
+    "handbook/people/p2.md",
+    "notes.md",
+  ];
+  for (const relative of markdown) {
+    mkdirSync(path.dirname(path.join(dataset, relative)), { recursive: true });
+    writeFileSync(path.join(dataset, relative), "# doc\n");
+  }
+
+  const result = spawnSync(
+    process.execPath,
+    [HOLDOUT, dataset, outDir, "--fraction=0.5", "--seed=3", "--depth=2"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+
+  const holdout = lines(path.join(outDir, "holdout.txt"));
+  const exploration = lines(path.join(outDir, "exploration.txt"));
+  assert.deepEqual([...holdout, ...exploration].sort(), [...markdown].sort());
+  assert.equal(holdout.length, 2, "one held out per two-file section, none from the 1-file strata");
+  assert.ok(exploration.includes("notes.md"));
+
+  const table = new Map(
+    result.stdout
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/))
+      .filter((cells) => cells.length === 3)
+      .map((cells) => [cells[0], `${cells[1]} ${cells[2]}`]),
+  );
+  assert.equal(table.get("handbook/engineering"), "2 1");
+  assert.equal(table.get("handbook/people"), "2 1");
+  assert.equal(table.get("."), "1 0");
+  assert.equal(table.has("handbook"), false, "depth 2 leaves no depth-1 stratum behind");
 });
 
 test("holdout.ts collects the dataset by extension, writes sorted lists and prints a table", (t) => {
