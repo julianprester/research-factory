@@ -141,19 +141,31 @@ export interface BadQuote extends QuotedCitation {
 }
 
 /**
- * Lowercase, unify quote marks and apostrophes, unify dashes, join source
- * hyphenation across a line break, collapse whitespace and strip trailing
+ * Lowercase, unify quote marks and apostrophes, unify dashes, drop the quote
+ * marks that are punctuation, join hyphenation (`self- promote`, `prac-\ntices`
+ * and a plain `selfpromote` all agree), collapse whitespace and strip trailing
  * punctuation. Comparing quotes through this makes an attribution robust to the
- * typography and line wrapping of the citation. Apostrophes stay distinct from
- * double quotation marks.
+ * typography and line wrapping of the citation.
+ *
+ * A quotation mark that is not between two letters is typography, not words -
+ * `about 'who we are' as an organization` and `about "who we are" as an
+ * organization` are the same sentence - while an apostrophe between two letters
+ * is part of the word, so `it's` never becomes `its`.
  */
 export function normaliseForQuote(s: string): string {
   return s
     .toLowerCase()
     .replace(/[\u2018\u2019\u201a\u201b\u2032\u02bc']/g, "'")
     .replace(/[\u201c\u201d\u201e\u201f\u2033"`]/g, '"')
+    // An en/em dash set off by spaces is punctuation standing in for a space.
+    .replace(/\s+[\u2013\u2014\u2015]\s+/g, " ")
     .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
-    .replace(/-\s*\n\s*/g, "")
+    // A hyphen, and any whitespace after it, is line-break or compound
+    // punctuation: `self- promote` and `prac-\ntices` join up on both sides.
+    .replace(/-\s*/g, "")
+    // Keep only apostrophes that sit between two letters; every other quotation
+    // mark is the source's typography and is dropped.
+    .replace(/(?<!\p{L})['"]|['"](?!\p{L})/gu, "")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/[.,;:!?")\]]+$/, "")
@@ -161,10 +173,9 @@ export function normaliseForQuote(s: string): string {
 }
 
 /**
- * The form a quote is matched in: normalised, then with every double quote mark
- * dropped. Inner double quotation marks are the source's typography, not its
- * words, so `the organization "is"` and `the organization is` agree; apostrophes
- * are words and stay.
+ * The form a quote is matched in. Quotation marks that are not part of a word
+ * are already gone in `normaliseForQuote`, so only a stray quote between two
+ * letters (never an apostrophe) is dropped here.
  */
 function quoteKey(s: string): string {
   return normaliseForQuote(s).replace(/"/g, "");

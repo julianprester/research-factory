@@ -258,15 +258,35 @@ test("the CLI exits 2 with a clear message when deepis is unreachable", (t) => {
 test("normaliseForQuote unifies case, whitespace, quote marks, dashes and trailing punctuation", () => {
   assert.equal(
     normaliseForQuote("  The \u201cRule\u201d  Is\u2014Stated\u2026.  "),
-    'the "rule" is-stated\u2026',
+    "the rule isstated\u2026",
   );
   assert.equal(normaliseForQuote("The organisation\u2019s rule, filed. "), "the organisation's rule, filed");
+  // A quotation mark around a word is typography, not part of the word.
   assert.equal(
     normaliseForQuote("what the organization \u2018is\u2019 means"),
-    "what the organization 'is' means",
+    "what the organization is means",
   );
   // Hyphenation across a source line break is joined, so either spelling matches.
   assert.equal(normaliseForQuote("the prac-\n  tices of the organisation"), "the practices of the organisation");
+});
+
+test("normaliseForQuote drops nested quotation marks of either kind but keeps apostrophes", () => {
+  assert.equal(
+    normaliseForQuote("claims about 'who we are' as an organization"),
+    normaliseForQuote('claims about "who we are" as an organization'),
+  );
+  // A quote mark inside a word stays an apostrophe, so `it's` and `its` differ.
+  assert.equal(normaliseForQuote("it\u2019s the controllers rule"), "it's the controllers rule");
+  assert.notEqual(normaliseForQuote("it's"), normaliseForQuote("its"));
+});
+
+test("normaliseForQuote joins a hyphen and the whitespace after it, and turns a spaced dash into a space", () => {
+  assert.equal(normaliseForQuote("to self-promote and sustain"), "to selfpromote and sustain");
+  assert.equal(normaliseForQuote("to self- promote and sustain"), "to selfpromote and sustain");
+  assert.equal(normaliseForQuote("to self-\n  promote and sustain"), "to selfpromote and sustain");
+  assert.equal(normaliseForQuote("selfpromote"), "selfpromote");
+  assert.equal(normaliseForQuote("rules \u2014 written down"), "rules written down");
+  assert.equal(normaliseForQuote("rules \u2013 written down"), "rules written down");
 });
 
 test("extractQuotedCitations pairs a quote with the citation that follows it", () => {
@@ -541,6 +561,36 @@ test("checkQuotes joins hyphenation across a line break on either side", () => {
     [],
     "quote hyphenated, source plain",
   );
+});
+
+test("checkQuotes passes a quote whose nested quote marks differ in kind from the source's", () => {
+  const items = [
+    { quote: "claims about 'who we are' as an organization", ids: ["1"], line: 201 },
+  ];
+  const { bad } = checkQuotes(
+    items,
+    chunkFetcher({ "1": 'claims about "who we are" as an organization.' }),
+    noNeighbours,
+  );
+
+  assert.deepEqual(bad, []);
+});
+
+test("checkQuotes passes a quote whose hyphen is followed by a space in the source", () => {
+  const items = [
+    {
+      quote: "a portfolio of methods to self-promote and sustain their employment brand",
+      ids: ["1"],
+      line: 350,
+    },
+  ];
+  const { bad } = checkQuotes(
+    items,
+    chunkFetcher({ "1": "a portfolio of methods to self- promote and sustain their employment brand." }),
+    noNeighbours,
+  );
+
+  assert.deepEqual(bad, []);
 });
 
 test("checkQuotes does not match the whole quote when every fragment is too short", () => {
