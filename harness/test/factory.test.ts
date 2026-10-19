@@ -124,7 +124,7 @@ function spyServerStart(onStart?: (session: string) => void): { calls: string[];
 
 const SUPERVISE = path.join(HARNESS_ROOT, "harness", "supervise.ts");
 const DATASET = path.join(HARNESS_ROOT, "harness", "test", "fixtures", "mini-dataset");
-const DEFAULT_CONFIG = { model: "opencode-go/deepseek-v4.1-flash", phases: { "1": "harness/skills/demo-phase1" } };
+const DEFAULT_CONFIG = { model: "opencode-go/deepseek-v4.1-flash", phases: { "0": "harness/skills/phase-0" } };
 
 function workDir(t: TestContext): string {
   const dir = mkdtempSync(path.join(tmpdir(), "ctc-factory-"));
@@ -332,12 +332,12 @@ test("status reports the supervisor, the phases and the last commits", (t) => {
   const dir = workDir(t);
   const runDir = makeRun(dir);
   writeFileSync(path.join(runDir, "config.json"), json(DEFAULT_CONFIG));
-  const deps = fakeDeps({ "owner-p1": "idle" });
+  const deps = fakeDeps({ "owner-p0": "idle" });
 
   const text = status(runDir, deps);
 
   assert.match(text, /supervisor: not running/);
-  assert.match(text, /P1 owner idle/);
+  assert.match(text, /P0 owner idle/);
   assert.match(text, /\[P0:init\]/);
   assert.match(text, /ctc/);
 });
