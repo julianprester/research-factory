@@ -253,10 +253,15 @@ export function extractQuotedCitations(markdown: string): QuotedCitation[] {
   return found;
 }
 
-/** The quote's fragments that are long enough to check: split at `...`/`\u2026`, keep \u2265 8 normalised chars. */
+/**
+ * The quote's fragments that are long enough to check: split at `...`/`\u2026` and
+ * at editorial insertions in square brackets such as `[their]` - a bracketed word
+ * is the quoting author's, not the source's, exactly as an ellipsis marks elided
+ * text - then keep \u2265 8 normalised chars.
+ */
 function quoteFragments(quote: string): string[] {
   return quote
-    .split(/\.\.\.|\u2026/)
+    .split(/\.\.\.|\u2026|\[[^\]]*\]/)
     .map((fragment) => quoteKey(fragment))
     .filter((fragment) => fragment.length >= 8);
 }

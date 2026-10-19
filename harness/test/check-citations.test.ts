@@ -382,6 +382,57 @@ test("checkQuotes passes a quote with an ellipsis when both fragments occur", ()
   assert.deepEqual(bad, []);
 });
 
+test("checkQuotes passes a quote with an editorial bracket when both fragments occur", () => {
+  const items = [
+    {
+      quote:
+        "ceremonial conformity, choosing to intentionally decouple [their] formal structures and systems from day-to-day operations",
+      ids: ["1"],
+      line: 1,
+    },
+  ];
+  const { bad } = checkQuotes(
+    items,
+    chunkFetcher({
+      "1":
+        "an organization may exhibit ceremonial conformity, choosing to intentionally decouple its formal structures and systems from day-to-day operations.",
+    }),
+    noNeighbours,
+  );
+
+  assert.deepEqual(bad, []);
+});
+
+test("checkQuotes rejects a quote whose bracketed fragments are not in the chunk", () => {
+  // The bracket splits the quote, but it must not excuse the side that is wrong.
+  const items = [
+    {
+      quote:
+        "ceremonial conformity, choosing to intentionally decouple [their] formal structures and systems from weekly meetings",
+      ids: ["1"],
+      line: 1,
+    },
+  ];
+  const { bad } = checkQuotes(
+    items,
+    chunkFetcher({
+      "1":
+        "an organization may exhibit ceremonial conformity, choosing to intentionally decouple its formal structures and systems from day-to-day operations.",
+    }),
+    noNeighbours,
+  );
+
+  assert.deepEqual(bad, [
+    {
+      quote:
+        "ceremonial conformity, choosing to intentionally decouple [their] formal structures and systems from weekly meetings",
+      ids: ["1"],
+      line: 1,
+      foundIn: null,
+    },
+  ]);
+});
+
 test("checkQuotes reports a quote that is only in a neighbour with foundIn set to that neighbour", () => {
   const items = [{ quote: "a rule that is written down and filed", ids: ["1"], line: 4 }];
   const { bad } = checkQuotes(
