@@ -6,7 +6,20 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { CHILD_TYPE, PREFIX, breakStaleLock, createChild, findNode, initRun, isStaleLock, listNodes, readRun, updateNode } from "../tree.ts";
+import {
+  CHILD_DIR,
+  CHILD_TYPE,
+  CHILD_TYPES,
+  PREFIX,
+  breakStaleLock,
+  createChild,
+  findNode,
+  initRun,
+  isStaleLock,
+  listNodes,
+  readRun,
+  updateNode,
+} from "../tree.ts";
 
 const WRITER = fileURLToPath(new URL("./writer-child.ts", import.meta.url));
 const CREATE_CHILD = fileURLToPath(new URL("./create-child.ts", import.meta.url));
@@ -80,7 +93,26 @@ test("the constants describe the node tree", () => {
     explanation: "framing",
     framing: "paper",
   });
-  assert.deepEqual(PREFIX, { dataset: "D", pattern: "T", puzzle: "P", explanation: "E", framing: "F", paper: "W" });
+  assert.deepEqual(CHILD_TYPES, {
+    dataset: ["pattern", "prep"],
+    pattern: ["puzzle"],
+    puzzle: ["explanation"],
+    explanation: ["framing"],
+    framing: ["paper"],
+  });
+  for (const [type, children] of Object.entries(CHILD_TYPES)) {
+    assert.equal(CHILD_TYPE[type], children[0], `${type}'s default child type is its first child type`);
+  }
+  assert.deepEqual(PREFIX, {
+    dataset: "D",
+    prep: "Z",
+    pattern: "T",
+    puzzle: "P",
+    explanation: "E",
+    framing: "F",
+    paper: "W",
+  });
+  assert.equal(CHILD_DIR.prep, "prep", "prep nodes live in prep/");
 });
 
 test("initRun stores only the dataset and interest, and makes one commit", (t) => {
@@ -114,6 +146,53 @@ test("createChild stores only phase and status; id, type, parent and title come 
 
   assert.equal(subjects(run)[0], "[P1:createChild] T01 — Self Presentation!");
   assert.equal(git(run, "log", "-1", "--format=%an"), "owner-p1", "the actor is the commit author");
+});
+
+test("createChild makes a phase-0 prep node under the dataset", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+
+  const node = createChild(run, "D01", "Profile", "owner-p0", [], "prep");
+  assert.deepEqual(stored(run, "prep/Z01-profile/node.json"), { phase: 0, status: "ready" });
+  assert.equal(node.id, "Z01");
+  assert.equal(node.type, "prep");
+  assert.equal(node.phase, 0);
+  assert.equal(node.title, "profile");
+  assert.equal(node.parent, "D01");
+  assert.equal(node.dir, path.join(run, "prep", "Z01-profile"));
+  assert.equal(subjects(run)[0], "[P0:createChild] Z01 — Profile");
+  assert.equal(git(run, "log", "-1", "--format=%an"), "owner-p0", "the actor is the commit author");
+
+  const listed = listNodes(run).find((candidate) => candidate.id === "Z01");
+  assert.equal(listed?.type, "prep", "listNodes reads the type from the Z prefix");
+  assert.equal(listed?.parent, "D01");
+
+  assert.equal(createChild(run, "D01", "Second", "t", [], "prep").id, "Z02", "prep ids count per type");
+  assert.equal(createChild(run, "D01", "Pattern", "t").id, "T01", "the default child type is unchanged");
+});
+
+test("createChild refuses a child type the parent cannot have", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  createChild(run, "D01", "One", "t");
+  const prep = createChild(run, "D01", "Profile", "t", [], "prep");
+  const before = subjects(run).length;
+
+  assert.throws(
+    () => createChild(run, "T01", "x", "t", [], "prep"),
+    /Node type pattern cannot have prep children/,
+  );
+  assert.throws(
+    () => createChild(run, "D01", "x", "t", [], "puzzle"),
+    /Node type dataset cannot have puzzle children/,
+  );
+  assert.throws(() => createChild(run, prep.id, "x", "t"), /Node type prep has no children/);
+  assert.equal(subjects(run).length, before, "a refused create makes no commit");
+  assert.deepEqual(
+    listNodes(run).map((node) => node.id),
+    ["D01", "T01", "Z01"],
+    "a refused create writes no folder",
+  );
 });
 
 test("the ID counter is per type across the whole run", (t) => {

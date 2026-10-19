@@ -32,6 +32,9 @@ const TreeCreateParams = Type.Object({
   parentId: Type.String({ description: "Id of the parent node, e.g. D01 or T01" }),
   title: Type.String({ description: "Short title; it becomes the node's folder name" }),
   derivedFrom: Type.Optional(Type.Array(Type.String(), { description: "For a fork: ids of the nodes it derives from" })),
+  type: Type.Optional(
+    Type.String({ description: '"prep" for Phase 0 preparation nodes; defaults to the parent\'s usual child type' }),
+  ),
 });
 
 const TreeUpdateParams = Type.Object({
@@ -52,6 +55,7 @@ interface TreeCreateInput {
   parentId: string;
   title: string;
   derivedFrom?: string[];
+  type?: string;
 }
 
 interface TreeUpdateInput {
@@ -86,6 +90,16 @@ function refuseNotYourPhase(nodePhase: number, phase: number): Error {
   return new Error(`Not your phase (node in P${nodePhase}, you own P${phase})`);
 }
 
+/**
+ * The phase a create under `parent` belongs to. The dataset's children are the
+ * exception: a prep node is Phase 0 work, a pattern is Phase 1 work. Every
+ * other parent's children stay in its own phase.
+ */
+function createPhase(parent: NodeRef, type: string | undefined): number {
+  if (parent.type !== "dataset") return parent.phase;
+  return type === "prep" ? 0 : 1;
+}
+
 function result(text: string) {
   return { content: [{ type: "text", text }], details: undefined };
 }
@@ -114,15 +128,15 @@ export default function ownerExtension(pi: PiLike): void {
     name: "tree_create",
     label: "Create node",
     description:
-      "Create a child node under `parentId` in the owner's phase. The parent must be the dataset for phase 1, otherwise it must be in the owner's phase.",
+      "Create a child node under `parentId` in the owner's phase. Under the dataset, `type: \"prep\"` makes a Phase 0 prep node and the default makes a Phase 1 pattern; any other parent must be in the owner's phase.",
     parameters: TreeCreateParams,
     async execute(_toolCallId: string, params: TreeCreateInput) {
       const dir = runDir();
       const phase = ownerPhase();
       const parent = findNode(dir, params.parentId);
-      const allowed = parent.type === "dataset" ? phase === 1 : parent.phase === phase;
-      if (!allowed) throw refuseNotYourPhase(parent.phase, phase);
-      const node = createChild(dir, params.parentId, params.title, actor(phase), params.derivedFrom ?? []);
+      const nodePhase = createPhase(parent, params.type);
+      if (nodePhase !== phase) throw refuseNotYourPhase(nodePhase, phase);
+      const node = createChild(dir, params.parentId, params.title, actor(phase), params.derivedFrom ?? [], params.type);
       return result(`created ${line(node)}`);
     },
   });

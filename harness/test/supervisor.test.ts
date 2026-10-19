@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { decide, viewPhase, type Memory, type PhaseView } from "../supervisor.ts";
+import { decide, phasesWithNodes, viewPhase, type Memory, type PhaseView } from "../supervisor.ts";
 import { createChild, initRun, updateNode } from "../tree.ts";
 
 function makeRun(t: TestContext): string {
@@ -182,6 +182,55 @@ test("the entry marker applies only while the tree has nothing but the root", (t
   createChild(run, "D01", "One", "t");
   const entry = viewPhase(run, 1, "idle", { configured: true, started: false, entry: true });
   assert.deepEqual(entry.ready, ["T01"], "the existing node is the work, not the entry marker");
+});
+
+test("a fresh run's phase 0 is the entry phase, and the hand-off leaves it with no work", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+
+  const fresh = viewPhase(run, 0, "gone", { configured: true, started: false, entry: true });
+  assert.deepEqual(fresh, {
+    phase: 0,
+    owner: "gone",
+    configured: true,
+    started: false,
+    ready: ["(entry)"],
+    running: [],
+    finished: [],
+  });
+  assert.deepEqual(decide([fresh], "head-1", memory()).actions, [
+    { kind: "start", phase: 0, reason: "never-started" },
+  ]);
+
+  // The Phase 0 owner creates Z01 and Z02, closes Z01 and hands Z02 to phase 1.
+  createChild(run, "D01", "Profile", "owner-p0", [], "prep");
+  createChild(run, "D01", "Assemble", "owner-p0", [], "prep");
+  updateNode(run, "Z01", { status: "closed" }, "owner-p0");
+  updateNode(run, "Z02", { phase: 1, status: "ready" }, "owner-p0");
+
+  assert.deepEqual(viewPhase(run, 0, "idle", { configured: true, started: true, entry: true }), {
+    phase: 0,
+    owner: "idle",
+    configured: true,
+    started: true,
+    ready: [],
+    running: [],
+    finished: [],
+  });
+  assert.deepEqual(viewPhase(run, 1, "gone", { configured: true, started: false, entry: false }).ready, ["Z02"]);
+});
+
+test("phasesWithNodes includes phase 0 prep nodes and skips only the root", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  assert.deepEqual(phasesWithNodes(run), [], "the root alone is no phase");
+
+  createChild(run, "D01", "Profile", "t", [], "prep");
+  assert.deepEqual(phasesWithNodes(run), [0], "prep nodes are phase 0 work");
+
+  createChild(run, "D01", "One", "t");
+  createChild(run, "T01", "Why?", "t");
+  assert.deepEqual(phasesWithNodes(run), [0, 1], "phase 1 and its children are one phase");
 });
 
 test("viewPhase splits a phase's nodes into ready, running and finished", (t) => {

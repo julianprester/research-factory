@@ -12,6 +12,7 @@ import { createChild, findNode, initRun } from "../tree.ts";
 
 interface CapturedTool {
   name: string;
+  parameters?: unknown;
   execute(
     toolCallId: string,
     params: Record<string, unknown>,
@@ -163,6 +164,60 @@ test("ownerMayWrite allows its own phase dir and any node brief", (t) => {
     true,
   );
   assert.equal(ownerMayWrite(run, 1, path.join(run, "owners", "phase-1", "..", "phase-2", "ledger.md")), false);
+  assert.equal(ownerMayWrite(run, 0, path.join(run, "prep", "Z01-profile", "brief.md")), true, "prep briefs are node briefs");
+  assert.equal(ownerMayWrite(run, 0, path.join(run, "prep", "Z01-profile", "node.json")), false);
+});
+
+test("tree_create makes a phase-0 prep node for the phase-0 owner only", async (t) => {
+  const run = makeTempDir(t);
+  initRun(run, "data", "work on all-remote platforms");
+  // One capture; the phase is read from the environment when a tool runs.
+  const create = captureTools(1, run, t).get("tree_create");
+  assert.ok(create);
+
+  await assert.rejects(
+    () => create.execute("call-1", { parentId: "D01", title: "Profile", type: "prep" }),
+    /Not your phase \(node in P0, you own P1\)/,
+  );
+
+  process.env.CTC_PHASE = "0";
+  const created = await create.execute("call-2", { parentId: "D01", title: "Profile", type: "prep" });
+  assert.equal(created.content[0].text, "created Z01 prep 0 ready profile");
+  assert.equal(findNode(run, "Z01").phase, 0);
+
+  await assert.rejects(
+    () => create.execute("call-3", { parentId: "D01", title: "a" }),
+    /Not your phase \(node in P1, you own P0\)/,
+  );
+
+  process.env.CTC_PHASE = "1";
+  const pattern = await create.execute("call-4", { parentId: "D01", title: "a" });
+  assert.equal(pattern.content[0].text, "created T01 pattern 1 ready a");
+});
+
+test("tree_create advertises the prep node type", (t) => {
+  const run = makeTempDir(t);
+  const { pi, tools } = fakePi();
+  withOwnerEnv(t, run, 0, () => ownerExtension(pi));
+  const schema = tools.get("tree_create")?.parameters as {
+    properties?: Record<string, { description?: string }>;
+  };
+  assert.match(
+    schema?.properties?.type?.description ?? "",
+    /"prep" for Phase 0 preparation nodes; defaults to the parent's usual child type/,
+  );
+});
+
+test("tree_update hands a prep node on to phase 1", async (t) => {
+  const run = makeTempDir(t);
+  initRun(run, "data", "work on all-remote platforms");
+  createChild(run, "D01", "Assembler", "owner-p0", [], "prep");
+
+  const update = captureTools(0, run, t).get("tree_update");
+  assert.ok(update);
+  const updated = await update.execute("call-1", { nodeId: "Z01", phase: 1, status: "ready" });
+  assert.equal(updated.content[0].text, "updated Z01 prep 1 ready assembler");
+  assert.equal(findNode(run, "Z01").phase, 1);
 });
 
 test("tree_update refuses a node outside the owner's phase and writes nothing", async (t) => {

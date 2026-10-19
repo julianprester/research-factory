@@ -22,8 +22,15 @@ import {
   type Herdr,
   type RunConfig,
 } from "./launch.ts";
-import { decide, viewPhase, type Action, type Memory, type OwnerState, type PhaseView } from "./supervisor.ts";
-import { listNodes } from "./tree.ts";
+import {
+  decide,
+  phasesWithNodes,
+  viewPhase,
+  type Action,
+  type Memory,
+  type OwnerState,
+  type PhaseView,
+} from "./supervisor.ts";
 
 const USAGE = "usage: node harness/supervise.ts <runDir>";
 const DEFAULT_TICK_MS = 60_000;
@@ -53,15 +60,6 @@ function headOf(runDir: string): string {
     stdio: ["ignore", "pipe", "ignore"],
     timeout: 15_000,
   }).trim();
-}
-
-/** The phases the tree has nodes in; the root (phase 0) is not a phase. */
-function phasesWithNodes(runDir: string): Set<number> {
-  const phases = new Set<number>();
-  for (const node of listNodes(runDir)) {
-    if (node.phase > 0) phases.add(node.phase);
-  }
-  return phases;
 }
 
 function hasWork(view: PhaseView): boolean {
@@ -120,7 +118,7 @@ function tick(runDir: string, herdr: Herdr, started: Set<number>, memory: Memory
 
   const configured = new Set<number>();
   for (const key of Object.keys(cfg.phases)) configured.add(Number(key));
-  const phases = phasesWithNodes(runDir);
+  const phases = new Set<number>(phasesWithNodes(runDir));
   for (const phase of configured) phases.add(phase);
   const ordered = [...phases].sort((a, b) => a - b);
   const entry = configured.size > 0 ? Math.min(...configured) : -1;

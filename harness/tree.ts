@@ -35,16 +35,26 @@ export interface RunInfo {
   interest: string;
 }
 
-export const CHILD_TYPE: Record<string, string> = {
-  dataset: "pattern",
-  pattern: "puzzle",
-  puzzle: "explanation",
-  explanation: "framing",
-  framing: "paper",
+/** Every child type a parent type may have, in default-first order. */
+export const CHILD_TYPES: Record<string, string[]> = {
+  dataset: ["pattern", "prep"],
+  pattern: ["puzzle"],
+  puzzle: ["explanation"],
+  explanation: ["framing"],
+  framing: ["paper"],
 };
+
+/**
+ * The default child type: what createChild makes when no type is asked for.
+ * Derived from CHILD_TYPES so the two can never disagree.
+ */
+export const CHILD_TYPE: Record<string, string> = Object.fromEntries(
+  Object.entries(CHILD_TYPES).map(([type, children]) => [type, children[0]]),
+);
 
 export const PREFIX: Record<string, string> = {
   dataset: "D",
+  prep: "Z",
   pattern: "T",
   puzzle: "P",
   explanation: "E",
@@ -54,6 +64,7 @@ export const PREFIX: Record<string, string> = {
 
 /** The folder a node type's nodes live in, under their parent. */
 export const CHILD_DIR: Record<string, string> = {
+  prep: "prep",
   pattern: "patterns",
   puzzle: "puzzles",
   explanation: "explanations",
@@ -300,21 +311,36 @@ function nextId(nodes: NodeRef[], type: string): string {
   return `${prefix}${String(max + 1).padStart(2, "0")}`;
 }
 
+/**
+ * The phase a new child of `parent` starts in: a prep node is Phase 0 work, a
+ * pattern under the dataset is Phase 1 work, and anything else keeps its
+ * parent's phase (children are handed on with their parent).
+ */
+function childPhase(parent: NodeRef, type: string): number {
+  if (type === "prep") return 0;
+  return parent.type === "dataset" ? 1 : parent.phase;
+}
+
 export function createChild(
   runDir: string,
   parentId: string,
   title: string,
   actor: string,
   derivedFrom: string[] = [],
+  type?: string,
 ): NodeRef {
   return withLock(runDir, () => {
     const parent = findNode(runDir, parentId);
-    const type = CHILD_TYPE[parent.type];
-    if (!type) throw new Error(`Node type ${parent.type} has no children`);
+    const allowed = CHILD_TYPES[parent.type] ?? [];
+    if (allowed.length === 0) throw new Error(`Node type ${parent.type} has no children`);
+    const childType = type ?? CHILD_TYPE[parent.type];
+    if (!allowed.includes(childType)) {
+      throw new Error(`Node type ${parent.type} cannot have ${childType} children`);
+    }
 
-    const id = nextId(listNodes(runDir), type);
-    const state: NodeState = { phase: parent.type === "dataset" ? 1 : parent.phase, status: "ready", derivedFrom };
-    const dir = path.join(parent.dir, CHILD_DIR[type], `${id}-${slug(title)}`);
+    const id = nextId(listNodes(runDir), childType);
+    const state: NodeState = { phase: childPhase(parent, childType), status: "ready", derivedFrom };
+    const dir = path.join(parent.dir, CHILD_DIR[childType], `${id}-${slug(title)}`);
     fs.mkdirSync(dir, { recursive: true });
     writeState(dir, state);
     commit(runDir, actor, `[P${state.phase}:createChild] ${id} — ${title}`);

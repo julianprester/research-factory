@@ -124,6 +124,16 @@ export function decide(views: PhaseView[], head: string, memory: Memory): { acti
   return { actions, memory: current };
 }
 
+/** The phases the tree has nodes in; the root (phase 0) is not a phase. */
+export function phasesWithNodes(runDir: string): number[] {
+  const phases = new Set<number>();
+  for (const node of listNodes(runDir)) {
+    // The root is a dataset, not a phase: everything else counts, phase 0 included.
+    if (node.parent !== null) phases.add(node.phase);
+  }
+  return [...phases].sort((a, b) => a - b);
+}
+
 /** One phase as decide() sees it: the run's tree, filtered to that phase. */
 export function viewPhase(
   runDir: string,
