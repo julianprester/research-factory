@@ -6,7 +6,13 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { checkCitations, extractChunkIds } from "../tools/check-citations.ts";
+import {
+  checkCitations,
+  checkQuotes,
+  extractChunkIds,
+  extractQuotedCitations,
+  normaliseForQuote,
+} from "../tools/check-citations.ts";
 
 const CHECK = fileURLToPath(new URL("../tools/check-citations.ts", import.meta.url));
 
@@ -17,24 +23,50 @@ function makeTempDir(t: TestContext): string {
 }
 
 /**
- * A stub `deepis` for the end-to-end tests: it answers `metadata <ids> -f json`
+ * A stub `deepis` for the end-to-end tests. It answers `metadata <ids> -f json`
  * exactly like the real one (known ids in `papers[].chunk_ids`, unknown ones
- * omitted, always exit 0) and appends the size of every batch it resolves to a
- * log file. `STUB_KNOWN` lists the ids it knows, `STUB_LOG` the log path.
+ * omitted, always exit 0) and `context <id> --before N --after N -f json` with
+ * `{chunks: [{chunk_id, target, content}]}`: the target chunk from `STUB_CONTEXT`
+ * when `--before 0 --after 0`, plus neighbours from `STUB_NEIGHBOURS` when the
+ * window is wider. Every metadata batch size is appended to `STUB_LOG`, and so is
+ * every context id, prefixed `context `.
  */
 const STUB_DEEPIS = `#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-if (args[0] !== "metadata") {
-  console.error("stub deepis: unsupported command " + args[0]);
-  process.exit(2);
+const log = (line) => {
+  if (process.env.STUB_LOG) fs.appendFileSync(process.env.STUB_LOG, line + "\\n");
+};
+if (args[0] === "metadata") {
+  const known = new Set((process.env.STUB_KNOWN || "").split(",").filter((id) => id.length > 0));
+  const ids = (args[1] || "").split(",").filter((id) => id.length > 0);
+  log(String(ids.length));
+  const found = ids.filter((id) => known.has(id));
+  const papers = found.length > 0 ? [{ chunk_ids: found.map(Number) }] : [];
+  process.stdout.write(JSON.stringify({ papers }) + "\\n");
+  process.exit(0);
 }
-const known = new Set((process.env.STUB_KNOWN || "").split(",").filter((id) => id.length > 0));
-const ids = (args[1] || "").split(",").filter((id) => id.length > 0);
-if (process.env.STUB_LOG) fs.appendFileSync(process.env.STUB_LOG, ids.length + "\\n");
-const found = ids.filter((id) => known.has(id));
-const papers = found.length > 0 ? [{ chunk_ids: found.map(Number) }] : [];
-process.stdout.write(JSON.stringify({ papers }) + "\\n");
+if (args[0] === "context") {
+  const id = args[1];
+  const before = Number(args[args.indexOf("--before") + 1] || 0);
+  const after = Number(args[args.indexOf("--after") + 1] || 0);
+  log("context " + id);
+  const contents = JSON.parse(process.env.STUB_CONTEXT || "{}");
+  const neighbours = JSON.parse(process.env.STUB_NEIGHBOURS || "{}");
+  const chunks = [];
+  if (contents[id] !== undefined) {
+    chunks.push({ chunk_id: Number(id), target: true, content: contents[id] });
+  }
+  if (before > 0 || after > 0) {
+    for (const neighbour of neighbours[id] || []) {
+      chunks.push({ chunk_id: Number(neighbour[0]), target: false, content: neighbour[1] });
+    }
+  }
+  process.stdout.write(JSON.stringify({ chunks }) + "\\n");
+  process.exit(0);
+}
+console.error("stub deepis: unsupported command " + args[0]);
+process.exit(2);
 `;
 
 interface Stub {
@@ -42,8 +74,13 @@ interface Stub {
   calls: () => number[];
 }
 
+interface StubOptions {
+  context?: Record<string, string>;
+  neighbours?: Record<string, [string, string][]>;
+}
+
 /** Put a stub `deepis` first on PATH and expose the batch sizes it was called with. */
-function stubDeepis(t: TestContext, known: string[]): Stub {
+function stubDeepis(t: TestContext, known: string[], options: StubOptions = {}): Stub {
   const root = makeTempDir(t);
   const bin = path.join(root, "bin");
   mkdirSync(bin, { recursive: true });
@@ -54,13 +91,15 @@ function stubDeepis(t: TestContext, known: string[]): Stub {
     PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
     STUB_KNOWN: known.join(","),
     STUB_LOG: log,
+    STUB_CONTEXT: JSON.stringify(options.context ?? {}),
+    STUB_NEIGHBOURS: JSON.stringify(options.neighbours ?? {}),
   };
   return {
     env,
     calls: () =>
       readFileSync(log, "utf8")
         .split("\n")
-        .filter((line) => line.length > 0)
+        .filter((line) => /^\d+$/.test(line))
         .map(Number),
   };
 }
@@ -181,4 +220,172 @@ test("the CLI exits 2 with a clear message when deepis is unreachable", (t) => {
 
   assert.equal(result.status, 2, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
   assert.match(result.stderr, /deepis/i);
+});
+
+// --- verbatim quote check -------------------------------------------------
+
+test("normaliseForQuote unifies case, whitespace, quote marks, dashes and trailing punctuation", () => {
+  assert.equal(
+    normaliseForQuote("  The \u201cRule\u201d  Is\u2014Stated\u2026.  "),
+    'the "rule" is-stated\u2026',
+  );
+  assert.equal(normaliseForQuote("The organisation\u2019s rule, filed. "), 'the organisation"s rule, filed');
+  assert.equal(
+    normaliseForQuote("what the organization \u2018is\u2019 means"),
+    'what the organization "is" means',
+  );
+});
+
+test("extractQuotedCitations pairs a quote with the citation that follows it", () => {
+  const markdown = 'Theory says "a rule is written down and filed" [@123] and more.';
+
+  assert.deepEqual(extractQuotedCitations(markdown), [
+    { quote: "a rule is written down and filed", ids: ["123"], line: 1 },
+  ]);
+});
+
+test("extractQuotedCitations reads curly quotes and several ids in one bracket", () => {
+  const markdown = 'States \u201ca rule is written down and filed here\u201d [@1;@2].';
+
+  assert.deepEqual(extractQuotedCitations(markdown), [
+    { quote: "a rule is written down and filed here", ids: ["1", "2"], line: 1 },
+  ]);
+});
+
+test("extractQuotedCitations reports the line the quote starts on", () => {
+  const markdown = ['# Heading', '', 'Prose "a rule is written down and filed" [@7].'].join("\n");
+
+  assert.equal(extractQuotedCitations(markdown)[0]?.line, 3);
+});
+
+test("extractQuotedCitations ignores a quote whose citation is more than 60 characters away", () => {
+  const markdown = `A "rule written down and filed for the record" is discussed at length, over ${"many ".repeat(12)}words, before [@123].`;
+
+  assert.deepEqual(extractQuotedCitations(markdown), []);
+});
+
+test("extractQuotedCitations ignores a quote with no following citation at all", () => {
+  assert.deepEqual(extractQuotedCitations('He said "this is plainly a long quotation" to the room.'), []);
+});
+
+test("extractQuotedCitations ignores quotes inside fenced code blocks", () => {
+  const markdown = ["```", '"a rule written down and filed for the record" [@123]', "```"].join("\n");
+
+  assert.deepEqual(extractQuotedCitations(markdown), []);
+});
+
+test("extractQuotedCitations does not mispair quotes around a shorter quotation", () => {
+  // A naive any-two-quotes scan pairs the closing quote of the short span with
+  // the opening quote of the long one and loses both real spans.
+  const markdown =
+    'bots perform "short roles" and supervisory bots weaken "the centrality of human participants" [@9].';
+  const found = extractQuotedCitations(markdown);
+
+  assert.deepEqual(found, [
+    { quote: "the centrality of human participants", ids: ["9"], line: 1 },
+  ]);
+});
+
+type Fetcher = (id: string) => string | null;
+
+function chunkFetcher(texts: Record<string, string>): Fetcher {
+  return (id) => texts[id] ?? null;
+}
+
+const noNeighbours = (): { id: string; text: string }[] => [];
+
+test("checkQuotes passes a quote that is verbatim in a cited chunk", () => {
+  const items = [{ quote: "a rule is written down and filed", ids: ["1"], line: 1 }];
+  const { bad } = checkQuotes(
+    items,
+    chunkFetcher({ "1": "The rule: a rule is written down and filed, exactly." }),
+    noNeighbours,
+  );
+
+  assert.deepEqual(bad, []);
+});
+
+test("checkQuotes passes a quote that differs only in spacing and case", () => {
+  const items = [{ quote: "A  Rule is written DOWN and filed", ids: ["1"], line: 1 }];
+  const { bad } = checkQuotes(items, chunkFetcher({ "1": "a rule is written down and filed." }), noNeighbours);
+
+  assert.deepEqual(bad, []);
+});
+
+test("checkQuotes passes a quote whose curly apostrophe differs from the chunk's straight one", () => {
+  const items = [{ quote: "the organisation\u2019s written rule", ids: ["1"], line: 1 }];
+  const { bad } = checkQuotes(items, chunkFetcher({ "1": "the organisation's written rule" }), noNeighbours);
+
+  assert.deepEqual(bad, []);
+});
+
+test("checkQuotes passes a quote whose inner quote marks differ from the source's", () => {
+  const items = [
+    { quote: "organizational elites would like outsiders to see", ids: ["1"], line: 1 },
+  ];
+  const { bad } = checkQuotes(
+    items,
+    chunkFetcher({ "1": 'the way "organizational elites" would like outsiders to see the organization' }),
+    noNeighbours,
+  );
+
+  assert.deepEqual(bad, []);
+});
+
+test("checkQuotes passes a quote with an ellipsis when both fragments occur", () => {
+  const items = [
+    { quote: "the first fragment is here \u2026 and the second fragment follows", ids: ["1"], line: 1 },
+  ];
+  const { bad } = checkQuotes(
+    items,
+    chunkFetcher({ "1": "the first fragment is here. Later, and the second fragment follows." }),
+    noNeighbours,
+  );
+
+  assert.deepEqual(bad, []);
+});
+
+test("checkQuotes reports a quote that is only in a neighbour with foundIn set to that neighbour", () => {
+  const items = [{ quote: "a rule that is written down and filed", ids: ["1"], line: 4 }];
+  const { bad } = checkQuotes(
+    items,
+    chunkFetcher({ "1": "unrelated text entirely" }),
+    (id) => (id === "1" ? [{ id: "2", text: "elsewhere: a rule that is written down and filed." }] : []),
+  );
+
+  assert.deepEqual(bad, [
+    { quote: "a rule that is written down and filed", ids: ["1"], line: 4, foundIn: "2" },
+  ]);
+});
+
+test("checkQuotes reports foundIn null when the quote is nowhere", () => {
+  const items = [{ quote: "a rule that is written down and filed", ids: ["1"], line: 2 }];
+  const { bad } = checkQuotes(items, chunkFetcher({ "1": "unrelated text entirely" }), noNeighbours);
+
+  assert.deepEqual(bad, [
+    { quote: "a rule that is written down and filed", ids: ["1"], line: 2, foundIn: null },
+  ]);
+});
+
+test("the CLI exits 1 and points at the neighbour chunk that holds a misattributed quote", (t) => {
+  const root = makeTempDir(t);
+  const file = path.join(root, "paper.md");
+  writeFileSync(
+    file,
+    'A verbatim quote "alpha beta gamma delta epsilon" [@111], and a neighbour quote "zeta eta theta iota kappa" [@222].\n',
+  );
+  const stub = stubDeepis(t, ["111", "222"], {
+    context: {
+      "111": "here alpha beta gamma delta epsilon appears.",
+      "222": "nothing of the sort appears in this chunk.",
+    },
+    neighbours: { "222": [["223", "and zeta eta theta iota kappa appears next door."]] },
+  });
+
+  const result = spawnSync(process.execPath, [CHECK, file], { encoding: "utf8", env: stub.env });
+
+  assert.equal(result.status, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(result.stderr, /quote not in cited chunk 222/);
+  assert.match(result.stderr, /found in chunk 223/);
+  assert.doesNotMatch(result.stdout, /ok/);
 });

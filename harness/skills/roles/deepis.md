@@ -37,16 +37,20 @@ command below is capped, timed out and compacted.
 
    Shape: `{"mode", "reranked", "results": [{"chunk_id", "score", "content"}]}`.
 
-2. **Read around** the picked chunk; `target` marks what you searched:
+2. **Read around** the picked chunk; `target` marks what you searched and every
+   chunk prints its own `chunk_id`:
 
    ```bash
    timeout 60 deepis context <chunk_id> -f json \
-     | jq -r '.chunks[] | "\(.chunk_index): \(.content[0:300])"'
+     | jq -r '.chunks[] | "\(.chunk_id) \(.target): \(.content[0:300])"'
    ```
 
    Shape: `{"chunk_id", "paper_id", "before", "after", "chunks":
    [{"chunk_id", "chunk_index", "content", "target"}]}`. This, not the search
-   snippet, is what you are allowed to cite.
+   snippet, is what you are allowed to cite — and the id to cite is the
+   `chunk_id` printed next to the sentence you quote, never the `target` id you
+   searched for. A search returns one best chunk per paper; the sentence you want
+   is often in the chunk one or two positions away.
 
 3. **Confirm the paper.** Batch ids (comma-separated, up to 50); unknown ids
    are simply absent and deepis still exits 0:
@@ -86,11 +90,16 @@ timeout 60 deepis search --fts '"team coordination" OR "distributed collaboratio
   `deepis context`; a search snippet alone is not enough, because it may be
   truncated mid-claim. One line per result in your notes: `chunk_id — what it
   says in one clause`.
+- **Cite the `chunk_id` printed next to the sentence you quote** — the chunk that
+  contains the quotation, never the id you searched for. Put a verbatim quote in
+  quotation marks directly before its citation, so the checker can see which
+  sentence the id belongs to.
 - At least 6 distinct searches before you commit to an entry, spread over the
   area's theories rather than rewordings of one query. If two searches return
   the same chunks, the query is not new.
 - Run `node
   ./harness/tools/check-citations.ts` on
-  your file before you finish: exit 0 means every `[@id]` resolves, exit 1
-  names the ids that do not, exit 2 means deepis itself is unreachable (retry,
-  then BLOCKED).
+  your file before you finish: exit 0 means every `[@id]` resolves and every
+  quoted sentence is verbatim in the chunk it cites, exit 1 names the ids that do
+  not resolve or the quotes that are in a neighbouring chunk, exit 2 means deepis
+  itself is unreachable (retry, then BLOCKED).

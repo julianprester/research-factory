@@ -117,6 +117,15 @@ test("role files and ctc-worker allow reads only of the brief's listed paths", (
   );
 });
 
+test("roles/deepis.md tells workers to cite the chunk id printed next to the quote", () => {
+  const markdown = read("harness/skills/roles/deepis.md").replace(/\s+/g, " ");
+  assert.match(
+    markdown,
+    /cite the `chunk_id` printed next to the sentence you quote/i,
+    "names the chunk id next to the quoted sentence as the one to cite",
+  );
+});
+
 test("DEFAULT_CONFIG configures Phase 0", () => {
   assert.deepEqual(DEFAULT_CONFIG.phases, { "0": "harness/skills/phase-0" });
 });

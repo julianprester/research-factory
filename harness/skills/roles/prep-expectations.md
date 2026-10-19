@@ -75,9 +75,14 @@ data-character.md.> Expect <direction/spread> in <slice A> versus <slice B>.
   not recoverable there.
 - Before you finish, run `node
   ./harness/tools/check-citations.ts
-  workspace/expectations.md` until it exits 0. Exit 1 names the ids deepis does
-  not know: fix them by finding the real chunk, not by deleting the claim's
-  support.
+  workspace/expectations.md` until it exits 0. It checks two things: that every
+  `[@id]` resolves, and that every sentence you put in quotation marks appears in
+  the chunk you cite. Exit 1 names the ids deepis does not know — fix them by
+  finding the real chunk, not by deleting the claim's support — and prints each
+  quote that is not in its cited chunk. On `found in chunk <id>`, the quote is
+  verbatim in that neighbouring chunk: replace the id with the one reported. On
+  `not found nearby`, re-read the source or drop the quote; never edit a quote to
+  make it pass.
 
 ## Definition of Done
 

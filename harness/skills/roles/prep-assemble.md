@@ -55,12 +55,19 @@ Run until it exits 0:
 node ./harness/tools/check-citations.ts workspace/expectations.md
 ```
 
-- exit 0: every `[@id]` resolves.
+It checks two things: that every `[@id]` resolves, and that every sentence in
+quotation marks appears verbatim in the chunk it cites.
+
+- exit 0: every `[@id]` resolves and every quote is in its cited chunk.
 - exit 1: the missing ids are printed. Find the real chunk with `deepis search`
   plus `deepis context` (see
   `./harness/skills/roles/deepis.md`) and
   replace the id. If the claim has no supporting chunk you can read, remove the
-  claim — with the entry if the theory field depended on it.
+  claim — with the entry if the theory field depended on it. The same exit also
+  prints `quote not in cited chunk <id> (line <n>)`. On `found in chunk <id>`, the
+  quote is verbatim in that neighbouring chunk: replace the cited id with the one
+  reported. On `not found nearby`, re-read the source or drop the quote — never
+  edit a quote to make it pass.
 - exit 2: deepis itself is unreachable. Retry once after a minute, then finish
   with `DONE_WITH_CONCERNS` and say so; do not delete citations to make the
   check pass.
