@@ -13,7 +13,7 @@ import test, { type TestContext } from "node:test";
 
 import { init, latestRun, parseCommand, resume, runCommand, status, stop, type FactoryDeps } from "../factory.ts";
 import { HARNESS_ROOT, sessionServerStarter, supervisorPid, type Herdr } from "../launch.ts";
-import { initRun } from "../tree.ts";
+import { createChild, initRun } from "../tree.ts";
 
 type Answer = { ok: boolean; stdout: string };
 
@@ -340,6 +340,25 @@ test("status reports the supervisor, the phases and the last commits", (t) => {
   assert.match(text, /P0 owner idle/);
   assert.match(text, /\[P0:init\]/);
   assert.match(text, /ctc/);
+});
+
+test("status reports phase-0 prep nodes even when config does not configure phase 0", (t) => {
+  const dir = workDir(t);
+  const runDir = makeRun(dir);
+  writeFileSync(
+    path.join(runDir, "config.json"),
+    json({ model: DEFAULT_CONFIG.model, phases: {} }),
+  );
+  createChild(runDir, "D01", "Profile", "test", [], "prep");
+  const deps = fakeDeps();
+
+  const text = status(runDir, deps);
+
+  assert.match(
+    text,
+    /P0 owner not started; not configured; 1 ready/,
+    "a phase-0 prep node is reported even though only the root and the node carry phase 0",
+  );
 });
 
 test("latestRun picks the most recently modified run dir with node.json", (t) => {

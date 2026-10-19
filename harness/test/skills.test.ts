@@ -126,6 +126,27 @@ test("roles/deepis.md tells workers to cite the chunk id printed next to the quo
   );
 });
 
+test("the hand-off contract names the manifest, the prep group, italics and the nudge rule", () => {
+  assert.match(
+    read("harness/skills/roles/prep-assemble.md"),
+    /manifest\.md/,
+    "prep-assemble writes workspace/manifest.md",
+  );
+  assert.match(
+    read("harness/skills/phase-owner/SKILL.md"),
+    /`prep\/`/,
+    "phase-owner lists prep/ among the node folders",
+  );
+  assert.match(
+    read("harness/skills/roles/deepis.md"),
+    /Titles and terms go in italics/,
+    "deepis.md italicises titles and terms rather than quoting them",
+  );
+  const phase0 = read("harness/skills/phase-0/SKILL.md");
+  assert.match(phase0, /not a dispatch order/, "phase-0 says a nudge is not a dispatch order");
+  assert.match(phase0, /manifest\.md/, "phase-0's hand-off note names manifest.md");
+});
+
 test("DEFAULT_CONFIG configures Phase 0", () => {
   assert.deepEqual(DEFAULT_CONFIG.phases, { "0": "harness/skills/phase-0" });
 });

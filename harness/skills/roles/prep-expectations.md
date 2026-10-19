@@ -66,6 +66,16 @@ data-character.md.> Expect <direction/spread> in <slice A> versus <slice B>.
   only talks about. An implication about behaviour, compliance or bot actions
   needs evidence this corpus does not have: reframe it as a claim about the
   documented rules, or as needing later sampling.
+- **Populations must be literal.** When your entries share a population, state
+  it once as a literal token or regex list and let the other entries add
+  sub-conditions, never redefine it. Every population must be matchable
+  literally — names, tokens or file-path patterns — not a semantic qualifier
+  such as "used by an automation"; if you cannot make it literal, flag the entry
+  for Phase 1 to operationalise.
+- **Cells need files.** A comparison whose cells mostly hold fewer than 10
+  exploration files must pool slices or be dropped or flagged for Phase 1. Say
+  which you did in the entry and in `rounds.md`; the assembler records it in
+  `summary.md`.
 - **Rival or none.** Tavory & Timmermans (2014): a surprise only exists against
   a theoretical reading, so a competing reading of the same material is the most
   valuable line in the entry. Search for one; `none found` is an answer, an
@@ -80,9 +90,11 @@ data-character.md.> Expect <direction/spread> in <slice A> versus <slice B>.
   the chunk you cite. Exit 1 names the ids deepis does not know — fix them by
   finding the real chunk, not by deleting the claim's support — and prints each
   quote that is not in its cited chunk. On `found in chunk <id>`, the quote is
-  verbatim in that neighbouring chunk: replace the id with the one reported. On
-  `not found nearby`, re-read the source or drop the quote; never edit a quote to
-  make it pass.
+  verbatim in that neighbouring chunk: if the flagged span is a title or a term,
+  italicise it instead of quoting it; otherwise replace the id with the one
+  reported, but only when the reported chunk contains the quoted sentence and you
+  have read it. On `not found nearby`, re-read the source or drop the quote;
+  never edit a quote to make it pass.
 
 ## Definition of Done
 

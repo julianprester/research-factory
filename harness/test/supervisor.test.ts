@@ -61,13 +61,14 @@ test("an idle owner is nudged when a handoff is waiting", () => {
   assert.ok(action.message.includes("T01"), action.message);
 });
 
-test("a nudge names the ready nodes and the waiting handoffs", () => {
+test("a nudge states the ready and handoff counts without ordering a dispatch", () => {
   const result = decide([view({ phase: 2, ready: ["T03", "T04"], finished: ["T01"] })], "head-1", memory());
   assert.deepEqual(result.actions, [
     {
       kind: "nudge",
       phase: 2,
-      message: "Continue phase 2: ready T03, T04; handoffs waiting in T01. Trust tree_list and your ledger.",
+      message:
+        "Continue phase 2: 2 ready, 1 handoffs waiting (T03, T04, T01). Trust tree_list and your ledger; your phase skill's limits still apply.",
     },
   ]);
 });

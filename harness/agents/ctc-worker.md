@@ -17,7 +17,9 @@ Write only inside your node folder:
 - `handoff.md` — your final handoff.
 
 Read only the input paths the brief lists, even when they point into another
-node's folder; never browse a node folder the brief does not name.
+node's folder; never browse a node folder the brief does not name. You may also
+read your own node folder — `rounds.md`, `handoff.md` and `workspace/` — even
+when the brief does not list them.
 
 Never start sub-agents — do the work yourself with read, write, edit and bash. Do not use bash to write files; use write/edit, so the node guard can see every write.
 

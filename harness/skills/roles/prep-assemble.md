@@ -14,6 +14,7 @@ scanner, and an entry that cannot be measured poisons a whole Phase 1 node.
 
 - `workspace/expectations.md` — the merged list
 - `workspace/summary.md` — what you kept, merged, dropped and why
+- `workspace/manifest.md` — the absolute paths Phase 1 needs for its inputs
 
 ## Merge
 
@@ -46,6 +47,30 @@ scanner, and an entry that cannot be measured poisons a whole Phase 1 node.
    not a failure.
 5. Leave the **Rival** field alone unless its citation is broken; it decides
    whether Phase 1 runs a rival scanner.
+6. **Open `expectations.md` with a §0 Measurement universe paragraph.** It names
+   the exploration list (`prep/Z01-profile/workspace/split/exploration.txt`, or
+   the list for the analysed extension) and says that Phase 1 measures the
+   exploration split only: the full-corpus sizes in `profile.md` §5 are context,
+   not denominators. Every implication that quotes a size says whether it is a
+   full-corpus size or an exploration size.
+7. **Make shared populations literal.** When entries share a population, state
+   it once in §0 as a literal token or regex list; an entry may add a
+   sub-condition over that list but may never redefine it. Every population must
+   be matchable literally — names, tokens or file-path patterns, never a
+   semantic qualifier such as "used by an automation" — or be flagged in the
+   entry for Phase 1 to operationalise. An entry that redefines a shared
+   population is rewritten to the sub-condition form, or dropped.
+8. **Check the cells, not just the comparison.** A comparison whose cells mostly
+   hold fewer than 10 exploration files must pool slices or be dropped or
+   flagged for Phase 1. Record the pooling, drop or flag in `summary.md`.
+
+## Manifest
+
+Write `workspace/manifest.md` listing the absolute paths Phase 1 needs: this
+node's `workspace/expectations.md`, and Z01's `workspace/profile.md`,
+`workspace/data-character.md`, `workspace/glossary.md`,
+`workspace/split/exploration.txt` and `workspace/split/holdout.txt`. One path per
+line, each absolute. Phase 1 reads this manifest to find its inputs.
 
 ## Citations
 
@@ -65,9 +90,11 @@ quotation marks appears verbatim in the chunk it cites.
   replace the id. If the claim has no supporting chunk you can read, remove the
   claim — with the entry if the theory field depended on it. The same exit also
   prints `quote not in cited chunk <id> (line <n>)`. On `found in chunk <id>`, the
-  quote is verbatim in that neighbouring chunk: replace the cited id with the one
-  reported. On `not found nearby`, re-read the source or drop the quote — never
-  edit a quote to make it pass.
+  quote is verbatim in that neighbouring chunk: if the flagged span is a title or
+  a term, italicise it instead of quoting it; otherwise replace the cited id with
+  the one reported, but only when the reported chunk contains the quoted sentence
+  and you have read it. On `not found nearby`, re-read the source or drop the
+  quote — never edit a quote to make it pass.
 - exit 2: deepis itself is unreachable. Retry once after a minute, then finish
   with `DONE_WITH_CONCERNS` and say so; do not delete citations to make the
   check pass.
@@ -81,14 +108,19 @@ Never invent an id, and never cite a chunk you have not read with
 - Every merge: which entries, why.
 - Every drop or rewrite: the entry, what changed, the reason (slice missing,
   raw total, behaviour not in the corpus, broken citation).
+- Every pooled, dropped or flagged small-cell comparison: the entry and the
+  choice.
 - The final count, and the `check-citations` result line.
 
 ## Definition of Done
 
-`workspace/expectations.md` is numbered from `E01` with no gaps, every entry has
-**Area**, **Theory**, **Prediction**, **Measurable implication here** and
-**Rival**, every implication names a slice listed in `profile.md`, and
-`check-citations` exits 0. `summary.md`'s counts match the file. `handoff.md`
+`workspace/expectations.md` opens with the §0 Measurement universe paragraph and
+is numbered from `E01` with no gaps, every entry has **Area**, **Theory**,
+**Prediction**, **Measurable implication here** and **Rival**, every implication
+names slices listed in `profile.md` and a population that is literal or flagged,
+no shared population is redefined, every small-cell comparison is pooled,
+dropped or flagged, and `check-citations` exits 0. `workspace/manifest.md` lists
+the six absolute input paths. `summary.md`'s counts match the file. `handoff.md`
 starts with `Status: DONE` (or `DONE_WITH_CONCERNS`, naming any area whose
 entries were mostly dropped) and gives the entry count on the Summary line — the
 owner writes that number into the tree.

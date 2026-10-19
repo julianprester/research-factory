@@ -94,6 +94,10 @@ timeout 60 deepis search --fts '"team coordination" OR "distributed collaboratio
   contains the quotation, never the id you searched for. Put a verbatim quote in
   quotation marks directly before its citation, so the checker can see which
   sentence the id belongs to.
+- **Titles and terms go in italics, never in quotation marks.** A paper title,
+  section heading or practice term is not a quotation: italicise it. If the
+  quote check flags such a span with `found in chunk`, the repair is to remove
+  the quotation marks and italicise it, not to reattribute it.
 - At least 6 distinct searches before you commit to an entry, spread over the
   area's theories rather than rewordings of one query. If two searches return
   the same chunks, the query is not new.

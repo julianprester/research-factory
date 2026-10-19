@@ -11,7 +11,8 @@ You never wait for a human; when you must decide, decide and record a ruling.
 
 The run dir is `$CTC_RUN_DIR`. A node folder is the `<group>/<id>-*` directory
 under it (groups: `patterns/`, `puzzles/`, `explanations/`, `framings/`,
-`papers/`).
+`papers/`, `prep/`). A phase skill can mark a ready node as input-only: an
+input-only node is read for its workspace, never briefed or dispatched.
 
 ## The loop
 

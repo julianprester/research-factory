@@ -22,9 +22,12 @@ continue from the furthest point that already exists. Do not recreate work:
 - The assembler node is already in `phase: 1`: Phase 0 is complete. Do nothing;
   the Phase 1 owner has the job list.
 - The assembler node exists in phase 0: do not create another. Resume or
-  re-brief it, and do not create area nodes again.
-- Area nodes exist: do not create them again — resume or re-brief them — and
-  create only the areas that are missing.
+  re-brief it only when its `handoff.md` is missing or does not start with
+  `DONE`/`DONE_WITH_CONCERNS`; do not create area nodes again.
+- Area nodes exist: do not create them again — resume or re-brief only those
+  whose `handoff.md` is missing or does not start with
+  `DONE`/`DONE_WITH_CONCERNS` — and create only the areas that are missing.
+- Z01 exists but has no handoff: re-brief or dispatch it before choosing areas.
 - None of the above: start at Z01 below.
 
 Read `node.json` in the run dir: it holds `dataset` and `interest`. The interest
@@ -73,8 +76,10 @@ titled the area) and a brief for each:
 
 **At most 3 prep workers at a time.** This Phase 0 limit of 3 overrides
 phase-owner's limit of 4: phase-owner's loop applies here, but its cap gives way
-to this one. An earlier run's 20 parallel unbounded literature searchers reached
-257k tokens; the cap is what keeps the phase bounded.
+to this one. A supervisor nudge is not a dispatch order: it reports what is
+waiting, not what to do, and the 3-worker cap still holds. An earlier run's 20
+parallel unbounded literature searchers reached 257k tokens; the cap is what
+keeps the phase bounded.
 
 ## 3. The assembler
 
@@ -85,7 +90,8 @@ node and brief it:
 - **Skill:** `./harness/skills/roles/prep-assemble.md`
 - **Inputs:** every area node's `workspace/expectations.md` (list the paths
   explicitly), plus Z01's `profile.md`, `data-character.md`, `glossary.md`.
-- **Outputs:** `workspace/expectations.md`, `workspace/summary.md`.
+- **Outputs:** `workspace/expectations.md`, `workspace/summary.md`,
+  `workspace/manifest.md`.
 - **Definition of Done:** the role file's DoD, copied in — including
   `check-citations` exit 0.
 
@@ -99,10 +105,15 @@ On the assembler's `DONE` or `DONE_WITH_CONCERNS`, close the phase in this order
 
 1. `tree_update` Z01 and every area node to `status: "closed"`.
 2. Then, as the **last** tree call,
-   `tree_update({ nodeId: "<assembler>", phase: 1, status: "ready", note: "Phase 0 complete: <n> expectations" })`
+   `tree_update({ nodeId: "<assembler>", phase: 1, status: "ready", note: "Phase 0 complete: <n> expectations; input: workspace/manifest.md" })`
    with `<n>` from the assembler's handoff. If the handoff is
    `DONE_WITH_CONCERNS`, carry its concern into the note:
-   `Phase 0 complete: <n> expectations — <concern>`.
+   `Phase 0 complete: <n> expectations; input: workspace/manifest.md — <concern>`.
+
+The handed-on prep node is Phase 1's input; Phase 1 reads it and never briefs or
+dispatches it. The node's `workspace/manifest.md` names the absolute paths of
+that input: `expectations.md`, `profile.md`, `data-character.md`, `glossary.md`,
+`split/exploration.txt` and `split/holdout.txt`.
 
 Ledger each line before its `tree_*` call, as phase-owner requires. Then stop:
 Phase 0 has no queue left, so the owner ends its turn and the supervisor finishes

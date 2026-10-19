@@ -178,6 +178,33 @@ test("at depth 2 every stratum keeps at least one exploration file", () => {
   assert.deepEqual([...explored].sort(), [...totals.keys()].sort());
 });
 
+test("at depth 2 every top-level section's hold-out stays within one of round(n x fraction)", () => {
+  const files: string[] = [];
+  const sections: Record<string, number> = { engineering: 13, people: 8, product: 4, sales: 2 };
+  for (const [section, count] of Object.entries(sections)) {
+    for (let i = 1; i <= count; i++) files.push(`handbook/${section}/doc${i}.md`);
+  }
+  for (let i = 1; i <= 7; i++) files.push(`job-description-library/jd${i}.md`);
+  for (let i = 1; i <= 3; i++) files.push(`teamops/t${i}.md`);
+  files.push("README.md", "notes.md");
+
+  const { holdout } = splitHoldout(files, { fraction: FRACTION, seed: SEED, depth: 2 });
+  const topOf = (file: string): string => (file.includes("/") ? (file.split("/")[0] as string) : ".");
+  const totals = new Map<string, number>();
+  const held = new Map<string, number>();
+  for (const file of files) totals.set(topOf(file), (totals.get(topOf(file)) ?? 0) + 1);
+  for (const file of holdout) held.set(topOf(file), (held.get(topOf(file)) ?? 0) + 1);
+
+  for (const [top, total] of totals) {
+    const taken = held.get(top) ?? 0;
+    const target = Math.round(total * FRACTION);
+    assert.ok(
+      Math.abs(taken - target) <= 1,
+      `top-level ${top}: ${taken} holdout of ${total}, expected ${target} +/- 1`,
+    );
+  }
+});
+
 test("holdout.ts accepts --flag=value forms and --depth", (t) => {
   const root = makeTempDir(t);
   const dataset = path.join(root, "dataset");

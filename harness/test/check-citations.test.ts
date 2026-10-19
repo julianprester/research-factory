@@ -201,6 +201,12 @@ test("extractChunkIds ignores emails and brackets that are not citations", () =>
   assert.deepEqual(extractChunkIds(markdown), ["7"]);
 });
 
+test("extractChunkIds ignores citations inside fenced code, like the quote check", () => {
+  const markdown = ["```", "cite it as [@123]", "```", "but cite [@7] in prose."].join("\n");
+
+  assert.deepEqual(extractChunkIds(markdown), ["7"]);
+});
+
 test("extractChunkIds returns nothing for prose without citations", () => {
   assert.deepEqual(extractChunkIds("No citations here. [see above]"), []);
 });
@@ -722,5 +728,10 @@ test("the CLI exits 1 and points at the neighbour chunk that holds a misattribut
   assert.equal(result.status, 1, `stdout: ${result.stdout}\nstderr: ${result.stderr}`);
   assert.match(result.stderr, /quote not in cited chunk 222/);
   assert.match(result.stderr, /found in chunk 223/);
+  assert.match(
+    result.stderr,
+    /found in chunk 223 \(if this is a title or term, italicise it instead\)/,
+    "the neighbour hint tells the worker to italicise a title or term",
+  );
   assert.doesNotMatch(result.stdout, /ok/);
 });

@@ -43,15 +43,16 @@ const NEIGHBOUR_WINDOW = 4;
 export class DeepisUnavailable extends Error {}
 
 /**
- * The chunk ids cited by `markdown`, unique and in first-seen order.
- * Citation forms: `[@123]`, `[@1;@2]` and `[-@3, p. 4]`. An `@` is only a
- * citation inside square brackets and after `[` (via `^`), `;`, `,` or `-`, so
- * an email such as `foo@123.com` and prose brackets like `[see above]` are ignored.
+ * The chunk ids cited by `markdown`, unique and in first-seen order. Fenced code
+ * is ignored, exactly as the quote check ignores it. Citation forms: `[@123]`,
+ * `[@1;@2]` and `[-@3, p. 4]`. An `@` is only a citation inside square brackets
+ * and after `[` (via `^`), `;`, `,` or `-`, so an email such as `foo@123.com`
+ * and prose brackets like `[see above]` are ignored.
  */
 export function extractChunkIds(markdown: string): string[] {
   const ids: string[] = [];
   const seen = new Set<string>();
-  for (const bracket of markdown.matchAll(/\[[^\]]*\]/g)) {
+  for (const bracket of stripFences(markdown).matchAll(/\[[^\]]*\]/g)) {
     for (const id of citationIdsInBracket(bracket[0].slice(1, -1))) {
       if (!seen.has(id)) {
         seen.add(id);
@@ -563,7 +564,10 @@ function main(argv: string[]): number {
   }
   for (const id of missing) console.error(`missing chunk id ${id}`);
   for (const item of bad) {
-    const where = item.foundIn === null ? "not found nearby" : `found in chunk ${item.foundIn}`;
+    const where =
+      item.foundIn === null
+        ? "not found nearby"
+        : `found in chunk ${item.foundIn} (if this is a title or term, italicise it instead)`;
     const preview = item.quote.replace(/\s+/g, " ").slice(0, 80);
     console.error(
       `quote not in cited chunk ${item.ids.join(";")} (line ${item.line}): "${preview}" — ${where}`,

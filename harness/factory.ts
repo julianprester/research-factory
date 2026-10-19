@@ -219,7 +219,7 @@ export function status(runDir: string | undefined, deps: FactoryDeps = realDeps(
   const nodes = listNodes(dir);
   const phases = new Set<number>();
   if (cfg !== null) for (const key of Object.keys(cfg.phases)) phases.add(Number(key));
-  for (const node of nodes) if (node.phase > 0) phases.add(node.phase);
+  for (const node of nodes) if (node.parent !== null) phases.add(node.phase);
 
   for (const phase of [...phases].sort((a, b) => a - b)) {
     const state = ownerState(herdr, phase);

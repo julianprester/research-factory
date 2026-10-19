@@ -62,10 +62,8 @@ function unconfiguredPhases(views: PhaseView[]): Record<number, number> {
 }
 
 function nudgeMessage(view: PhaseView): string {
-  const parts: string[] = [];
-  if (view.ready.length > 0) parts.push(`ready ${view.ready.join(", ")}`);
-  if (view.finished.length > 0) parts.push(`handoffs waiting in ${view.finished.join(", ")}`);
-  return `Continue phase ${view.phase}: ${parts.join("; ")}. Trust tree_list and your ledger.`;
+  const ids = [...view.ready, ...view.finished];
+  return `Continue phase ${view.phase}: ${view.ready.length} ready, ${view.finished.length} handoffs waiting (${ids.join(", ")}). Trust tree_list and your ledger; your phase skill's limits still apply.`;
 }
 
 export function decide(views: PhaseView[], head: string, memory: Memory): { actions: Action[]; memory: Memory } {

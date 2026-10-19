@@ -32,12 +32,16 @@ Template for a document corpus; adapt the labels to what the data is.
 4. **Links.** Number of files containing at least one internal link, and the
    total internal links; the ten most-linked targets with their in-link counts.
 5. **Slices available for comparison.** Every comparison a later phase could
-   make, each with its exact size (files, and share of the dataset): the
-   top-level sections, a few second-level folders, a document-type split, and
-   anything else unevenly distributed (long versus short documents, old versus
-   new if dates exist). A slice is only usable if its size is stated here; a
-   comparison no slice supports is not measurable, so list generously and
-   honestly — a bucket of three files is not a slice.
+   make, each with its exact full-corpus size (files, and share of the dataset)
+   and, in a column beside it, the number of those files in
+   `workspace/split/exploration.txt` (or in the exploration list for the
+   analysed extension). Phase 1 measures the exploration split, so the second
+   number is the one a comparison uses; the full-corpus size is context. Cover
+   the top-level sections, a few second-level folders, a document-type split,
+   and anything else unevenly distributed (long versus short documents, old
+   versus new if dates exist). A slice is only usable if both sizes are stated
+   here; a comparison no slice supports is not measurable, so list generously
+   and honestly — a bucket of three files is not a slice.
 
 Every number here comes from a command saved under `workspace/scripts/` (shell
 or Node; no pandas), so a reader can rerun it. Small reads only: no sampling of
