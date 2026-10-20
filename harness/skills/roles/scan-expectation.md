@@ -58,9 +58,12 @@ pandas), deterministic, and runnable from the node dir. They read only files
 listed in the exploration list — `split/exploration.txt`, or the
 `split-<ext>/exploration.txt` the manifest names — and the dataset files those
 entries name. Never read the hold-out list, and never write the word `holdout`
-anywhere in a script, not even in a comment: `check-pattern` fails the node on
-the string alone. Save each script's raw output under `workspace/results/`, so a
-reviewer can re-run it and compare it with the card.
+anywhere in a script — in any spelling: `holdout`, `hold-out`, `hold_out`,
+case-insensitive — not even in a comment: `check-pattern` fails the node on any
+of them. Small analyses only: counts, shares, cross-tabs, comparisons across
+slices, distinctive-word lists, co-occurrence, link counts. No fitted models.
+Save each script's raw output under `workspace/results/`, so a reviewer can
+re-run it and compare it with the card.
 
 A page or two of close reading is allowed, but only to check what a count is
 counting (is this "disclaimer" the same thing in both slices?). Not to choose
@@ -139,4 +142,5 @@ prints anything but `ok`, fix what it names — except `measure.md`, which stays
 as pre-registered.
 
 Write only inside this node's `workspace/`, `rounds.md` and `handoff.md`. Read
-only the input paths the brief lists, plus your own node's files.
+only the input paths the brief lists — never a hold-out list, even when the
+manifest names it.

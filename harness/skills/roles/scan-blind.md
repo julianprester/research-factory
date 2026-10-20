@@ -37,9 +37,9 @@ Write `workspace/measure.md` before you measure anything. It states:
 - **Robustness** — the second operationalisation you will also run (a second
   token list, denominator or slice grouping) and what would make the regularity
   survive it.
-- **Small-cell rule** — the convention the brief quotes from §0: a cell under
-  5 documents is reported as a count, never as a share; if most of the
-  comparison's cells fall under it, the measure is `unmeasurable`.
+- **Small-cell rule** — a cell under 5 documents is reported as a count, never
+  as a share; if most of the comparison's cells fall under it, the measure is
+  `unmeasurable`.
 
 Then call `preregister` once. It commits `workspace/measure.md` and prints the
 short sha. Never edit `measure.md` afterwards — the criterion you chose before
@@ -53,8 +53,11 @@ pandas), deterministic, and runnable from the node dir. They read only files
 listed in the exploration list — `split/exploration.txt`, or the
 `split-<ext>/exploration.txt` the manifest names — and the dataset files those
 entries name. Never read the hold-out list, and never write the word `holdout`
-anywhere in a script, not even in a comment: `check-pattern` fails the node on
-the string alone. Save each script's raw output under `workspace/results/`.
+anywhere in a script — in any spelling: `holdout`, `hold-out`, `hold_out`,
+case-insensitive — not even in a comment: `check-pattern` fails the node on any
+of them. Small analyses only: counts, shares, cross-tabs, comparisons across
+slices, distinctive-word lists, co-occurrence, link counts. No fitted models.
+Save each script's raw output under `workspace/results/`.
 
 A page or two of close reading is allowed, but only to check what a count is
 counting. Not to choose documents, not to look for a story, and not to revise
@@ -78,8 +81,13 @@ count it comes from.
 ## Verdict
 
 The first line is exactly `open` when the result meets the pre-registered
-regularity criterion, and `unmeasurable` when the measure cannot be computed as
-written. Then why, checked against that criterion.
+regularity criterion, and `unmeasurable` in every other case. A criterion that
+was not met is **not** `open`: the measure was computed, so report
+`unmeasurable` and give the measured counts and the shortfall against the
+criterion (the spread or ordering that fell short). Use the same `unmeasurable`
+when the measure cannot be computed as written — the population matches too
+little, or most cells are under the small-cell rule. Then why, checked against
+the criterion.
 
 ## Robustness
 
@@ -89,7 +97,8 @@ survives it.
 ## Worst fits
 
 The 3–5 slices or documents that sit furthest from the regularity you report, or
-— when `unmeasurable` — the cells that could not carry it, with their paths.
+— when the measure could not be computed — the cells that could not carry it,
+with their paths.
 
 ## Deviations
 
@@ -101,7 +110,9 @@ Write `handoff.md`:
 
 - line 1: `Status: DONE`, or `DONE_WITH_CONCERNS` naming the concern;
 - line 2: `Summary: <one line>`;
-- line 3: `Verdict: open` or `Verdict: unmeasurable`, matching the card;
+- line 3: `Verdict: open` when the regularity criterion was met, and
+  `Verdict: unmeasurable` otherwise — a criterion not met included — matching
+  the card;
 - then the evidence: paths under `workspace/`, how each script was run, and any
   open question.
 
@@ -122,11 +133,13 @@ Write `handoff.md`:
 `workspace/measure.md` carries the pre-registration (`preregister` printed a
 sha) and is unchanged since; the scripts under `workspace/scripts/` re-run to
 reproduce `workspace/results/`; `workspace/pattern.md` has all six headings; its
-`## Verdict` first line is `open` or `unmeasurable` and agrees with the
-handoff's `Verdict:` line; `expectations.md` was never read; `handoff.md` starts
-with `Status: DONE` (or `DONE_WITH_CONCERNS`). The owner runs `check-pattern.ts`
-on the node: if it prints anything but `ok`, fix what it names — except
-`measure.md`, which stays as pre-registered.
+`## Verdict` first line is `open` only when the pre-registered criterion was met
+and `unmeasurable` otherwise (a criterion not met included), and it agrees with
+the handoff's `Verdict:` line; `expectations.md` was never read; `handoff.md`
+starts with `Status: DONE` (or `DONE_WITH_CONCERNS`). The owner runs
+`check-pattern.ts` on the node: if it prints anything but `ok`, fix what it
+names — except `measure.md`, which stays as pre-registered.
 
 Write only inside this node's `workspace/`, `rounds.md` and `handoff.md`. Read
-only the input paths the brief lists, plus your own node's files.
+only the input paths the brief lists — never a hold-out list, even when the
+manifest names it.

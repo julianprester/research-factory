@@ -25,7 +25,7 @@ continue from what exists. Do not recreate work:
   Re-brief it only when its `handoff.md` is missing or does not start with
   `DONE`/`DONE_WITH_CONCERNS`.
 - Every expectation has a pattern node with a processed handoff and a blind
-  batch has run: go straight to §5.
+  batch has run: go to §5 to decide whether a second blind batch is needed.
 - Otherwise resume wherever the nodes leave off.
 
 Then read the job list:
@@ -48,8 +48,9 @@ tree_create({ parentId: "D01", title: "E03 <short title>" })
 
 - **Role:** expectation scanner for `<E<n>>` in the run's interest.
 - **Skill:** `./harness/skills/roles/scan-expectation.md`
-- **Inputs:** every path in `workspace/manifest.md`; `expectations.md` §0 (the
-  shared populations and the small-cell rule) and the entry's id and full text.
+- **Inputs:** every path in `workspace/manifest.md` except its hold-out lists;
+  `expectations.md` §0 (the shared populations and the small-cell rule) and the
+  entry's id and full text.
 - **Outputs:** `workspace/measure.md`, `workspace/scripts/`,
   `workspace/results/`, `workspace/pattern.md`.
 - **Definition of Done:** the role file's DoD, copied in.
@@ -75,15 +76,25 @@ be judged; otherwise it prints its problems to stdout, one per line, and exits
 1; exit 2 is a usage error (a wrong path, or no run above the node), so fix the
 command. Any output other than `ok` goes back through phase-owner's fix loop
 (resume the worker with the problem lines): the node is not handed on until the
-check passes.
+check passes. That check runs while the card is still uncommitted, so it cannot
+see whether `pattern.md` was committed after the pre-registration: after the
+`tree_update` that hands the node on or closes it — the call whose `git add -A`
+commits the card — re-run `check-pattern.ts` on every such node, and record any
+problem it now reports in the ledger.
 
-Then act on the handoff's `Verdict:` line (line 3):
+Then apply §4's test **before** routing: a duplicate or an artifact is `closed`
+(`duplicate of <id>`, `artifact: <why>`) while the node is still in phase 1,
+because a node that has left the phase can no longer be updated.
+
+Only then act on the handoff's `Verdict:` line (line 3):
 
 - `violated`, `mixed` or `open` — a surprise, or a regularity Phase 2 should
   interpret: `tree_update({ nodeId, phase: 2, status: "ready", note: "<verdict>: <one line>" })`.
 - `held` — the expectation survived: `status: "closed"`, note
   `expected: <one line>`.
-- `unmeasurable` — `status: "closed"`, note `unmeasurable: <why>`.
+- `unmeasurable` — `status: "closed"`, note `unmeasurable: <why>`; a blind
+  scanner whose pre-registered criterion was not met is closed with note
+  `unmeasurable: no regularity`.
 
 ## 3. Blind scanners
 
@@ -101,18 +112,19 @@ first:
 The first batch is about one scanner per five expectation scanners, so a run of
 17 entries starts with 3. Brief each with role `scan-blind`, skill
 `./harness/skills/roles/scan-blind.md`, the
-manifest paths and its angle — no expectation — and dispatch as phase-owner
-says.
+manifest paths except its hold-out lists and its angle — no expectation — and
+dispatch as phase-owner says.
 
 ## 4. Hygiene
 
-Before you hand a node on, compare its card with the patterns already processed:
+§2 applies this test after the checker and before routing, while the node is
+still in phase 1. A pattern is not a finding when:
 
-- The same measure on the same population as an earlier pattern, under any
-  angle, is a duplicate: `closed`, note `duplicate of <id>`.
-- A pattern that is an artifact of the data's form — template boilerplate,
-  generated pages, a directory convention rather than organising — is not a
-  finding: `closed`, note `artifact: <why>`.
+- its measure and population repeat an earlier pattern's, under any angle — a
+  duplicate: `closed`, note `duplicate of <id>`;
+- it is an artifact of the data's form — template boilerplate, generated pages,
+  a directory convention rather than organising: `closed`, note
+  `artifact: <why>`.
 
 Neither is a failure: a duplicate says an expectation already covers that angle,
 and an artifact says the corpus's form produced the regularity.
