@@ -245,6 +245,73 @@ function commit(runDir: string, actor: string, subject: string, note?: string): 
   git(runDir, ["commit", ...message, "--allow-empty"], actor);
 }
 
+/** Run a read-only git command and return its stdout. */
+function gitOut(runDir: string, args: string[]): string {
+  return execFileSync("git", args, { cwd: runDir, encoding: "utf8" });
+}
+
+/**
+ * Commit exactly one file as `actor` and return the new commit's short sha.
+ *
+ * `commit()` adds the whole tree, so a worker's half-written files in other
+ * nodes would ride along; this commits only `relPath`. An unchanged file still
+ * gets a commit (`--allow-empty`): the marker commit is the record that the
+ * file was pre-registered, and a tree operation's `git add -A` may already
+ * have swept the file into an unrelated commit. Only a missing file throws.
+ */
+export function commitFile(runDir: string, relPath: string, actor: string, subject: string): string {
+  return withLock(runDir, () => {
+    if (!fs.existsSync(path.join(runDir, relPath))) {
+      throw new Error(`${relPath} does not exist: write it before committing it`);
+    }
+    // The add makes the path known to the index, so the partial commit below
+    // can see it even when it is still untracked.
+    git(runDir, ["add", "--", relPath], actor);
+    git(runDir, ["commit", "--allow-empty", "-m", subject, "--", relPath], actor);
+    return gitOut(runDir, ["rev-parse", "--short", "HEAD"]).trim();
+  });
+}
+
+/** The id a node folder names: `T01-slug` → `T01`; undefined for anything else. */
+export function nodeIdOf(dir: string): string | undefined {
+  const match = NODE_FOLDER.exec(path.basename(path.resolve(dir)));
+  return match?.[1] !== undefined && match[2] !== undefined ? `${match[1]}${match[2]}` : undefined;
+}
+
+/** A pre-registration marker commit: the full sha and the abbreviated form git prints. */
+export interface Preregistration {
+  sha: string;
+  short: string;
+}
+
+/**
+ * The run's `[P1:preregister] <id>` commits, oldest first. The id must be
+ * followed by whitespace or the end of the subject, so T01 never matches
+ * T011's marker.
+ */
+export function preregisterCommits(runDir: string, id: string): Preregistration[] {
+  const subject = new RegExp(`^\\[P1:preregister\\] ${id}(\\s|$)`);
+  const found: Preregistration[] = [];
+  for (const line of gitOut(runDir, ["log", "--format=%h%x09%H%x09%s"]).split("\n")) {
+    if (line.length === 0) continue;
+    const [short, sha, ...rest] = line.split("\t");
+    if (short === undefined || sha === undefined) continue;
+    if (subject.test(rest.join("\t"))) found.push({ sha, short });
+  }
+  return found.reverse(); // git log is newest first
+}
+
+/** The nearest ancestor of `start` (or `start` itself) that is a git repository root. */
+export function findRunDir(start: string): string | undefined {
+  let dir = path.resolve(start);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
 function writeState(dir: string, state: NodeState): void {
   const stored: NodeState = { phase: state.phase, status: state.status };
   if (state.derivedFrom && state.derivedFrom.length > 0) stored.derivedFrom = state.derivedFrom;
