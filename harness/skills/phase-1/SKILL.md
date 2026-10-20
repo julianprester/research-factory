@@ -36,6 +36,11 @@ its `workspace/manifest.md` for the paths, then `expectations.md` §0 and its
 entries. The `input` node is the job list: never brief or dispatch it, and close
 it only when the phase is complete (§5).
 
+If the input node has no `workspace/manifest.md`, or that manifest names no
+exploration list, do not improvise paths: write
+`Ruling: Phase 1 blocked — the input node has no <file> — cost: Phase 1 waits for
+Phase 0 to be re-run` in the ledger, say BLOCKED there, and stop.
+
 ## 1. One expectation scanner per entry
 
 For each entry in `expectations.md` that has no pattern node, create one:
@@ -83,7 +88,11 @@ net — a normally written card is always a descendant of the marker, so it
 rarely finds anything, and Task 4's post-run sweep is the real ordering check.
 Before you close the input node (§5), re-run the same check (`--blind` for blind
 nodes) on each node you handed on or closed, and record any new problem in the
-ledger then: that keeps every ledger line before §5's last tree call.
+ledger then: that keeps every ledger line before §5's last tree call. A node
+that has left phase 1 cannot be fixed from here — `tree_update` refuses another
+phase's nodes, and there is no `reopen` — so a new problem on it is a finding
+for the run's review, recorded in the ledger; do not try to reopen or recreate
+the node.
 
 Then apply §4's test **before** routing: a duplicate or an artifact is `closed`
 (`duplicate of <id>`, `artifact: <why>`) while the node is still in phase 1,

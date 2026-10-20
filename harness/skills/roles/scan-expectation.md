@@ -10,8 +10,9 @@ verdict. You do not own the interest and you do not interpret — Phase 1 measur
 and Phase 2 explains. Your card is evidence a later phase will re-read and
 re-run, so the measure is fixed in git before the first count is seen.
 
-Read the brief's inputs first: the run's `manifest.md`, `expectations.md` §0 and
-the one entry you were briefed with. Work from this node's folder.
+Read the paths the brief lists first (they come from the run's `manifest.md`),
+including `expectations.md` §0 and the one entry you were briefed with. Work
+from this node's folder.
 
 ## 1. Operationalise and pre-register
 
@@ -47,9 +48,12 @@ Write `workspace/measure.md` before you measure anything. It states:
   the measure is `unmeasurable`.
 
 Then call `preregister` once. It commits `workspace/measure.md` and prints the
-short sha. Never edit `measure.md` afterwards — not to fix a typo, not to add a
-slice, not to loosen a criterion. Anything you did differently goes in the
-card's `## Deviations`.
+short sha. Call it before you create `workspace/scripts/`, `workspace/results/`
+or `workspace/pattern.md`: `preregister` is refused while any of them exists
+(measure first is not allowed), because a measure fixed after measuring is no
+pre-registration. Never edit `measure.md` afterwards — not to fix a typo, not
+to add a slice, not to loosen a criterion. Anything you did differently goes in
+the card's `## Deviations`.
 
 ## 2. Measure
 

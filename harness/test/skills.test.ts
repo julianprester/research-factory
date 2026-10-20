@@ -335,6 +335,61 @@ test("scan-blind does not read expectations.md and reports open or unmeasurable"
   assert.match(markdown, /unmeasurable/, "scan-blind may report unmeasurable");
 });
 
+test("Phase 1 roles read the paths the brief lists, not an unlisted manifest", () => {
+  for (const role of PHASE1_ROLES) {
+    const file = `harness/skills/roles/${role}.md`;
+    const prose = read(file).replace(/\s+/g, " ");
+    assert.match(
+      prose,
+      /the paths the brief lists first \(they come from the run's `manifest\.md`\)/,
+      `${file} reads the paths the brief lists`,
+    );
+    assert.ok(
+      !/Read the brief's inputs first: the run's `manifest\.md`/.test(prose),
+      `${file} does not send the worker to a manifest the brief may not list`,
+    );
+  }
+  // The briefs hand on the manifest's paths, never the manifest's own path.
+  const inputs = read("harness/skills/phase-1/SKILL.md")
+    .split("\n")
+    .filter((line) => line.includes("**Inputs:**") || line.includes("manifest paths except"));
+  assert.ok(inputs.length >= 1, "the expectation brief lists its Inputs");
+  assert.ok(
+    inputs.some((line) => /every path in `workspace\/manifest\.md` except its hold-out lists/.test(line)),
+    "the Inputs are the manifest's paths minus its hold-out lists",
+  );
+});
+
+test("phase-1 blocks on a missing manifest instead of improvising paths", () => {
+  const body = read("harness/skills/phase-1/SKILL.md").replace(/\s+/g, " ");
+  assert.match(body, /no `workspace\/manifest\.md`, or that manifest names no exploration list/);
+  assert.match(body, /Ruling: Phase 1 blocked/);
+  assert.match(body, /BLOCKED/);
+  assert.match(body, /do not improvise paths/);
+});
+
+test("a problem found after routing is a ledger finding, not a reopen", () => {
+  const body = read("harness/skills/phase-1/SKILL.md");
+  const handoff = body.slice(body.indexOf("## 2. On each handoff"), body.indexOf("## 3. ")).replace(/\s+/g, " ");
+  assert.match(handoff, /cannot be fixed from here/);
+  assert.match(handoff, /refuses another phase's nodes/, "names the tree_update refusal");
+  assert.match(handoff, /finding for the run's review/, "records the problem as a finding");
+  assert.match(handoff, /do not try to reopen/, "does not try to reopen the node");
+});
+
+test("Phase 1 roles pre-register before any measurement file exists", () => {
+  for (const role of PHASE1_ROLES) {
+    const file = `harness/skills/roles/${role}.md`;
+    const prose = read(file).replace(/\s+/g, " ");
+    assert.match(
+      prose,
+      /before you create `workspace\/scripts\/`, `workspace\/results\/` or `workspace\/pattern\.md`/,
+      `${file} calls preregister before the measurement files exist`,
+    );
+    assert.match(prose, /measure first is not allowed/, `${file} names the refusal`);
+  }
+});
+
 test("phase-1 and its roles only point at harness/tools files that exist", () => {
   const files = [
     "harness/skills/phase-1/SKILL.md",

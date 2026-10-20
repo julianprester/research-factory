@@ -10,11 +10,11 @@ the owner gives you an angle — a measure over a comparison across slices — a
 you pre-register what would count as a regularity before you see any result. You
 do not interpret: Phase 1 measures and Phase 2 explains.
 
-Read the brief's inputs first: the run's `manifest.md` and the angle you were
-briefed with. **Do not read `expectations.md`** — not the entries, not §0, and
-not even to check whether your angle duplicates one. The manifest lists it among
-the paths; leave it unread. Your brief's angle is your whole starting point, and
-it stays your point of comparison.
+Read the paths the brief lists first (they come from the run's `manifest.md`),
+and the angle you were briefed with. **Do not read `expectations.md`** — not the
+entries, not §0, and not even to check whether your angle duplicates one. The
+manifest lists it among the paths; leave it unread. Your brief's angle is your
+whole starting point, and it stays your point of comparison.
 
 ## 1. Pre-register the angle
 
@@ -42,8 +42,11 @@ Write `workspace/measure.md` before you measure anything. It states:
   `unmeasurable`.
 
 Then call `preregister` once. It commits `workspace/measure.md` and prints the
-short sha. Never edit `measure.md` afterwards — the criterion you chose before
-looking is the only thing that makes a blind finding credible. Anything you did
+short sha. Call it before you create `workspace/scripts/`, `workspace/results/`
+or `workspace/pattern.md`: `preregister` is refused while any of them exists
+(measure first is not allowed), because an angle fixed after looking is no
+pre-registration. Never edit `measure.md` afterwards — the criterion you chose
+before looking is the only thing that makes a blind finding credible. Anything you did
 differently goes in the card's `## Deviations`.
 
 ## 2. Measure
