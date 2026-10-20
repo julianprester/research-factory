@@ -169,7 +169,12 @@ export function init(args: { dataset: string; interest: string; runDir?: string 
   );
 }
 
-/** Count the nodes of one phase by status, in first-seen order. */
+/**
+ * Count the nodes of one phase by status, in first-seen order. The statuses are
+ * whatever the tree holds — `ready`, `active`, `submitted`, `closed`, or
+ * `input` for a node a phase reads as its job list — so a new status needs no
+ * change here.
+ */
 function statusCounts(nodes: ReturnType<typeof listNodes>, phase: number): string {
   const counts = new Map<string, number>();
   for (const node of nodes) {

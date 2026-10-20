@@ -147,6 +147,27 @@ test("the hand-off contract names the manifest, the prep group, italics and the 
   assert.match(phase0, /manifest\.md/, "phase-0's hand-off note names manifest.md");
 });
 
+test("the input status is handed on in phase-0 §4 and the manifest names node.json and the dataset root", () => {
+  const phase0 = read("harness/skills/phase-0/SKILL.md");
+  const section4 = phase0.slice(phase0.indexOf("## 4. Hand-off"), phase0.indexOf("## Never"));
+  assert.match(section4, /status: "input"/, "§4 hands the assembler on with status input");
+  assert.doesNotMatch(section4, /status: "ready"/, "§4 no longer hands it on as ready");
+  assert.match(phase0, /Phase 0 review edge 1|go straight to §4/, "resume rule goes straight to §4");
+
+  const assemble = read("harness/skills/roles/prep-assemble.md");
+  const manifest = assemble.slice(assemble.indexOf("## Manifest"), assemble.indexOf("## Citations"));
+  assert.match(manifest, /node\.json/, "the manifest lists the run's node.json");
+  assert.match(manifest, /dataset root/, "the manifest lists the dataset root");
+  assert.match(manifest, /split-<ext>/, "the manifest names the analysed extension's split");
+
+  assert.match(
+    read("harness/skills/roles/prep-expectations.md"),
+    /exploration column of `profile\.md` §5/,
+    "denominators come from the exploration column of profile.md §5",
+  );
+  assert.match(read("harness/skills/phase-owner/SKILL.md"), /`input`/, "phase-owner describes the input status");
+});
+
 test("DEFAULT_CONFIG configures Phase 0", () => {
   assert.deepEqual(DEFAULT_CONFIG.phases, { "0": "harness/skills/phase-0" });
 });

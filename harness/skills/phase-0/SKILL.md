@@ -24,6 +24,9 @@ continue from the furthest point that already exists. Do not recreate work:
 - The assembler node exists in phase 0: do not create another. Resume or
   re-brief it only when its `handoff.md` is missing or does not start with
   `DONE`/`DONE_WITH_CONCERNS`; do not create area nodes again.
+- The assembler node exists in phase 0 and its `handoff.md` starts with
+  `DONE`/`DONE_WITH_CONCERNS`: the hand-off is the only step left — go straight
+  to §4 (Phase 0 review edge 1).
 - Area nodes exist: do not create them again — resume or re-brief only those
   whose `handoff.md` is missing or does not start with
   `DONE`/`DONE_WITH_CONCERNS` — and create only the areas that are missing.
@@ -105,19 +108,27 @@ On the assembler's `DONE` or `DONE_WITH_CONCERNS`, close the phase in this order
 
 1. `tree_update` Z01 and every area node to `status: "closed"`.
 2. Then, as the **last** tree call,
-   `tree_update({ nodeId: "<assembler>", phase: 1, status: "ready", note: "Phase 0 complete: <n> expectations; input: workspace/manifest.md" })`
+   `tree_update({ nodeId: "<assembler>", phase: 1, status: "input", note: "Phase 0 complete: <n> expectations; input: workspace/manifest.md" })`
    with `<n>` from the assembler's handoff. If the handoff is
    `DONE_WITH_CONCERNS`, carry its concern into the note:
    `Phase 0 complete: <n> expectations; input: workspace/manifest.md — <concern>`.
 
-The handed-on prep node is Phase 1's input; Phase 1 reads it and never briefs or
-dispatches it. The node's `workspace/manifest.md` names the absolute paths of
-that input: `expectations.md`, `profile.md`, `data-character.md`, `glossary.md`,
-`split/exploration.txt` and `split/holdout.txt`.
+`status: "input"` is what hands the node on: it marks the assembler as the job
+list Phase 1 reads, not as a node anyone briefs or dispatches. The Phase 1 owner
+reads it, turns its entries into pattern nodes, and closes it when Phase 1 ends.
+The supervisor counts it as work, so it starts the Phase 1 owner; a phase whose
+only work is an open `input` node gets a nudge to close it or create what comes
+next.
+
+The assembler's `workspace/manifest.md` names the absolute paths of that input:
+the run dir's `node.json` (the dataset and the interest), the dataset root, the
+assembler's `expectations.md`, Z01's `profile.md`, `data-character.md` and
+`glossary.md`, and the exploration and hold-out lists of the analysed extension
+(`split/`, or `split-<ext>/` with the extension named in the manifest).
 
 Ledger each line before its `tree_*` call, as phase-owner requires. Then stop:
-Phase 0 has no queue left, so the owner ends its turn and the supervisor finishes
-the run; the Phase 1 owner treats the assembler node as the job list.
+Phase 0 has no queue left, so the owner ends its turn and the supervisor starts
+the Phase 1 owner on the input node.
 
 ## Never
 

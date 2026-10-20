@@ -15,7 +15,7 @@ function makeRun(t: TestContext): string {
 
 /** A configured, already-started phase by default; tests override what they exercise. */
 function view(partial: Partial<PhaseView> & { phase: number }): PhaseView {
-  return { owner: "idle", configured: true, started: true, ready: [], running: [], finished: [], ...partial };
+  return { owner: "idle", configured: true, started: true, ready: [], running: [], finished: [], inputs: [], ...partial };
 }
 
 function memory(head = "head-1"): Memory {
@@ -172,6 +172,7 @@ test("a fresh run's entry phase has work and is started, not done", (t) => {
     ready: ["(entry)"],
     running: [],
     finished: [],
+    inputs: [],
   });
   const result = decide([fresh], "head-1", memory());
   assert.deepEqual(result.actions, [{ kind: "start", phase: 1, reason: "never-started" }]);
@@ -198,6 +199,7 @@ test("a fresh run's phase 0 is the entry phase, and the hand-off leaves it with 
     ready: ["(entry)"],
     running: [],
     finished: [],
+    inputs: [],
   });
   assert.deepEqual(decide([fresh], "head-1", memory()).actions, [
     { kind: "start", phase: 0, reason: "never-started" },
@@ -217,6 +219,7 @@ test("a fresh run's phase 0 is the entry phase, and the hand-off leaves it with 
     ready: [],
     running: [],
     finished: [],
+    inputs: [],
   });
   assert.deepEqual(viewPhase(run, 1, "gone", { configured: true, started: false, entry: false }).ready, ["Z02"]);
 });
@@ -252,6 +255,7 @@ test("viewPhase splits a phase's nodes into ready, running and finished", (t) =>
     ready: ["T03"],
     running: ["T02"],
     finished: ["T01"],
+    inputs: [],
   });
   assert.deepEqual(viewPhase(run, 2, "working", { configured: false, started: false, entry: false }), {
     phase: 2,
@@ -261,5 +265,72 @@ test("viewPhase splits a phase's nodes into ready, running and finished", (t) =>
     ready: [],
     running: [],
     finished: [],
+    inputs: [],
   });
+});
+
+test("viewPhase reports an input node as an input, not as ready", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  // A real Phase 0 leaves its assembler as Z07, handed on to phase 1 as input.
+  for (let n = 1; n <= 7; n++) createChild(run, "D01", `Node ${n}`, "t", [], "prep");
+  updateNode(run, "Z07", { phase: 1, status: "input" }, "t");
+
+  const view1 = viewPhase(run, 1, "idle", { configured: true, started: true, entry: false });
+  assert.deepEqual(view1.inputs, ["Z07"]);
+  assert.deepEqual(view1.ready, [], "an input node is not queued work");
+  assert.deepEqual(view1.running, []);
+  assert.deepEqual(view1.finished, []);
+});
+
+test("an input node alone earns a gone owner a start", () => {
+  const result = decide([view({ phase: 1, owner: "gone", inputs: ["Z07"] })], "head-1", memory());
+  assert.deepEqual(result.actions, [{ kind: "start", phase: 1, reason: "gone" }]);
+});
+
+test("an idle or done owner with only an input node is nudged to close or continue", () => {
+  for (const owner of ["idle", "done"] as const) {
+    const result = decide([view({ phase: 1, owner, inputs: ["Z07"] })], "head-1", memory());
+    assert.equal(result.actions.length, 1, `${owner}: one action`);
+    const action = result.actions[0];
+    assert.equal(action?.kind, "nudge");
+    assert.equal(
+      action?.kind === "nudge" ? action.message : "",
+      "Phase 1 has an open input node (Z07) and no work in flight. If the phase is complete, close the input node; otherwise create and dispatch the next nodes. Your phase skill's limits still apply.",
+    );
+    assert.deepEqual(result.memory.nudges, { 1: 1 });
+  }
+});
+
+test("ready or finished work beside an input node keeps the usual nudge", () => {
+  const result = decide([view({ phase: 1, inputs: ["Z07"], ready: ["T01"] })], "head-1", memory());
+  const action = result.actions[0];
+  assert.equal(action?.kind, "nudge");
+  assert.match(action?.kind === "nudge" ? action.message : "", /^Continue phase 1: 1 ready, 0 handoffs waiting/);
+});
+
+test("an input-only phase stalls after three nudges at the same head", () => {
+  const phase1 = view({ phase: 1, inputs: ["Z07"] });
+  let state = memory();
+  for (let call = 1; call <= 3; call++) {
+    const result = decide([phase1], "head-1", state);
+    assert.equal(result.actions[0]?.kind, "nudge", `call ${call} nudges`);
+    state = result.memory;
+  }
+  assert.deepEqual(decide([phase1], "head-1", state).actions, [{ kind: "stalled", phase: 1 }]);
+});
+
+test("running workers beside an input node leave the owner alone", () => {
+  const result = decide([view({ phase: 1, inputs: ["Z07"], running: ["T01"] })], "head-1", memory());
+  assert.deepEqual(result.actions, []);
+});
+
+test("closing the input node leaves no work: two quiet ticks finish the run", () => {
+  const closed = view({ phase: 1 });
+  const first = decide([view({ phase: 1, inputs: ["Z07"] })], "head-1", memory());
+  assert.equal(first.actions[0]?.kind, "nudge");
+  const second = decide([closed], "head-1", first.memory);
+  assert.deepEqual(second.actions, []);
+  const third = decide([closed], "head-1", second.memory);
+  assert.deepEqual(third.actions, [{ kind: "done", waitingForUnconfiguredPhases: {} }]);
 });

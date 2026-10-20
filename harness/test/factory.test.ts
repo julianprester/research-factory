@@ -13,7 +13,7 @@ import test, { type TestContext } from "node:test";
 
 import { init, latestRun, parseCommand, resume, runCommand, status, stop, type FactoryDeps } from "../factory.ts";
 import { HARNESS_ROOT, sessionServerStarter, supervisorPid, type Herdr } from "../launch.ts";
-import { createChild, initRun } from "../tree.ts";
+import { createChild, initRun, updateNode } from "../tree.ts";
 
 type Answer = { ok: boolean; stdout: string };
 
@@ -359,6 +359,20 @@ test("status reports phase-0 prep nodes even when config does not configure phas
     /P0 owner not started; not configured; 1 ready/,
     "a phase-0 prep node is reported even though only the root and the node carry phase 0",
   );
+});
+
+test("status counts input nodes among a phase's statuses", (t) => {
+  const dir = workDir(t);
+  const runDir = makeRun(dir);
+  // Phase 1 must be configured for its line to carry only the counts.
+  writeFileSync(
+    path.join(runDir, "config.json"),
+    json({ ...DEFAULT_CONFIG, phases: { ...DEFAULT_CONFIG.phases, "1": "harness/skills/phase-1" } }),
+  );
+  createChild(runDir, "D01", "Assemble", "test", [], "prep");
+  updateNode(runDir, "Z01", { phase: 1, status: "input" }, "test");
+
+  assert.match(status(runDir, fakeDeps()), /P1 owner not started; 1 input/, "the input node is counted");
 });
 
 test("latestRun picks the most recently modified run dir with node.json", (t) => {

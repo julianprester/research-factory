@@ -63,7 +63,7 @@ function headOf(runDir: string): string {
 }
 
 function hasWork(view: PhaseView): boolean {
-  return view.ready.length > 0 || view.running.length > 0 || view.finished.length > 0;
+  return view.ready.length > 0 || view.running.length > 0 || view.finished.length > 0 || view.inputs.length > 0;
 }
 
 /** Carry one decide() action out; returns true when the run is done. */
