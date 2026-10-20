@@ -25,7 +25,7 @@ import { initRun, listNodes } from "./tree.ts";
 /** What init writes into a new run and what a demo run starts with. */
 export const DEFAULT_CONFIG: RunConfig = {
   model: "opencode-go/deepseek-v4.1-flash",
-  phases: { "0": "harness/skills/phase-0" },
+  phases: { "0": "harness/skills/phase-0", "1": "harness/skills/phase-1" },
 };
 
 /**

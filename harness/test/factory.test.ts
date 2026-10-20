@@ -124,7 +124,10 @@ function spyServerStart(onStart?: (session: string) => void): { calls: string[];
 
 const SUPERVISE = path.join(HARNESS_ROOT, "harness", "supervise.ts");
 const DATASET = path.join(HARNESS_ROOT, "harness", "test", "fixtures", "mini-dataset");
-const DEFAULT_CONFIG = { model: "opencode-go/deepseek-v4.1-flash", phases: { "0": "harness/skills/phase-0" } };
+const DEFAULT_CONFIG = {
+  model: "opencode-go/deepseek-v4.1-flash",
+  phases: { "0": "harness/skills/phase-0", "1": "harness/skills/phase-1" },
+};
 
 function workDir(t: TestContext): string {
   const dir = mkdtempSync(path.join(tmpdir(), "ctc-factory-"));

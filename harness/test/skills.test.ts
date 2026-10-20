@@ -16,6 +16,12 @@ const SKILLS = path.join(HARNESS_ROOT, "harness", "skills");
 /** The role files Phase 0's briefs name on their Skill line. */
 const ROLES = ["prep-profile", "prep-expectations", "prep-assemble", "deepis"];
 
+/** The role files Phase 1's briefs name on their Skill line. */
+const PHASE1_ROLES = ["scan-expectation", "scan-blind"];
+
+/** The pattern card's headings, as check-pattern.ts checks them. */
+const CARD_HEADINGS = ["## Measure", "## Result", "## Verdict", "## Robustness", "## Worst fits", "## Deviations"];
+
 function read(relative: string): string {
   return readFileSync(path.join(HARNESS_ROOT, relative), "utf8");
 }
@@ -168,6 +174,98 @@ test("the input status is handed on in phase-0 §4 and the manifest names node.j
   assert.match(read("harness/skills/phase-owner/SKILL.md"), /`input`/, "phase-owner describes the input status");
 });
 
-test("DEFAULT_CONFIG configures Phase 0", () => {
-  assert.deepEqual(DEFAULT_CONFIG.phases, { "0": "harness/skills/phase-0" });
+test("phase-1 has the phase-1 frontmatter and describes the pattern workflow", () => {
+  const file = "harness/skills/phase-1/SKILL.md";
+  assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
+  const markdown = read(file);
+
+  const fields = frontmatter(markdown);
+  assert.equal(fields.name, "phase-1");
+  assert.match(fields.description ?? "", /Phase 1/);
+  assert.match(fields.description ?? "", /patterns/);
+
+  const body = markdown.slice(markdown.indexOf("\n---\n") + 5);
+  // The pattern nodes, the hand-off to Phase 2 and the two scanner roles are the
+  // workflow's spine; the card's hygiene notes are what close a node instead.
+  for (const needed of [
+    "tree_list",
+    "tree_create",
+    "tree_update",
+    "manifest.md",
+    "input",
+    "check-pattern.ts",
+    "preregister",
+    "phase: 2",
+    "closed",
+    "blind",
+    "duplicate of",
+    "artifact:",
+    "Phase 1 complete:",
+  ]) {
+    assert.ok(body.includes(needed), `the body mentions ${needed}`);
+  }
+  // phase-owner's loop filters on `ready`, which never returns the input node.
+  assert.match(body, /tree_list\(\{ phase: 1 \}\)/, "reads the job list with an unfiltered tree_list");
+  assert.match(body, /never (brief|dispatch)/i, "says the input node is never briefed or dispatched");
+  // check-pattern prints its problems to stdout and `ok` is the only pass.
+  assert.match(body, /other than `ok`/i, "says any output other than ok is a failure");
+  assert.match(body, /fix loop/, "sends a failing check back through the fix loop");
+});
+
+test("every Phase 1 role file exists and is named by absolute path in the skill", () => {
+  const body = read("harness/skills/phase-1/SKILL.md");
+  for (const role of PHASE1_ROLES) {
+    const file = path.join(SKILLS, "roles", `${role}.md`);
+    assert.ok(existsSync(file), `${file} exists`);
+    const markdown = readFileSync(file, "utf8");
+    assert.match(frontmatter(markdown).name ?? "", new RegExp(role), `${role}.md names itself`);
+    assert.ok(body.includes(file), `phase-1's Skill lines use the absolute path ${file}`);
+  }
+});
+
+test("Phase 1 role files pre-register, measure the exploration split and write the six-heading card", () => {
+  for (const role of PHASE1_ROLES) {
+    const file = `harness/skills/roles/${role}.md`;
+    const markdown = read(file);
+    for (const needed of ["preregister", "measure.md", "exploration", ...CARD_HEADINGS]) {
+      assert.ok(markdown.includes(needed), `${file} mentions ${needed}`);
+    }
+    assert.match(markdown, /Node or Python 3 stdlib/, `${file} keeps scripts to Node or Python 3 stdlib`);
+    assert.match(
+      markdown,
+      /never write the word `holdout`/i,
+      `${file} tells the worker never to write the word holdout in a script`,
+    );
+  }
+});
+
+test("scan-blind does not read expectations.md and reports open or unmeasurable", () => {
+  const markdown = read("harness/skills/roles/scan-blind.md").replace(/\s+/g, " ");
+  assert.match(markdown, /expectations\.md/, "scan-blind names the file it must not read");
+  assert.match(markdown, /(do not|never) read `expectations\.md`/i, "scan-blind says not to read the expectations list");
+  assert.match(markdown, /`open`/, "scan-blind's verdict is open");
+  assert.match(markdown, /unmeasurable/, "scan-blind may report unmeasurable");
+});
+
+test("phase-1 and its roles only point at harness/tools files that exist", () => {
+  const files = [
+    "harness/skills/phase-1/SKILL.md",
+    ...PHASE1_ROLES.map((role) => `harness/skills/roles/${role}.md`),
+  ];
+  const named = new Set<string>();
+  for (const file of files) {
+    for (const match of read(file).matchAll(/harness\/tools\/[\w.-]+\.ts/g)) named.add(match[0]);
+  }
+  assert.ok(named.has("harness/tools/check-pattern.ts"), "phase-1 runs check-pattern.ts");
+  for (const file of named) assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
+});
+
+test("DEFAULT_CONFIG configures Phases 0 and 1", () => {
+  assert.deepEqual(DEFAULT_CONFIG.phases, {
+    "0": "harness/skills/phase-0",
+    "1": "harness/skills/phase-1",
+  });
+  for (const [phase, skill] of Object.entries(DEFAULT_CONFIG.phases)) {
+    assert.ok(existsSync(path.join(HARNESS_ROOT, skill, "SKILL.md")), `phase ${phase}'s skill ${skill} exists`);
+  }
 });
