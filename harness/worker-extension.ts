@@ -11,7 +11,7 @@ import * as path from "node:path";
 import { Type } from "typebox";
 
 import { workerMayWrite } from "./guard.ts";
-import { commitFile, findRunDir, nodeIdOf, preregisterCommits } from "./tree.ts";
+import { commitFile, findRunDir, measurementFiles, nodeIdOf, preregisterCommits } from "./tree.ts";
 
 interface ToolCallEventLike {
   toolName: string;
@@ -70,6 +70,15 @@ export default function workerExtension(pi: PiLike): void {
       if (existing !== undefined) {
         throw new Error(
           `already pre-registered at ${existing.short} — do not call preregister again; record deviations in the card instead`,
+        );
+      }
+
+      // Pre-registration is only a safeguard if no analysis has run yet. Anything
+      // under scripts/ or results/, or a card, means measuring came first.
+      const measured = measurementFiles(nodeDir);
+      if (measured.length > 0) {
+        throw new Error(
+          `measure first is not allowed: found ${measured.join(", ")} — write workspace/measure.md and call preregister before you create workspace/scripts/, workspace/results/ or workspace/pattern.md; nothing was committed`,
         );
       }
 

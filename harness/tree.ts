@@ -301,6 +301,33 @@ export function preregisterCommits(runDir: string, id: string): Preregistration[
   return found.reverse(); // git log is newest first
 }
 
+/**
+ * The node paths that mean measuring has started: anything under
+ * `workspace/scripts/` or `workspace/results/`, or `workspace/pattern.md`.
+ * `preregister` refuses while any of them exists, and `check-pattern` fails a
+ * node whose pre-registration commit's tree already held one.
+ */
+export const MEASUREMENT_PATHS = ["workspace/scripts", "workspace/results", "workspace/pattern.md"];
+
+/** The measurement files that already exist in `nodeDir`, node-relative and sorted. */
+export function measurementFiles(nodeDir: string): string[] {
+  const found: string[] = [];
+  const visit = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) visit(abs);
+      else if (entry.isFile()) found.push(path.relative(nodeDir, abs).split(path.sep).join("/"));
+    }
+  };
+  for (const relPath of MEASUREMENT_PATHS) {
+    const abs = path.join(nodeDir, relPath);
+    if (!fs.existsSync(abs)) continue;
+    if (fs.statSync(abs).isDirectory()) visit(abs);
+    else found.push(relPath);
+  }
+  return found.sort();
+}
+
 /** The nearest ancestor of `start` (or `start` itself) that is a git repository root. */
 export function findRunDir(start: string): string | undefined {
   let dir = path.resolve(start);

@@ -160,6 +160,37 @@ test("work between two empty ticks resets the done streak", () => {
   assert.deepEqual(fourth.actions, [{ kind: "done", waitingForUnconfiguredPhases: {} }]);
 });
 
+test("a real phase-1 input hand-off is started, nudged and done once closed", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  // Phase 0 hands its assembler on as the Phase 1 job list.
+  createChild(run, "D01", "Assemble", "owner-p0", [], "prep");
+  updateNode(run, "Z01", { phase: 1, status: "input" }, "owner-p0");
+
+  const fresh = viewPhase(run, 1, "gone", { configured: true, started: false, entry: false });
+  assert.deepEqual(fresh.inputs, ["Z01"]);
+  assert.deepEqual(fresh.ready, []);
+  assert.deepEqual(decide([fresh], "head-1", memory()).actions, [
+    { kind: "start", phase: 1, reason: "never-started" },
+  ]);
+
+  const idle = viewPhase(run, 1, "idle", { configured: true, started: true, entry: false });
+  const nudged = decide([idle], "head-1", memory());
+  assert.equal(nudged.actions[0]?.kind, "nudge");
+  assert.match(
+    nudged.actions[0]?.kind === "nudge" ? nudged.actions[0].message : "",
+    /open input node \(Z01\).*close the input node/,
+  );
+
+  updateNode(run, "Z01", { status: "closed" }, "owner-p1");
+  const closed = viewPhase(run, 1, "idle", { configured: true, started: true, entry: false });
+  assert.deepEqual(closed.inputs, [], "the closed input node is no work");
+  const quiet = decide([closed], "head-1", nudged.memory);
+  assert.deepEqual(quiet.actions, []);
+  const done = decide([closed], "head-1", quiet.memory);
+  assert.deepEqual(done.actions, [{ kind: "done", waitingForUnconfiguredPhases: {} }]);
+});
+
 test("a fresh run's entry phase has work and is started, not done", (t) => {
   const run = makeRun(t);
   initRun(run, "data", "interest");

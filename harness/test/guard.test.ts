@@ -275,6 +275,47 @@ test("tree_create and tree_update work in the owner's own phase", async (t) => {
   assert.equal(findNode(run, "T01").status, "active");
 });
 
+test("tree_update routes a phase-1 pattern to phase 2 as ready", async (t) => {
+  const run = makeTempDir(t);
+  initRun(run, "data", "work on all-remote platforms");
+  createChild(run, "D01", "E03 Etiquette", "owner-p1");
+  createChild(run, "D01", "E04 Remote", "owner-p1");
+
+  const phase1 = captureTools(1, run, t).get("tree_update");
+  assert.ok(phase1);
+  const routed = await phase1.execute("call-1", {
+    nodeId: "T01",
+    phase: 2,
+    status: "ready",
+    note: "violated: the ordering reversed",
+  });
+  assert.equal(routed.content[0].text, "updated T01 pattern 2 ready e03-etiquette");
+  assert.equal(findNode(run, "T01").phase, 2);
+  assert.equal(findNode(run, "T01").status, "ready");
+  assert.equal(
+    execFileSync("git", ["-C", run, "log", "-1", "--format=%b"], { encoding: "utf8" }).trim(),
+    "violated: the ordering reversed",
+    "the note is the commit body",
+  );
+
+  // After routing only the phase-2 owner may touch it; the phase-1 owner of the
+  // same call is now refused, and so is a phase-2 owner on a still-phase-1 node.
+  const stillPhase1 = captureTools(1, run, t).get("tree_update");
+  await assert.rejects(
+    () => stillPhase1!.execute("call-2", { nodeId: "T01", status: "closed" }),
+    /Not your phase \(node in P2, you own P1\)/,
+  );
+  const phase2 = captureTools(2, run, t).get("tree_update");
+  assert.ok(phase2);
+  await assert.rejects(
+    () => phase2.execute("call-3", { nodeId: "T02", phase: 2, status: "ready", note: "x" }),
+    /Not your phase \(node in P1, you own P2\)/,
+  );
+  const closed = await phase2.execute("call-4", { nodeId: "T01", status: "closed" });
+  assert.equal(closed.content[0].text, "updated T01 pattern 2 closed e03-etiquette");
+  assert.equal(findNode(run, "T02").phase, 1, "the refused call wrote nothing");
+});
+
 test("tree_list prints compact lines and filters", async (t) => {
   const run = makeTempDir(t);
   initRun(run, "data", "work on all-remote platforms");

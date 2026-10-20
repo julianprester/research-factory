@@ -43,18 +43,22 @@ function git(runDir: string, ...args: string[]): string {
   return execFileSync("git", ["-C", runDir, ...args], { encoding: "utf8" }).trim();
 }
 
+/** The directory the test process started in, restored after every fixture. */
+const REPO_CWD = process.cwd();
+
 /** A run with one pattern node, cwd moved into it for the duration of the test. */
 function patternNode(t: TestContext): { run: string; nodeDir: string } {
   const run = mkdtempSync(path.join(tmpdir(), "ctc-preregister-"));
-  t.after(() => rmSync(run, { recursive: true, force: true }));
   initRun(run, "data", "interest");
   createChild(run, "D01", "E03 Etiquette", "owner-p1");
   const nodeDir = findNode(run, "T01").dir;
   mkdirSync(path.join(nodeDir, "workspace"), { recursive: true });
 
-  const originalCwd = process.cwd();
-  t.after(() => process.chdir(originalCwd));
   process.chdir(nodeDir);
+  t.after(() => {
+    process.chdir(REPO_CWD);
+    rmSync(run, { recursive: true, force: true });
+  });
   return { run, nodeDir };
 }
 
@@ -123,4 +127,37 @@ test("preregister refuses outside a node folder", async (t) => {
   const tool = tools.get("preregister");
   assert.ok(tool);
   await assert.rejects(() => tool.execute("call-1", {}), /not inside a node folder/);
+});
+
+test("preregister refuses when measurement files already exist", async (t) => {
+  const existing = ["workspace/scripts/scan.py", "workspace/results/counts.csv", "workspace/pattern.md"];
+  for (const relPath of existing) {
+    const { run, nodeDir, tool } = preregisterTool(t);
+    writeFileSync(path.join(nodeDir, "workspace", "measure.md"), "# Measure\n");
+    mkdirSync(path.dirname(path.join(nodeDir, relPath)), { recursive: true });
+    writeFileSync(path.join(nodeDir, relPath), "written before the measure was registered\n");
+    const commits = git(run, "rev-list", "--count", "HEAD");
+
+    await assert.rejects(
+      () => tool.execute("call-1", {}),
+      (error: Error) => {
+        assert.match(error.message, /^measure first is not allowed: /);
+        assert.ok(error.message.includes(relPath), `${relPath} is named in: ${error.message}`);
+        return true;
+      },
+      `${relPath} blocks pre-registration`,
+    );
+    assert.equal(git(run, "rev-list", "--count", "HEAD"), commits, `${relPath}: no commit was made`);
+  }
+});
+
+test("empty measurement directories do not block preregister", async (t) => {
+  const { run, nodeDir, tool } = preregisterTool(t);
+  writeFileSync(path.join(nodeDir, "workspace", "measure.md"), "# Measure\n");
+  mkdirSync(path.join(nodeDir, "workspace", "scripts"), { recursive: true });
+  mkdirSync(path.join(nodeDir, "workspace", "results"), { recursive: true });
+
+  const result = await tool.execute("call-1", {});
+  assert.match(result.content[0]?.text ?? "", /^pre-registered at [0-9a-f]{7,}$/);
+  assert.equal(git(run, "log", "-1", "--format=%s"), "[P1:preregister] T01 — measure.md");
 });

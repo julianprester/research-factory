@@ -5,6 +5,10 @@
 // git history and its card, and prints one problem per line:
 //
 //   - `workspace/measure.md` exists and has a `[P1:preregister] <id>` commit;
+//   - that commit's tree holds no measurement file yet (nothing under
+//     `workspace/scripts/` or `workspace/results/`, no `workspace/pattern.md`),
+//     so a measure registered after the measuring began is caught: the worker
+//     tool refuses such a call, but a swept `git add -A` can still hide one;
 //   - the current `measure.md` is byte-for-byte the version at that marker
 //     commit (`git show <marker>:<path>`), so a later edit is caught even when
 //     the edit was committed separately;
@@ -25,7 +29,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { findRunDir, nodeIdOf, preregisterCommits, type Preregistration } from "../tree.ts";
+import { findRunDir, MEASUREMENT_PATHS, nodeIdOf, preregisterCommits, type Preregistration } from "../tree.ts";
 
 const HEADINGS = ["## Measure", "## Result", "## Verdict", "## Robustness", "## Worst fits", "## Deviations"];
 const VERDICTS = ["held", "violated", "mixed", "unmeasurable"];
@@ -135,7 +139,23 @@ export function checkPattern(
     }
   }
 
-  // 2. the card was committed after the pre-registration (when committed at all).
+  // 2. no measurement file was already in the tree when the measure was registered.
+  if (marker !== undefined) {
+    const nodeRel = rel(node);
+    const registered = gitLines(root, [
+      "ls-tree",
+      "-r",
+      "--name-only",
+      marker.sha,
+      "--",
+      ...MEASUREMENT_PATHS.map((relPath) => `${nodeRel}/${relPath}`),
+    ]).map((file) => file.slice(nodeRel.length + 1));
+    if (registered.length > 0) {
+      problems.push(`measurement files existed at pre-registration: ${registered.join(", ")}`);
+    }
+  }
+
+  // 3. the card was committed after the pre-registration (when committed at all).
   const patternRel = rel(pattern);
   const firstPattern = gitLines(root, ["log", "--format=%H", "--", patternRel]).at(-1);
   if (marker !== undefined && firstPattern !== undefined && !isStrictAncestor(root, marker.sha, firstPattern)) {
@@ -144,7 +164,7 @@ export function checkPattern(
     );
   }
 
-  // 3. the card's headings, and its verdict line.
+  // 4. the card's headings, and its verdict line.
   let card: string | undefined;
   if (!fs.existsSync(pattern)) {
     problems.push("workspace/pattern.md is missing");
@@ -156,7 +176,7 @@ export function checkPattern(
   }
   const cardVerdict = card === undefined ? undefined : sectionFirstLine(card, "## Verdict");
 
-  // 4. the handoff's verdict line, and that it agrees with the card.
+  // 5. the handoff's verdict line, and that it agrees with the card.
   if (!fs.existsSync(handoff)) {
     problems.push("handoff.md is missing");
   } else {
@@ -176,7 +196,7 @@ export function checkPattern(
     }
   }
 
-  // 5. no script reads the hold-out.
+  // 6. no script reads the hold-out.
   const scripts = path.join(node, "workspace", "scripts");
   for (const file of filesUnder(scripts)) {
     if (!HOLDOUT.test(fs.readFileSync(file, "utf8"))) continue;

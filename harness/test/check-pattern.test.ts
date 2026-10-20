@@ -172,6 +172,37 @@ test("a measure.md swept into an earlier commit is still pre-registerable unchan
   assert.deepEqual(checkPattern(run, node.dir), { problems: [] });
 });
 
+test("measurement files in the pre-registration commit's tree are flagged", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  const node = createChild(run, "D01", "E03 Etiquette", "owner-p1");
+  const base = `patterns/${path.basename(node.dir)}`;
+  write(path.join(node.dir, "workspace", "measure.md"), MEASURE);
+  write(path.join(node.dir, "workspace", "scripts", "scan.py"), "print('measured')\n");
+  write(path.join(node.dir, "workspace", "results", "counts.csv"), "slice,n\n");
+  // A tree operation's `git add -A` commits the half-finished measurement
+  // before the worker ever registers the measure.
+  commitPaths(run, `${base}/workspace/scripts`, `${base}/workspace/results`);
+  commitFile(run, `${base}/workspace/measure.md`, "worker-T01", "[P1:preregister] T01 — measure.md");
+  write(path.join(node.dir, "workspace", "pattern.md"), card());
+  write(path.join(node.dir, "handoff.md"), handoff());
+  commitPaths(run, `${base}/workspace/pattern.md`);
+
+  const { problems } = checkPattern(run, node.dir);
+  assert.equal(problems.length, 1, problems.join("\n"));
+  assert.equal(
+    problems[0],
+    "measurement files existed at pre-registration: workspace/results/counts.csv, workspace/scripts/scan.py",
+  );
+});
+
+test("measurement files written after pre-registration are fine", (t) => {
+  const { run, nodeDir } = patternNode(t);
+  write(path.join(nodeDir, "workspace", "scripts", "scan.py"), "print('after')\n");
+  write(path.join(nodeDir, "workspace", "results", "counts.csv"), "slice,n\n");
+  assert.deepEqual(checkPattern(run, nodeDir), { problems: [] });
+});
+
 test("pattern.md committed before pre-registration is a problem", (t) => {
   const run = makeRun(t);
   initRun(run, "data", "interest");
@@ -184,9 +215,12 @@ test("pattern.md committed before pre-registration is a problem", (t) => {
   commitPaths(run, relPattern); // the card got in first
   commitFile(run, relMeasure, "worker-T01", "[P1:preregister] T01 — measure.md");
 
+  // A card committed before the marker is two findings: it was in the marker's
+  // tree, and its first commit is not a descendant of the marker.
   const { problems } = checkPattern(run, node.dir);
-  assert.equal(problems.length, 1, problems.join("\n"));
-  assert.match(problems[0] ?? "", /workspace\/pattern\.md's first commit [0-9a-f]{7,} is not after pre-registration/);
+  assert.equal(problems.length, 2, problems.join("\n"));
+  assert.match(problems[0] ?? "", /measurement files existed at pre-registration: workspace\/pattern\.md/);
+  assert.match(problems[1] ?? "", /workspace\/pattern\.md's first commit [0-9a-f]{7,} is not after pre-registration/);
 });
 
 test("pattern.md that is not committed at all is not an ordering problem", (t) => {
