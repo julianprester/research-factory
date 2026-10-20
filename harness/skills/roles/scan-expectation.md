@@ -142,5 +142,6 @@ prints anything but `ok`, fix what it names — except `measure.md`, which stays
 as pre-registered.
 
 Write only inside this node's `workspace/`, `rounds.md` and `handoff.md`. Read
-only the input paths the brief lists — never a hold-out list, even when the
-manifest names it.
+the input paths the brief lists — never a hold-out list, even when the manifest
+names it — plus your own node folder (`measure.md`, `results/`, `rounds.md`,
+`handoff.md`).

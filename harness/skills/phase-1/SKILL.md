@@ -77,10 +77,13 @@ be judged; otherwise it prints its problems to stdout, one per line, and exits
 command. Any output other than `ok` goes back through phase-owner's fix loop
 (resume the worker with the problem lines): the node is not handed on until the
 check passes. That check runs while the card is still uncommitted, so it cannot
-see whether `pattern.md` was committed after the pre-registration: after the
-`tree_update` that hands the node on or closes it — the call whose `git add -A`
-commits the card — re-run `check-pattern.ts` on every such node, and record any
-problem it now reports in the ledger.
+see whether `pattern.md` was committed after the pre-registration. Re-running
+it after the `tree_update` whose `git add -A` commits the card is only a safety
+net — a normally written card is always a descendant of the marker, so it
+rarely finds anything, and Task 4's post-run sweep is the real ordering check.
+Before you close the input node (§5), re-run the same check (`--blind` for blind
+nodes) on each node you handed on or closed, and record any new problem in the
+ledger then: that keeps every ledger line before §5's last tree call.
 
 Then apply §4's test **before** routing: a duplicate or an artifact is `closed`
 (`duplicate of <id>`, `artifact: <why>`) while the node is still in phase 1,
@@ -133,7 +136,11 @@ and an artifact says the corpus's form produced the regularity.
 
 Phase 1 ends by saturation, not by an empty queue. Stop when every expectation
 has a pattern node with a processed handoff and the latest blind batch produced
-only duplicates or artifacts, or after two blind batches, whichever comes first.
+only duplicates, artifacts or nulls — blind scanners closed with
+`unmeasurable: no regularity` — or after two blind batches, whichever comes
+first. A batch that found no regularity is a saturated batch, not a reason for
+another one.
+
 Record the decision before the final call:
 
 `Ruling: Phase 1 saturated — <which of the two conditions, with the counts> — <cost if wrong: a second batch is cheap, a missed regularity is not>`

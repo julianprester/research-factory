@@ -96,9 +96,10 @@ survives it.
 
 ## Worst fits
 
-The 3–5 slices or documents that sit furthest from the regularity you report, or
-— when the measure could not be computed — the cells that could not carry it,
-with their paths.
+The 3–5 slices or documents that sit furthest from the regularity you report;
+when a criterion was not met, the slices that fell short of it; and when the
+measure could not be computed, the cells that could not carry it — with their
+paths.
 
 ## Deviations
 
@@ -141,5 +142,6 @@ starts with `Status: DONE` (or `DONE_WITH_CONCERNS`). The owner runs
 names — except `measure.md`, which stays as pre-registered.
 
 Write only inside this node's `workspace/`, `rounds.md` and `handoff.md`. Read
-only the input paths the brief lists — never a hold-out list, even when the
-manifest names it.
+the input paths the brief lists — never a hold-out list, even when the manifest
+names it — plus your own node folder (`measure.md`, `results/`, `rounds.md`,
+`handoff.md`).

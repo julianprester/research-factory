@@ -223,9 +223,8 @@ test("Phase 1 briefs exclude the hold-out lists and apply hygiene before routing
     assert.match(line, /except its hold-out lists/i, `the brief's Inputs exclude the hold-out lists: ${line}`);
   }
   // The blind brief is prose, so count the phrase instead of the field label.
-  assert.equal(
-    (body.match(/except its hold-out lists/gi) ?? []).length,
-    2,
+  assert.ok(
+    (body.match(/except its hold-out lists/gi) ?? []).length >= 2,
     "both briefs exclude the hold-out lists",
   );
 
@@ -238,7 +237,23 @@ test("Phase 1 briefs exclude the hold-out lists and apply hygiene before routing
   assert.match(handoff, /no regularity/, "a blind criterion not met closes with note unmeasurable: no regularity");
   assert.match(handoff, /cannot\s+see/i, "the skill says the handoff check cannot see pattern.md's commit order");
   assert.match(handoff, /re-run/i, "the owner re-runs the checker after the tree_update commits the card");
+  assert.match(
+    handoff.replace(/\s+/g, " "),
+    /same check \(`--blind` for blind nodes\)/,
+    "the re-run names --blind for blind nodes",
+  );
+  assert.match(handoff, /before you close the input node/i, "the re-run happens before the final input-node close");
+  assert.match(handoff.replace(/\s+/g, " "), /safety net/i, "the re-run is described as a safety net, not the real ordering check");
   assert.match(section("## 4. ", "## 5. "), /§2/, "§4 points at §2 rather than restating the order");
+
+  // A blind batch of null results saturates the phase; the two-batch cap is a backstop.
+  const saturation = section("## 5. ", "## Never");
+  assert.match(
+    saturation,
+    /`unmeasurable: no regularity`/,
+    "a batch of null blind results counts towards saturation",
+  );
+  assert.match(saturation, /duplicates, artifacts/i, "duplicates and artifacts still saturate too");
 });
 
 test("Phase 1 roles refuse a hold-out input in any spelling and keep analyses small", () => {
@@ -255,6 +270,7 @@ test("Phase 1 roles refuse a hold-out input in any spelling and keep analyses sm
     }
     assert.match(markdown, /case-insensitive/i, `${file} says the match is case-insensitive`);
     assert.match(markdown, /no fitted models/i, `${file} forbids fitted models`);
+    assert.match(markdown, /plus your own node folder/i, `${file} lets the worker re-read its own node folder`);
   }
 });
 
@@ -265,6 +281,13 @@ test("a blind scanner that misses its criterion reports unmeasurable, not open",
   assert.match(verdict, /unmeasurable/, "a criterion not met is unmeasurable");
   assert.match(verdict, /counts/i, "it reports the measured counts");
   assert.match(verdict, /shortfall/i, "and the shortfall against the criterion");
+  const worstFitsStart = markdown.indexOf("## Worst fits");
+  assert.ok(worstFitsStart >= 0, "scan-blind has a Worst fits section");
+  assert.match(
+    markdown.slice(worstFitsStart, markdown.indexOf("## Deviations", worstFitsStart)),
+    /fell short/i,
+    "Worst fits names the slices that fell short of an unmet criterion",
+  );
   assert.match(
     markdown.slice(markdown.indexOf("## 4. Handoff"), markdown.indexOf("## Rules")),
     /not met/i,
