@@ -270,11 +270,16 @@ export function citationProblems(
  *
  * Throws for a `nodeDir` that is not a node folder of `runDir`: that is a usage
  * error, not a finding about the research.
+ *
+ * `citations` replaces the citation runner entirely; `citationTimeoutMs` only
+ * bounds the default one (the real `check-citations.ts`) and leaves the default
+ * for every other caller alone, so a caller that must answer quickly (the
+ * tournament's `promote`) can choose its own cap.
  */
 export function checkPuzzle(
   runDir: string,
   nodeDir: string,
-  opts: { reviews?: boolean; citations?: (file: string) => string[] } = {},
+  opts: { reviews?: boolean; citations?: (file: string) => string[]; citationTimeoutMs?: number } = {},
 ): { problems: string[] } {
   const root = path.resolve(runDir);
   const node = path.resolve(nodeDir);
@@ -286,7 +291,9 @@ export function checkPuzzle(
   }
 
   const problems: string[] = [];
-  const citations = opts.citations ?? ((file: string): string[] => citationProblems(file));
+  const citations =
+    opts.citations ??
+    ((file: string): string[] => citationProblems(file, { timeoutMs: opts.citationTimeoutMs }));
   const card = path.join(node, "workspace", "puzzle.md");
   const nodeRef: NodeRef = findNode(root, id);
   const derivedFrom = (nodeRef.derivedFrom ?? []).map((parent) => parent.toUpperCase());

@@ -29,7 +29,7 @@ import ownerExtension from "../owner-extension.ts";
 import { createChild, findNode, initRun, updateNode } from "../tree.ts";
 import { mergeReviews, parseReview } from "../tools/merge-reviews.ts";
 import { appendRound, readStop } from "../tournament/stop.ts";
-import { promote, tournamentDir } from "../tournament/tools.ts";
+import { PROMOTE_CITATION_TIMEOUT_MS, promote, tournamentDir } from "../tournament/tools.ts";
 
 /** The evidence sections `loadEntrant` reads from a pattern card. */
 const PATTERN = [
@@ -181,6 +181,23 @@ function recordStop(tournament: string, ids: string[]): void {
   });
 }
 
+/**
+ * A hand-written round record for histories appendRound refuses once STOP is a
+ * latch (it cannot record past round 1): the decisions are recomputed on read,
+ * so round 1 still latches STOP and the later rounds are only round numbers.
+ */
+function writeRoundsRecord(tournament: string, rounds: number[]): void {
+  const records = rounds.map((round) => ({
+    summary: {
+      round,
+      top: ["P01", "P02", "P03"],
+      children: round === 0 ? [] : [{ child: "P02", parent: "P01", beatParent: false }],
+    },
+    decision: { stop: false },
+  }));
+  write(path.join(tournament, "rounds.json"), `${JSON.stringify(records, null, 2)}\n`);
+}
+
 interface Fixture {
   run: string;
   /** The submitted puzzle ids, best score first. */
@@ -301,6 +318,57 @@ test("promote refuses a puzzle the final round does not rank", async (t) => {
   );
 });
 
+test("promote refuses when the highest round file is not recorded in rounds.json", async (t) => {
+  const fixture = promoteRun(t);
+  // The engine writes round-9.json before appendRound records it; a crash in
+  // between leaves an orphan that is not a final round.
+  writeRound(fixture.tournament, fixture.ids, { round: 9 });
+  assert.match(
+    await rejectMessage(promote(fixture.run, { nodeId: "P01" }, NO_CITATIONS)),
+    /round 9 is on disk .* but not recorded in .*rounds\.json/,
+  );
+});
+
+test("promote reads the highest RECORDED round numerically, so round 10 beats round 9", async (t) => {
+  const fixture = promoteRun(t);
+  writeRoundsRecord(fixture.tournament, [0, 1, 9, 10]);
+  // Round 9 does not rank P01; round 10 does, with a distinctive score. A
+  // lowest-file or lexicographic choice would not return round 10's score.
+  writeRound(fixture.tournament, fixture.ids.slice(1), { round: 9 });
+  const scores = Object.fromEntries(fixture.ids.map((id, index) => [id, index === 0 ? 9.5 : fixture.ids.length - index]));
+  writeRound(fixture.tournament, fixture.ids, { round: 10, scores });
+
+  const text = await promote(fixture.run, { nodeId: "P01" }, NO_CITATIONS);
+  assert.match(text, /score 9\.500/, "round 10's fit is the one used");
+  assert.match(text, /rank 1 of 7/);
+});
+
+test("promote refuses when the final round file is corrupt (fail closed)", async (t) => {
+  const fixture = promoteRun(t);
+  write(path.join(fixture.tournament, "round-1.json"), "{ not a round");
+  assert.match(
+    await rejectMessage(promote(fixture.run, { nodeId: "P01" }, NO_CITATIONS)),
+    /promote: .*round-1\.json is not valid JSON/,
+  );
+});
+
+test("promote refuses when there is no round file at all", async (t) => {
+  const fixture = promoteRun(t);
+  rmSync(path.join(fixture.tournament, "round-1.json"));
+  assert.match(await rejectMessage(promote(fixture.run, { nodeId: "P01" }, NO_CITATIONS)), /no completed round/);
+});
+
+test("a plain puzzle created after STOP is never promotable: the final round does not rank it", async (t) => {
+  const fixture = promoteRun(t);
+  const plain = createChild(fixture.run, "T01", "plain puzzle", "owner-p2");
+  writePuzzleFiles(plain.dir);
+  updateNode(fixture.run, plain.id, { status: "submitted" }, "owner-p2");
+  assert.match(
+    await rejectMessage(promote(fixture.run, { nodeId: plain.id }, NO_CITATIONS)),
+    new RegExp(`${plain.id} is not ranked in the final round \\(round 1\\)`),
+  );
+});
+
 test("promote refuses a puzzle with fewer than six matches", async (t) => {
   const fixture = promoteRun(t);
   writeRound(fixture.tournament, fixture.ids, { played: { ...Object.fromEntries(fixture.ids.map((id) => [id, 6])), P01: 3 } });
@@ -314,6 +382,15 @@ test("promote refuses a puzzle with no distinctness record", async (t) => {
   const fixture = promoteRun(t);
   rmSync(path.join(fixture.tournament, "distinct.json"));
   assert.match(await rejectMessage(promote(fixture.run, { nodeId: "P01" }, NO_CITATIONS)), /P01 is not distinct-checked/);
+});
+
+test("promote refuses a corrupt distinctness record (fail closed)", async (t) => {
+  const fixture = promoteRun(t);
+  write(path.join(fixture.tournament, "distinct.json"), "{ not the record");
+  assert.match(
+    await rejectMessage(promote(fixture.run, { nodeId: "P01" }, NO_CITATIONS)),
+    /promote: .*distinct\.json is not valid JSON/,
+  );
 });
 
 test("promote refuses a puzzle the distinctness check did not list as checked", async (t) => {
@@ -386,6 +463,17 @@ test("promote refuses a puzzle that is already in phase 3", async (t) => {
     await rejectMessage(promote(fixture.run, { nodeId: "P01" }, NO_CITATIONS)),
     /P01 is already in phase 3/,
   );
+});
+
+test("promote's citation check has a 120 s per-file timeout, and the seam reaches it", async (t) => {
+  const fixture = promoteRun(t);
+  assert.equal(PROMOTE_CITATION_TIMEOUT_MS, 120_000, "the promotion path does not wait the default 15 minutes");
+  // No fake citations: the real checker is spawned and cut off by the tiny seam
+  // value, so a timed-out check is a refusal, not a fifteen-minute stall.
+  const message = await rejectMessage(promote(fixture.run, { nodeId: "P01" }, { citationTimeoutMs: 10 }));
+  assert.match(message, /fails check-puzzle/);
+  assert.match(message, /timed out after 10 ms/);
+  assert.equal(findNode(fixture.run, "P01").phase, 2, "a timed-out citation check refuses");
 });
 
 // ---------------------------------------------------------------------------
@@ -517,6 +605,15 @@ test("tree_update still moves a puzzle through active, submitted and parked", as
     const updated = await update.execute(`call-${status}`, { nodeId: "P02", status });
     assert.equal(updated.content[0]?.text, `updated P02 puzzle 2 ${status} puzzle-2`);
   }
+});
+
+test("a same-phase no-op patch on a puzzle is still allowed", async (t) => {
+  const fixture = promoteRun(t);
+  const update = captureTools(t, fixture.run, 2).get("tree_update");
+  assert.ok(update);
+  const same = await update.execute("call-1", { nodeId: "P02", phase: 2, status: "submitted" });
+  assert.equal(same.content[0]?.text, "updated P02 puzzle 2 submitted puzzle-2");
+  assert.equal(findNode(fixture.run, "P02").phase, 2);
 });
 
 test("the phase-1 owner still routes a pattern node into phase 2", async (t) => {

@@ -261,6 +261,67 @@ test("ownerMayWrite allows its own phase dir and any node brief", (t) => {
   );
 });
 
+test("ownerMayWrite refuses the tournament records, keeping the rest of the phase folder", (t) => {
+  const run = makeTempDir(t);
+  for (const file of ["rounds.json", "round-1.json", "distinct.json", "round-0.matches.jsonl"]) {
+    assert.equal(
+      ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "tournament", file)),
+      false,
+      `${file} belongs to the tournament tools, not the owner's write tool`,
+    );
+  }
+  assert.equal(
+    ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "tournament", "round-9.json")),
+    false,
+    "a round file the tools have not written yet is still refused",
+  );
+  assert.equal(ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "ledger.md")), true);
+  assert.equal(ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "meta-review-1.md")), true);
+  assert.equal(
+    ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "tournament-notes.md")),
+    true,
+    "only the tournament folder is refused; a different name is an ordinary owner file",
+  );
+  assert.equal(ownerMayWrite(run, 1, path.join(run, "owners", "phase-1", "ledger.md")), true);
+  assert.equal(ownerMayWrite(run, 1, path.join(run, "owners", "phase-1", "tournament", "rounds.json")), false);
+  assert.equal(
+    ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "tournament", "..", "ledger.md")),
+    true,
+    ".. collapses to the phase folder before the tournament check",
+  );
+  assert.equal(ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "tournament")), false);
+});
+
+test("the owner tool_call guard blocks writes to the tournament records", (t) => {
+  const run = makeTempDir(t);
+  initRun(run, "data", "interest");
+  createChild(run, "D01", "E03 Etiquette", "owner-p1");
+
+  const { pi, handlers } = fakePi();
+  withOwnerEnv(t, run, 2, () => ownerExtension(pi));
+  const guard = handlers.get("tool_call");
+  assert.ok(guard, "the owner extension registers a tool_call handler");
+
+  const blocked = guard({
+    type: "tool_call",
+    toolCallId: "call-1",
+    toolName: "write",
+    input: { path: path.join(run, "owners", "phase-2", "tournament", "rounds.json") },
+  });
+  assert.equal(blocked?.block, true, "the forged-STOP route is closed at the guard");
+  assert.match(blocked?.reason ?? "", /tournament/);
+  assert.equal(
+    guard({
+      type: "tool_call",
+      toolCallId: "call-2",
+      toolName: "write",
+      input: { path: path.join(run, "owners", "phase-2", "ledger.md") },
+    }),
+    undefined,
+    "the ledger stays an owner write",
+  );
+});
+
 test("tree_create makes a phase-0 prep node for the phase-0 owner only", async (t) => {
   const run = makeTempDir(t);
   initRun(run, "data", "work on all-remote platforms");

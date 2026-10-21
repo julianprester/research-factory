@@ -9,11 +9,19 @@
 // `patterns/T01-a/puzzles/P01-b/brief.md`, ...), and a puzzle node's
 // `brief-review.md`.
 //
+// The owner guard also refuses the phase's `tournament/` folder: `rounds.json`,
+// `round-<n>.json` and `distinct.json` are what `tree_create` and `promote`
+// trust, and the tournament tools write them with `fs` directly rather than
+// through this guard. The ledger, strategy, meta-reviews and rulings in the rest
+// of `owners/phase-<n>/` stay writable.
+//
 // The sibling guards are heuristics, not a sandbox: they refuse the direct
 // spellings of a forbidden read so a model cannot wander by accident, but a
 // script that walks the tree or a command built from a variable is not seen.
 // `check-puzzle` and the judge's own prompt are the other half of that
-// separation.
+// separation. The same caveat applies to the tournament refusal: the owner
+// session also has pi's default `bash` tool, which no path guard can inspect, so
+// this narrows the route around the gates rather than sandboxing it.
 //
 // Paths are compared case-sensitively (`P`, `reviews` and `owners` match
 // exactly); the run environment is Linux, where the file system is too. Both
@@ -65,12 +73,20 @@ export function reviewerMayWrite(nodeDir: string, absPath: string): boolean {
   );
 }
 
-/** True for `owners/phase-<phase>/**` and for any node's `brief.md` (plus a puzzle node's `brief-review.md`). */
+/**
+ * True for `owners/phase-<phase>/**` except its `tournament/` folder, and for
+ * any node's `brief.md` (plus a puzzle node's `brief-review.md`). The
+ * tournament records are the tools' evidence - `tree_create`'s STOP gate and
+ * `promote`'s ranking/distinctness gates read them - so the owner's write tool
+ * must not be able to forge them.
+ */
 export function ownerMayWrite(runDir: string, phase: number, absPath: string): boolean {
   const relative = relativeInside(runDir, absPath);
   if (relative === undefined) return false;
   const parts = relative.split(path.sep);
-  if (parts[0] === "owners" && parts.length > 2 && parts[1] === `phase-${phase}`) return true;
+  if (parts[0] === "owners" && parts.length > 2 && parts[1] === `phase-${phase}`) {
+    return parts[2] !== "tournament";
+  }
   if (parts.length < 3) return false;
   const group = parts[parts.length - 3] ?? "";
   const name = parts[parts.length - 1] ?? "";

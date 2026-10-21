@@ -83,7 +83,18 @@ export interface PromoteInput {
 }
 
 /** `promote` reads the card and its reviews; tests inject the citation runner. */
-export type PromoteDeps = ToolDeps & { citations?: (file: string) => string[] };
+export type PromoteDeps = ToolDeps & {
+  citations?: (file: string) => string[];
+  /** Bounds the per-file citation check; tests pass a tiny value. See PROMOTE_CITATION_TIMEOUT_MS. */
+  citationTimeoutMs?: number;
+};
+
+/**
+ * The promotion path's per-file citation timeout. `check-puzzle`'s default is
+ * fifteen minutes for a batch job; a promotion is one owner tool call, so it gets
+ * two minutes per file and refuses on a timeout rather than stalling the session.
+ */
+export const PROMOTE_CITATION_TIMEOUT_MS = 120_000;
 
 /**
  * The injected seams. `transport` is the judge; tests pass a fake. `budgetMs` and
@@ -800,9 +811,19 @@ export async function promote(runDir: string, input: PromoteInput, deps: Promote
   if (node.status !== "submitted") throw new Error(`promote: ${id} is ${node.status}, not submitted`);
 
   // Gate 3: the final round's candidate list, with enough matches to mean it.
+  // The final round is the highest round FILE whose number the record holds: the
+  // engine writes `round-<n>.json` before `appendRound` records it, so a crash in
+  // that window leaves an orphan file that is not a round anyone decided on.
   const latest = roundFiles(dir).sort((left, right) => left.round - right.round).at(-1);
   if (latest === undefined) {
     throw new Error(`promote: no completed round (round-<n>.json) in ${dir}, so there is no final ranking`);
+  }
+  if (!recordedRounds(roundsFile).includes(latest.round)) {
+    throw new Error(
+      `promote: round ${latest.round} is on disk (${latest.file}) but not recorded in ${roundsFile}: ` +
+        `an orphan round file is a crash between the round file and its record, not a final round; ` +
+        `judge or remove it before promoting`,
+    );
   }
   const stored = readStoredRound(latest.file, "promote");
   const candidates = promotionCandidates(stored.fit, stored.played, MIN_MATCHES);
@@ -836,11 +857,13 @@ export async function promote(runDir: string, input: PromoteInput, deps: Promote
   if (reviewProblems.length > 0) throw new Error(`promote: ${reviewProblems.join("; ")}`);
 
   // Gate 6: the deterministic card/review check, with its real citation runner
-  // unless a caller injected one.
+  // unless a caller injected one. Promotion caps each file's citation check at
+  // two minutes instead of the batch default.
   let problems: string[];
   try {
     problems = checkPuzzle(runDir, node.dir, {
       reviews: true,
+      citationTimeoutMs: deps.citationTimeoutMs ?? PROMOTE_CITATION_TIMEOUT_MS,
       ...(deps.citations !== undefined ? { citations: deps.citations } : {}),
     }).problems;
   } catch (error) {
