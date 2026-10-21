@@ -12,6 +12,7 @@ import {
   CHILD_TYPES,
   PREFIX,
   breakStaleLock,
+  commitFile,
   createChild,
   findNode,
   initRun,
@@ -368,4 +369,61 @@ test("parallel writers: 20 nodes and 21 commits, no lost writes", async (t) => {
   assert.deepEqual(ids, Array.from({ length: 20 }, (_, index) => `T${String(index + 1).padStart(2, "0")}`));
   assert.equal(Number(git(run, "rev-list", "--count", "HEAD")), 21);
   assert.equal(git(run, "status", "--porcelain"), "", "every write was committed");
+});
+
+test("commitFile commits only its own path and leaves another node's file untracked", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  createChild(run, "D01", "One", "owner-p1");
+  createChild(run, "D01", "Two", "owner-p1");
+  const mine = path.join(run, "patterns", "T01-one", "workspace");
+  const theirs = path.join(run, "patterns", "T02-two", "workspace");
+  mkdirSync(mine, { recursive: true });
+  mkdirSync(theirs, { recursive: true });
+  writeFileSync(path.join(mine, "measure.md"), "# Measure\n");
+  writeFileSync(path.join(theirs, "measure.md"), "half-written by another worker\n");
+
+  const sha = commitFile(run, "patterns/T01-one/workspace/measure.md", "worker-T01", "[P1:preregister] T01 — measure.md");
+  assert.match(sha, /^[0-9a-f]{7,}$/);
+  assert.equal(sha, git(run, "rev-parse", "--short", "HEAD"), "the short sha of the new commit is returned");
+  assert.equal(git(run, "log", "-1", "--format=%s"), "[P1:preregister] T01 — measure.md");
+  assert.equal(git(run, "log", "-1", "--format=%an"), "worker-T01", "the actor authors the commit");
+  assert.deepEqual(
+    git(run, "show", "--name-only", "--format=", "HEAD").split("\n").filter((line) => line.length > 0),
+    ["patterns/T01-one/workspace/measure.md"],
+    "only the given path is in the commit",
+  );
+  assert.match(
+    git(run, "status", "--porcelain"),
+    /^\?\? patterns\/T02-two\/workspace\/$/m,
+    "the other node's file stays untracked",
+  );
+});
+
+test("commitFile marks an unchanged file with an empty commit", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  createChild(run, "D01", "One", "owner-p1");
+  const measure = path.join(run, "patterns", "T01-one", "workspace", "measure.md");
+  mkdirSync(path.dirname(measure), { recursive: true });
+  writeFileSync(measure, "# Measure\n");
+  // A tree operation commits with `git add -A`, so the file is already tracked.
+  createChild(run, "D01", "Two", "owner-p1");
+  const before = Number(git(run, "rev-list", "--count", "HEAD"));
+
+  commitFile(run, "patterns/T01-one/workspace/measure.md", "worker-T01", "[P1:preregister] T01 — measure.md");
+  assert.equal(Number(git(run, "rev-list", "--count", "HEAD")), before + 1, "the marker commit exists");
+  assert.equal(git(run, "log", "-1", "--format=%s"), "[P1:preregister] T01 — measure.md");
+  assert.equal(git(run, "show", "--name-only", "--format=", "HEAD"), "", "the marker commit changes no file");
+});
+
+test("commitFile throws only when the file does not exist", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  const before = subjects(run).length;
+  assert.throws(
+    () => commitFile(run, "patterns/T01-one/workspace/measure.md", "worker-T01", "[P1:preregister] T01 — measure.md"),
+    /does not exist/,
+  );
+  assert.equal(subjects(run).length, before, "a refused commit makes no commit");
 });

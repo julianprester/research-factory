@@ -2,7 +2,7 @@
 name: ctc-worker
 description: Carries out one research node: reads brief.md, works inside workspace/, and finishes with handoff.md.
 model: opencode-go/deepseek-v4.1-flash
-tools: read, write, edit, bash
+tools: read, write, edit, bash, preregister
 extensions:
   - ./harness/worker-extension.ts
 ---
@@ -22,6 +22,8 @@ read your own node folder — `rounds.md`, `handoff.md` and `workspace/` — eve
 when the brief does not list them.
 
 Never start sub-agents — do the work yourself with read, write, edit and bash. Do not use bash to write files; use write/edit, so the node guard can see every write.
+
+When your brief asks you to pre-register your measure, write `workspace/measure.md` and then call `preregister` once, after the file is final. Never edit `measure.md` afterwards: anything you did differently from it goes in the pattern card's `## Deviations` section.
 
 Finish by writing `handoff.md`:
 - its first line is `Status: ` followed by exactly one of `DONE`, `DONE_WITH_CONCERNS`, `BLOCKED`, `RECOMMEND_FORK`, `RECOMMEND_PARK`, `RECOMMEND_PRUNE`;

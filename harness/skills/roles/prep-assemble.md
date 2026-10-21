@@ -66,11 +66,22 @@ scanner, and an entry that cannot be measured poisons a whole Phase 1 node.
 
 ## Manifest
 
-Write `workspace/manifest.md` listing the absolute paths Phase 1 needs: this
-node's `workspace/expectations.md`, and Z01's `workspace/profile.md`,
-`workspace/data-character.md`, `workspace/glossary.md`,
-`workspace/split/exploration.txt` and `workspace/split/holdout.txt`. One path per
-line, each absolute. Phase 1 reads this manifest to find its inputs.
+Write `workspace/manifest.md` listing the absolute paths Phase 1 needs. Check
+`data-character.md` for the extension this corpus analyses and use that
+extension's split: `workspace/split/`, or `workspace/split-<ext>/` when the run
+has several. One path per line, each absolute:
+
+- the run dir's `node.json` — the interest and the dataset path
+- the dataset root — the absolute path `node.json`'s `dataset` names
+- this node's `workspace/expectations.md`
+- Z01's `workspace/profile.md`, `workspace/data-character.md`,
+  `workspace/glossary.md`
+- the analysed extension's exploration and hold-out lists:
+  `workspace/split/exploration.txt` and `workspace/split/holdout.txt`, or
+  `workspace/split-<ext>/exploration.txt` and `.../holdout.txt` — name the
+  extension whose split you listed
+
+Phase 1 reads this manifest to find its inputs.
 
 ## Citations
 
@@ -120,10 +131,11 @@ is numbered from `E01` with no gaps, every entry has **Area**, **Theory**,
 names slices listed in `profile.md` and a population that is literal or flagged,
 no shared population is redefined, every small-cell comparison is pooled,
 dropped or flagged, and `check-citations` exits 0. `workspace/manifest.md` lists
-the six absolute input paths. `summary.md`'s counts match the file. `handoff.md`
-starts with `Status: DONE` (or `DONE_WITH_CONCERNS`, naming any area whose
-entries were mostly dropped) and gives the entry count on the Summary line — the
-owner writes that number into the tree.
+the run's `node.json`, the dataset root, the prep files and the analysed
+extension's split lists as absolute paths. `summary.md`'s counts match the file.
+`handoff.md` starts with `Status: DONE` (or `DONE_WITH_CONCERNS`, naming any
+area whose entries were mostly dropped) and gives the entry count on the Summary
+line — the owner writes that number into the tree.
 
 Write only inside this node's `workspace/`, `rounds.md` and `handoff.md`. Read
 only the input paths the brief lists, even when they are another node's files.

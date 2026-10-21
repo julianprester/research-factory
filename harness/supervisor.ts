@@ -8,12 +8,14 @@
 // The rules (docs/superpowers/specs/2026-10-12-ctc-research-factory-design.md
 // §5.9): start a gone owner when its phase has work (rerunning a crashed one is
 // just starting one that already ran); nudge an idle/done owner when work is
-// waiting; leave an owner alone while its workers run; stall a phase after three
-// nudges without a new commit; and call the run done before anything else when no
-// configured phase has work and no owner is working. Done has to hold on two
-// consecutive ticks, so a just-started, not-yet-prompted owner (idle, empty tree)
-// cannot end the run, and the entry phase of a brand-new run counts as having
-// work so a fresh run starts instead of finishing before its first owner exists.
+// waiting — including a phase whose only work is an open `input` node, which the
+// owner must close or build on; leave an owner alone while its workers run; stall
+// a phase after three nudges without a new commit; and call the run done before
+// anything else when no configured phase has work and no owner is working. Done
+// has to hold on two consecutive ticks, so a just-started, not-yet-prompted owner
+// (idle, empty tree) cannot end the run, and the entry phase of a brand-new run
+// counts as having work so a fresh run starts instead of finishing before its
+// first owner exists.
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -29,6 +31,7 @@ export interface PhaseView {
   ready: string[]; // node ids in this phase with status ready ("(entry)" on a fresh run)
   running: string[]; // active nodes in this phase without handoff.md
   finished: string[]; // active nodes in this phase with handoff.md (handoff not yet processed)
+  inputs: string[]; // node ids in this phase with status input: a job list its owner reads, never dispatches
 }
 
 export interface Memory {
@@ -47,9 +50,13 @@ export type Action =
 /** How many nudges in a row a phase gets before it is considered stalled. */
 const NUDGE_LIMIT = 3;
 
-/** A phase has work when at least one of its nodes is ready, running or finished. */
+/**
+ * A phase has work when at least one of its nodes is ready, running or finished.
+ * An open `input` node is work too: it is what starts the phase that reads it,
+ * and until its owner closes it the phase is not finished.
+ */
 function hasWork(view: PhaseView): boolean {
-  return view.ready.length > 0 || view.running.length > 0 || view.finished.length > 0;
+  return view.ready.length > 0 || view.running.length > 0 || view.finished.length > 0 || view.inputs.length > 0;
 }
 
 /** Phases with work but no skill in config.json, and how many ready nodes each is waiting on. */
@@ -63,6 +70,11 @@ function unconfiguredPhases(views: PhaseView[]): Record<number, number> {
 
 function nudgeMessage(view: PhaseView): string {
   const ids = [...view.ready, ...view.finished];
+  // Nothing queued and an open input node: the phase is either complete (close
+  // the input) or has more nodes to create. Both are the owner's call.
+  if (ids.length === 0) {
+    return `Phase ${view.phase} has an open input node (${view.inputs.join(", ")}) and no work in flight. If the phase is complete, close the input node; otherwise create and dispatch the next nodes. Your phase skill's limits still apply.`;
+  }
   return `Continue phase ${view.phase}: ${view.ready.length} ready, ${view.finished.length} handoffs waiting (${ids.join(", ")}). Trust tree_list and your ledger; your phase skill's limits still apply.`;
 }
 
@@ -108,7 +120,9 @@ export function decide(views: PhaseView[], head: string, memory: Memory): { acti
     // working, blocked and unknown owners are left alone (the loop logs blocked).
     if (view.owner !== "idle" && view.owner !== "done") continue;
     // Only running workers: they will report back, so do not interrupt the owner.
-    if (view.ready.length === 0 && view.finished.length === 0) continue;
+    // An open input node nags only when nothing is queued or in flight at all.
+    const queued = view.ready.length > 0 || view.finished.length > 0;
+    if (!queued && (view.running.length > 0 || view.inputs.length === 0)) continue;
     // Already stalled on this HEAD: nothing changes until a new commit moves it.
     if (current.stalled.includes(view.phase)) continue;
     if ((current.nudges[view.phase] ?? 0) >= NUDGE_LIMIT) {
@@ -143,10 +157,13 @@ export function viewPhase(
   const ready: string[] = [];
   const running: string[] = [];
   const finished: string[] = [];
+  const inputs: string[] = [];
   for (const node of nodes) {
     if (node.phase !== phase) continue;
     if (node.status === "ready") {
       ready.push(node.id);
+    } else if (node.status === "input") {
+      inputs.push(node.id);
     } else if (node.status === "active") {
       (fs.existsSync(path.join(node.dir, "handoff.md")) ? finished : running).push(node.id);
     }
@@ -156,5 +173,5 @@ export function viewPhase(
   // is not a node id: it is the work of creating the run's first node, and it
   // disappears as soon as the tree has one.
   if (opts.entry && nodes.length === 1) ready.push("(entry)");
-  return { phase, owner, configured: opts.configured, started: opts.started, ready, running, finished };
+  return { phase, owner, configured: opts.configured, started: opts.started, ready, running, finished, inputs };
 }

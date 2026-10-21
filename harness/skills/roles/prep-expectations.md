@@ -28,7 +28,8 @@ chunk ids [@123456]. One sentence on what the theory is a theory of.
 organisations in general — not yet about this dataset>
 
 **Measurable implication here:** <measure> — unit <unit>, denominator <n from
-profile.md>, compared across <slices from profile.md>. <Why the data can bear
+the exploration column of `profile.md` §5>, compared across <slices from
+`profile.md`>. <Why the data can bear
 this: the document type and slice that carry the measure, given
 data-character.md.> Expect <direction/spread> in <slice A> versus <slice B>.
 
@@ -58,10 +59,12 @@ data-character.md.> Expect <direction/spread> in <slice A> versus <slice B>.
   prediction from the topic, the entry is an assumption: drop it, or keep it and
   flag it `DONE_WITH_CONCERNS` — never present an inferred prediction as cited.
 - **Never a raw keyword total.** "The word *async* appears 900 times" is not a
-  finding. A measure has a unit, a denominator (files, sections, documents of a
-  type) and a comparison across the slices in `profile.md`, and its direction is
-  stated in advance. Counts of documents containing a practice named in the
-  glossary are fine; counts of tokens are not.
+  finding. A measure has a unit, a denominator (the exploration column of
+  `profile.md` §5: files, sections, documents of a type) and a comparison across
+  the slices in `profile.md`, and its direction is stated in advance. Counts of
+  documents containing a practice named in the glossary are fine; counts of
+  tokens are not. The full-corpus size on the same row is context, not a
+  denominator: Phase 1 measures the exploration split only.
 - **Respect data-character.md.** It says what the corpus documents and what it
   only talks about. An implication about behaviour, compliance or bot actions
   needs evidence this corpus does not have: reframe it as a claim about the

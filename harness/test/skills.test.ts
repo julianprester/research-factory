@@ -16,6 +16,12 @@ const SKILLS = path.join(HARNESS_ROOT, "harness", "skills");
 /** The role files Phase 0's briefs name on their Skill line. */
 const ROLES = ["prep-profile", "prep-expectations", "prep-assemble", "deepis"];
 
+/** The role files Phase 1's briefs name on their Skill line. */
+const PHASE1_ROLES = ["scan-expectation", "scan-blind"];
+
+/** The pattern card's headings, as check-pattern.ts checks them. */
+const CARD_HEADINGS = ["## Measure", "## Result", "## Verdict", "## Robustness", "## Worst fits", "## Deviations"];
+
 function read(relative: string): string {
   return readFileSync(path.join(HARNESS_ROOT, relative), "utf8");
 }
@@ -147,6 +153,262 @@ test("the hand-off contract names the manifest, the prep group, italics and the 
   assert.match(phase0, /manifest\.md/, "phase-0's hand-off note names manifest.md");
 });
 
-test("DEFAULT_CONFIG configures Phase 0", () => {
-  assert.deepEqual(DEFAULT_CONFIG.phases, { "0": "harness/skills/phase-0" });
+test("the input status is handed on in phase-0 §4 and the manifest names node.json and the dataset root", () => {
+  const phase0 = read("harness/skills/phase-0/SKILL.md");
+  const section4 = phase0.slice(phase0.indexOf("## 4. Hand-off"), phase0.indexOf("## Never"));
+  assert.match(section4, /status: "input"/, "§4 hands the assembler on with status input");
+  assert.doesNotMatch(section4, /status: "ready"/, "§4 no longer hands it on as ready");
+  assert.match(phase0, /Phase 0 review edge 1|go straight to §4/, "resume rule goes straight to §4");
+
+  const assemble = read("harness/skills/roles/prep-assemble.md");
+  const manifest = assemble.slice(assemble.indexOf("## Manifest"), assemble.indexOf("## Citations"));
+  assert.match(manifest, /node\.json/, "the manifest lists the run's node.json");
+  assert.match(manifest, /dataset root/, "the manifest lists the dataset root");
+  assert.match(manifest, /split-<ext>/, "the manifest names the analysed extension's split");
+
+  assert.match(
+    read("harness/skills/roles/prep-expectations.md"),
+    /exploration column of `profile\.md` §5/,
+    "denominators come from the exploration column of profile.md §5",
+  );
+  assert.match(read("harness/skills/phase-owner/SKILL.md"), /`input`/, "phase-owner describes the input status");
+});
+
+test("phase-1 has the phase-1 frontmatter and describes the pattern workflow", () => {
+  const file = "harness/skills/phase-1/SKILL.md";
+  assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
+  const markdown = read(file);
+
+  const fields = frontmatter(markdown);
+  assert.equal(fields.name, "phase-1");
+  assert.match(fields.description ?? "", /Phase 1/);
+  assert.match(fields.description ?? "", /patterns/);
+
+  const body = markdown.slice(markdown.indexOf("\n---\n") + 5);
+  // The pattern nodes, the hand-off to Phase 2 and the two scanner roles are the
+  // workflow's spine; the card's hygiene notes are what close a node instead.
+  for (const needed of [
+    "tree_list",
+    "tree_create",
+    "tree_update",
+    "manifest.md",
+    "input",
+    "check-pattern.ts",
+    "preregister",
+    "phase: 2",
+    "closed",
+    "blind",
+    "duplicate of",
+    "artifact:",
+    "Phase 1 complete:",
+  ]) {
+    assert.ok(body.includes(needed), `the body mentions ${needed}`);
+  }
+  // phase-owner's loop filters on `ready`, which never returns the input node.
+  assert.match(body, /tree_list\(\{ phase: 1 \}\)/, "reads the job list with an unfiltered tree_list");
+  assert.match(body, /never (brief|dispatch)/i, "says the input node is never briefed or dispatched");
+  // check-pattern prints its problems to stdout and `ok` is the only pass.
+  assert.match(body, /other than `ok`/i, "says any output other than ok is a failure");
+  assert.match(body, /fix loop/, "sends a failing check back through the fix loop");
+});
+
+test("Phase 1 briefs exclude the hold-out lists and apply hygiene before routing", () => {
+  const markdown = read("harness/skills/phase-1/SKILL.md");
+  const body = markdown.slice(markdown.indexOf("\n---\n") + 5);
+
+  // The manifest lists the hold-out on purpose; a brief must not hand it on.
+  const inputs = body.split("\n").filter((line) => line.includes("**Inputs:**"));
+  assert.ok(inputs.length >= 1, "the expectation brief lists its Inputs");
+  for (const line of inputs) {
+    assert.match(line, /except its hold-out lists/i, `the brief's Inputs exclude the hold-out lists: ${line}`);
+  }
+  // The blind brief is prose, so count the phrase instead of the field label.
+  assert.ok(
+    (body.match(/except its hold-out lists/gi) ?? []).length >= 2,
+    "both briefs exclude the hold-out lists",
+  );
+
+  const section = (from: string, to: string): string => body.slice(body.indexOf(from), body.indexOf(to));
+  const handoff = section("## 2. On each handoff", "## 3. ");
+  // Checker → hygiene → routing: a duplicate must close while it is still phase 1.
+  assert.ok(handoff.indexOf("check-pattern.ts") < handoff.indexOf("duplicate of"), "the checker runs before the duplicate test");
+  assert.ok(handoff.indexOf("duplicate of") < handoff.indexOf("phase: 2"), "hygiene runs before the verdict routing");
+  assert.match(handoff, /artifact:/, "the handoff step tests for artifacts too");
+  assert.match(handoff, /no regularity/, "a blind criterion not met closes with note unmeasurable: no regularity");
+  assert.match(handoff, /cannot\s+see/i, "the skill says the handoff check cannot see pattern.md's commit order");
+  assert.match(handoff, /re-run/i, "the owner re-runs the checker after the tree_update commits the card");
+  assert.match(
+    handoff.replace(/\s+/g, " "),
+    /same check \(`--blind` for blind nodes\)/,
+    "the re-run names --blind for blind nodes",
+  );
+  assert.match(handoff, /before you close the input node/i, "the re-run happens before the final input-node close");
+  assert.match(handoff.replace(/\s+/g, " "), /safety net/i, "the re-run is described as a safety net, not the real ordering check");
+  assert.match(section("## 4. ", "## 5. "), /§2/, "§4 points at §2 rather than restating the order");
+
+  // A blind batch of null results saturates the phase; the two-batch cap is a backstop.
+  const saturation = section("## 5. ", "## Never");
+  assert.match(
+    saturation,
+    /`unmeasurable: no regularity`/,
+    "a batch of null blind results counts towards saturation",
+  );
+  assert.match(saturation, /duplicates, artifacts/i, "duplicates and artifacts still saturate too");
+});
+
+test("Phase 1 roles refuse a hold-out input in any spelling and keep analyses small", () => {
+  for (const role of PHASE1_ROLES) {
+    const file = `harness/skills/roles/${role}.md`;
+    const markdown = read(file).replace(/\s+/g, " ");
+    assert.match(
+      markdown,
+      /never a hold-out list, even when the manifest names it/i,
+      `${file} refuses a hold-out even when the manifest names it`,
+    );
+    for (const spelling of ["`holdout`", "`hold-out`", "`hold_out`"]) {
+      assert.ok(markdown.includes(spelling), `${file} names the ${spelling} spelling`);
+    }
+    assert.match(markdown, /case-insensitive/i, `${file} says the match is case-insensitive`);
+    assert.match(markdown, /no fitted models/i, `${file} forbids fitted models`);
+    assert.match(markdown, /plus your own node folder/i, `${file} lets the worker re-read its own node folder`);
+  }
+});
+
+test("a blind scanner that misses its criterion reports unmeasurable, not open", () => {
+  const markdown = read("harness/skills/roles/scan-blind.md");
+  const verdict = markdown.slice(markdown.indexOf("## Verdict"), markdown.indexOf("## Robustness"));
+  assert.match(verdict, /not met/i, "the verdict section names the criterion-not-met case");
+  assert.match(verdict, /unmeasurable/, "a criterion not met is unmeasurable");
+  assert.match(verdict, /counts/i, "it reports the measured counts");
+  assert.match(verdict, /shortfall/i, "and the shortfall against the criterion");
+  const worstFitsStart = markdown.indexOf("## Worst fits");
+  assert.ok(worstFitsStart >= 0, "scan-blind has a Worst fits section");
+  assert.match(
+    markdown.slice(worstFitsStart, markdown.indexOf("## Deviations", worstFitsStart)),
+    /fell short/i,
+    "Worst fits names the slices that fell short of an unmet criterion",
+  );
+  assert.match(
+    markdown.slice(markdown.indexOf("## 4. Handoff"), markdown.indexOf("## Rules")),
+    /not met/i,
+    "the handoff rule covers the criterion not met",
+  );
+  assert.match(
+    markdown.slice(markdown.indexOf("## Definition of Done")),
+    /not met/i,
+    "the DoD covers the criterion not met",
+  );
+});
+
+test("every Phase 1 role file exists and is named by absolute path in the skill", () => {
+  const body = read("harness/skills/phase-1/SKILL.md");
+  for (const role of PHASE1_ROLES) {
+    const file = path.join(SKILLS, "roles", `${role}.md`);
+    assert.ok(existsSync(file), `${file} exists`);
+    const markdown = readFileSync(file, "utf8");
+    assert.match(frontmatter(markdown).name ?? "", new RegExp(role), `${role}.md names itself`);
+    assert.ok(body.includes(file), `phase-1's Skill lines use the absolute path ${file}`);
+  }
+});
+
+test("Phase 1 role files pre-register, measure the exploration split and write the six-heading card", () => {
+  for (const role of PHASE1_ROLES) {
+    const file = `harness/skills/roles/${role}.md`;
+    const markdown = read(file);
+    for (const needed of ["preregister", "measure.md", "exploration", ...CARD_HEADINGS]) {
+      assert.ok(markdown.includes(needed), `${file} mentions ${needed}`);
+    }
+    assert.match(markdown, /Node or Python 3 stdlib/, `${file} keeps scripts to Node or Python 3 stdlib`);
+    assert.match(
+      markdown,
+      /never write the word `holdout`/i,
+      `${file} tells the worker never to write the word holdout in a script`,
+    );
+  }
+});
+
+test("scan-blind does not read expectations.md and reports open or unmeasurable", () => {
+  const markdown = read("harness/skills/roles/scan-blind.md").replace(/\s+/g, " ");
+  assert.match(markdown, /expectations\.md/, "scan-blind names the file it must not read");
+  assert.match(markdown, /(do not|never) read `expectations\.md`/i, "scan-blind says not to read the expectations list");
+  assert.match(markdown, /`open`/, "scan-blind's verdict is open");
+  assert.match(markdown, /unmeasurable/, "scan-blind may report unmeasurable");
+});
+
+test("Phase 1 roles read the paths the brief lists, not an unlisted manifest", () => {
+  for (const role of PHASE1_ROLES) {
+    const file = `harness/skills/roles/${role}.md`;
+    const prose = read(file).replace(/\s+/g, " ");
+    assert.match(
+      prose,
+      /the paths the brief lists first \(they come from the run's `manifest\.md`\)/,
+      `${file} reads the paths the brief lists`,
+    );
+    assert.ok(
+      !/Read the brief's inputs first: the run's `manifest\.md`/.test(prose),
+      `${file} does not send the worker to a manifest the brief may not list`,
+    );
+  }
+  // The briefs hand on the manifest's paths, never the manifest's own path.
+  const inputs = read("harness/skills/phase-1/SKILL.md")
+    .split("\n")
+    .filter((line) => line.includes("**Inputs:**") || line.includes("manifest paths except"));
+  assert.ok(inputs.length >= 1, "the expectation brief lists its Inputs");
+  assert.ok(
+    inputs.some((line) => /every path in `workspace\/manifest\.md` except its hold-out lists/.test(line)),
+    "the Inputs are the manifest's paths minus its hold-out lists",
+  );
+});
+
+test("phase-1 blocks on a missing manifest instead of improvising paths", () => {
+  const body = read("harness/skills/phase-1/SKILL.md").replace(/\s+/g, " ");
+  assert.match(body, /no `workspace\/manifest\.md`, or that manifest names no exploration list/);
+  assert.match(body, /Ruling: Phase 1 blocked/);
+  assert.match(body, /BLOCKED/);
+  assert.match(body, /do not improvise paths/);
+});
+
+test("a problem found after routing is a ledger finding, not a reopen", () => {
+  const body = read("harness/skills/phase-1/SKILL.md");
+  const handoff = body.slice(body.indexOf("## 2. On each handoff"), body.indexOf("## 3. ")).replace(/\s+/g, " ");
+  assert.match(handoff, /cannot be fixed from here/);
+  assert.match(handoff, /refuses another phase's nodes/, "names the tree_update refusal");
+  assert.match(handoff, /finding for the run's review/, "records the problem as a finding");
+  assert.match(handoff, /do not try to reopen/, "does not try to reopen the node");
+});
+
+test("Phase 1 roles pre-register before any measurement file exists", () => {
+  for (const role of PHASE1_ROLES) {
+    const file = `harness/skills/roles/${role}.md`;
+    const prose = read(file).replace(/\s+/g, " ");
+    assert.match(
+      prose,
+      /before you create `workspace\/scripts\/`, `workspace\/results\/` or `workspace\/pattern\.md`/,
+      `${file} calls preregister before the measurement files exist`,
+    );
+    assert.match(prose, /measure first is not allowed/, `${file} names the refusal`);
+  }
+});
+
+test("phase-1 and its roles only point at harness/tools files that exist", () => {
+  const files = [
+    "harness/skills/phase-1/SKILL.md",
+    ...PHASE1_ROLES.map((role) => `harness/skills/roles/${role}.md`),
+  ];
+  const named = new Set<string>();
+  for (const file of files) {
+    for (const match of read(file).matchAll(/harness\/tools\/[\w.-]+\.ts/g)) named.add(match[0]);
+  }
+  assert.ok(named.has("harness/tools/check-pattern.ts"), "phase-1 runs check-pattern.ts");
+  for (const file of named) assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
+});
+
+test("DEFAULT_CONFIG configures Phases 0 and 1", () => {
+  assert.deepEqual(DEFAULT_CONFIG.phases, {
+    "0": "harness/skills/phase-0",
+    "1": "harness/skills/phase-1",
+  });
+  for (const [phase, skill] of Object.entries(DEFAULT_CONFIG.phases)) {
+    assert.ok(existsSync(path.join(HARNESS_ROOT, skill, "SKILL.md")), `phase ${phase}'s skill ${skill} exists`);
+  }
 });
