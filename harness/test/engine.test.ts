@@ -17,6 +17,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   utimesSync,
@@ -268,6 +269,47 @@ function lockFile(dir: string, round = 0): string {
   return path.join(dir, `round-${round}.lock`);
 }
 
+/** A real pid that is no longer alive (an already-exited child). */
+function deadPid(): number {
+  return spawnSync(process.execPath, ["-e", ""]).pid!;
+}
+
+/** The lock copies a breaker moves aside; a clean break leaves none. */
+function asideFiles(dir: string): string[] {
+  return readdirSync(dir).filter((name) => name.includes(".lock.stale."));
+}
+
+test("two breakers of one aged lock: exactly one proceeds and the other never deletes its lock", (t) => {
+  const dir = tempDir(t);
+  const file = lockFile(dir);
+  writeFileSync(file, JSON.stringify({ pid: deadPid(), at: Date.now() - ROUND_LOCK_STALE_MS - 60_000 }));
+
+  // The widened window between "this lock is stale" and "break it": a second
+  // breaker wins the rename, installs its own fresh lock and proceeds. With
+  // check-then-unlink the first breaker would delete that fresh lock and both
+  // would hold the round at once.
+  let winner: (() => void) | undefined;
+  const otherBreaker = (): void => {
+    winner = acquireRoundLock(file);
+  };
+
+  assert.throws(
+    () => acquireRoundLock(file, { afterStale: otherBreaker }),
+    /another round is already running/,
+    "the late breaker loses instead of deleting the winner's lock",
+  );
+  assert.ok(winner !== undefined, "the other breaker got the lock");
+  assert.match(
+    readFileSync(file, "utf8"),
+    new RegExp(`"pid":${process.pid}`),
+    "the winner's lock is still there, untouched",
+  );
+  assert.deepEqual(asideFiles(dir), [], "nothing is left aside");
+
+  winner();
+  assert.ok(!existsSync(file), "and the winner can release it");
+});
+
 test("an aged lock is broken even when its pid is alive", async (t) => {
   const dir = tempDir(t);
   const sides = makeSides(8);
@@ -302,7 +344,7 @@ test("a lock whose holder is gone is broken", async (t) => {
   const sides = makeSides(8);
   // A real, already-exited process: its pid is dead (and is unlikely to be reused
   // within this test).
-  const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
+  const dead = deadPid();
   writeFileSync(lockFile(dir), JSON.stringify({ pid: dead, at: Date.now() }));
 
   const result = await runRound(options({ dir, sides, batchSize: 4, minMatches: 3 }));
@@ -331,9 +373,11 @@ test("a lock released in the EEXIST window is retried, not surfaced as an fs err
   // The first `wx` fails, the holder releases in that window, the read sees no
   // file: the acquisition must simply try again rather than throw ENOENT.
   let conflicts = 0;
-  const release = acquireRoundLock(file, () => {
-    conflicts++;
-    rmSync(file, { force: true });
+  const release = acquireRoundLock(file, {
+    afterConflict: () => {
+      conflicts++;
+      rmSync(file, { force: true });
+    },
   });
 
   assert.equal(conflicts, 1);

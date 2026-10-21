@@ -26,7 +26,9 @@
 // overlapping calls cannot both append batch 0 and double-count it. The lock
 // records its pid and when it was taken, and ages out after `ROUND_LOCK_STALE_MS`
 // even if the pid is alive: pids are reused, so a crashed writer's pid can belong
-// to an unrelated process by the time the next call arrives.
+// to an unrelated process by the time the next call arrives. A stale lock is
+// broken by renaming it aside and checking the file that was actually taken, so a
+// slow breaker cannot delete a fresh lock another breaker just installed.
 //
 // **Isolation (Review Focus 3).** `loadEntrant` reads exactly two files: the
 // puzzle's `workspace/puzzle.md` and the parent pattern's `workspace/pattern.md`,
@@ -40,6 +42,7 @@
 import {
   appendFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -523,7 +526,7 @@ function holderAlive(pid: number): boolean {
  */
 export const ROUND_LOCK_STALE_MS = 40 * 60 * 1000;
 
-/** What a lock file says: who held it, when, and how old the file itself is. */
+/** What a lock file says: who held it, when, how old the file is, and its exact text. */
 interface LockRecord {
   /** The holder's pid, when the file names one. */
   pid: number | undefined;
@@ -531,6 +534,8 @@ interface LockRecord {
   at: number | undefined;
   /** The lock file's own age, which covers a legacy or unreadable lock. */
   ageMs: number;
+  /** The file's exact content, so a breaker can tell this lock from a fresh one. */
+  raw: string;
 }
 
 /** JSON.parse, or undefined when the text is not JSON (a torn lock file, say). */
@@ -565,11 +570,12 @@ function readLock(file: string): LockRecord | undefined {
       pid: typeof pid === "number" && Number.isInteger(pid) && pid > 0 ? pid : undefined,
       at: typeof at === "number" && Number.isFinite(at) ? at : undefined,
       ageMs,
+      raw: trimmed,
     };
   }
   // A legacy lock is a bare pid, so its age is the file's mtime.
   const legacy = Number.parseInt(trimmed, 10);
-  return { pid: Number.isInteger(legacy) && legacy > 0 ? legacy : undefined, at: undefined, ageMs };
+  return { pid: Number.isInteger(legacy) && legacy > 0 ? legacy : undefined, at: undefined, ageMs, raw: trimmed };
 }
 
 /** A lock's age: its recorded acquisition time, else the file's mtime (clock skew counts as 0). */
@@ -592,20 +598,72 @@ function staleBecause(record: LockRecord): string | undefined {
 }
 
 /**
+ * A unique name to move a broken lock to, so two breakers cannot collide on it.
+ */
+function asideName(file: string): string {
+  return `${file}.stale.${process.pid}.${Date.now().toString(36)}.${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Break a stale lock without ever deleting a fresh one.
+ *
+ * Reading the lock and then unlinking it is check-then-act: a breaker that pauses
+ * between the two deletes whatever is at the path by then - including a fresh lock
+ * another breaker installed after breaking the same stale lock - and both then
+ * proceed, which is the double count the lock exists to stop. `rename` is atomic,
+ * so exactly one breaker can take the file aside; it reads the file it actually
+ * took and deletes it only if it is still the record it judged stale. If a fresh
+ * lock landed in that window, the fresh lock is put back (`link` creates only
+ * when the path is free) and the caller simply retries the acquisition. If the
+ * path has been taken again meanwhile, the fresh lock is left aside, never
+ * deleted: a live lock is not ours to remove.
+ */
+function breakStaleLock(file: string, stale: LockRecord): void {
+  const aside = asideName(file);
+  try {
+    renameSync(file, aside);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return; // another breaker got there first
+    throw error;
+  }
+
+  const moved = readLock(aside);
+  if (moved !== undefined && moved.raw === stale.raw) {
+    rmSync(aside, { force: true });
+    return;
+  }
+  try {
+    linkSync(aside, file);
+    rmSync(aside, { force: true });
+  } catch {
+    /* the path is taken again (or cannot be linked): leave the aside file alone */
+  }
+}
+
+/** Seams for the lock tests; production passes none. */
+export interface LockSeams {
+  /** After a failed `wx` and before the lock is read: the holder may release here. */
+  afterConflict?: () => void;
+  /** After the lock is judged stale and before it is broken: another breaker may win here. */
+  afterStale?: () => void;
+}
+
+/**
  * Take `file` as an O_EXCL lockfile holding this process's pid and the time, and
  * return the release.
  *
- * A stale lock (see `staleBecause`) is removed once and the acquisition retried,
- * so a crashed run's lock heals itself; a live, young lock fails fast, because
- * the alternative is two calls judging and appending the same batch. If the lock
- * vanishes between our failed `wx` and the read (the holder released it in that
- * window), the acquisition is simply retried rather than surfacing an ENOENT.
+ * A stale lock (see `staleBecause`) is broken atomically (see `breakStaleLock`)
+ * and the acquisition retried, so a crashed run's lock heals itself; a live, young
+ * lock fails fast, because the alternative is two calls judging and appending the
+ * same batch. If the lock vanishes between our failed `wx` and the read (the
+ * holder released it in that window), the acquisition is simply retried rather
+ * than surfacing an ENOENT.
  *
- * `afterConflict` is called after every EEXIST and before the read; it exists so
- * the release-window race can be tested without racing a real process.
+ * The two seams exist so those windows can be tested without racing a real
+ * process.
  */
-export function acquireRoundLock(file: string, afterConflict?: () => void): () => void {
-  for (let attempt = 0; attempt < 3; attempt++) {
+export function acquireRoundLock(file: string, seams: LockSeams = {}): () => void {
+  for (let attempt = 0; attempt < 4; attempt++) {
     try {
       writeFileSync(file, JSON.stringify({ pid: process.pid, at: Date.now() }), { flag: "wx" });
       return () => {
@@ -618,7 +676,7 @@ export function acquireRoundLock(file: string, afterConflict?: () => void): () =
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
-    afterConflict?.();
+    seams.afterConflict?.();
     const record = readLock(file);
     if (record === undefined) continue; // released in the window: take it now
     if (staleBecause(record) === undefined) {
@@ -627,7 +685,8 @@ export function acquireRoundLock(file: string, afterConflict?: () => void): () =
           `(${Math.round(lockAgeMs(record) / 1000)} s old): another round is already running on this directory`,
       );
     }
-    rmSync(file, { force: true }); // stale: break it and let the next attempt decide who wins
+    seams.afterStale?.();
+    breakStaleLock(file, record); // one attempt per lost race; the next `wx` picks the winner
   }
   throw new Error(`runRound: could not take ${file}`);
 }
