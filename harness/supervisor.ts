@@ -39,6 +39,7 @@ export interface Memory {
   nudges: Record<number, number>;
   stalled: number[];
   doneStreak: number; // consecutive ticks the done condition has held
+  stalledAt?: Record<number, number>; // when each stalled phase stalled (ms), for the retry
 }
 
 export type Action =
@@ -49,6 +50,13 @@ export type Action =
 
 /** How many nudges in a row a phase gets before it is considered stalled. */
 const NUDGE_LIMIT = 3;
+
+/**
+ * A stalled phase is given one more nudge after this long with no new commit.
+ * A stall can be an outage (a provider that answers nothing for an hour), and an
+ * owner that cannot act makes no commit, so "wait for a new HEAD" would never end.
+ */
+export const STALL_RETRY_MS = 10 * 60 * 1000;
 
 /**
  * A phase has work when at least one of its nodes is ready, running or finished.
@@ -78,14 +86,26 @@ function nudgeMessage(view: PhaseView): string {
   return `Continue phase ${view.phase}: ${view.ready.length} ready, ${view.finished.length} handoffs waiting (${ids.join(", ")}). Trust tree_list and your ledger; your phase skill's limits still apply.`;
 }
 
-export function decide(views: PhaseView[], head: string, memory: Memory): { actions: Action[]; memory: Memory } {
+export function decide(
+  views: PhaseView[],
+  head: string,
+  memory: Memory,
+  now: number = Date.now(),
+): { actions: Action[]; memory: Memory } {
   // A new HEAD is a new run of attempts: forget every nudge count and stall.
   // The done streak survives a HEAD change: a commit does not make a finished
   // run unfinished, and the owner may commit while the run is quiet.
   const current: Memory =
     head === memory.head
-      ? { head, nudges: { ...memory.nudges }, stalled: [...memory.stalled], doneStreak: memory.doneStreak }
-      : { head, nudges: {}, stalled: [], doneStreak: memory.doneStreak };
+      ? {
+          head,
+          nudges: { ...memory.nudges },
+          stalled: [...memory.stalled],
+          doneStreak: memory.doneStreak,
+          stalledAt: { ...memory.stalledAt },
+        }
+      : { head, nudges: {}, stalled: [], doneStreak: memory.doneStreak, stalledAt: {} };
+  const stalledAt = (current.stalledAt ??= {});
 
   // Done is checked first: a finished run is never nudged, started or stalled,
   // even by an owner that has gone away. Only configured phases count as work:
@@ -123,10 +143,16 @@ export function decide(views: PhaseView[], head: string, memory: Memory): { acti
     // An open input node nags only when nothing is queued or in flight at all.
     const queued = view.ready.length > 0 || view.finished.length > 0;
     if (!queued && (view.running.length > 0 || view.inputs.length === 0)) continue;
-    // Already stalled on this HEAD: nothing changes until a new commit moves it.
-    if (current.stalled.includes(view.phase)) continue;
+    // Already stalled on this HEAD: a new commit moves it, and so does waiting
+    // STALL_RETRY_MS, which earns exactly one more nudge before it stalls again.
+    if (current.stalled.includes(view.phase)) {
+      if (now - (stalledAt[view.phase] ?? now) < STALL_RETRY_MS) continue;
+      current.stalled = current.stalled.filter((phase) => phase !== view.phase);
+      current.nudges[view.phase] = NUDGE_LIMIT - 1;
+    }
     if ((current.nudges[view.phase] ?? 0) >= NUDGE_LIMIT) {
       current.stalled.push(view.phase);
+      stalledAt[view.phase] = now;
       actions.push({ kind: "stalled", phase: view.phase });
       continue;
     }

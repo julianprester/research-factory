@@ -96,7 +96,7 @@ function execute(
       return false;
     }
     case "stalled":
-      log(action.phase, "stalled", "three nudges with no new commit; waiting for a new HEAD");
+      log(action.phase, "stalled", "three nudges with no new commit; waiting for a new HEAD (one more nudge after 10 minutes)");
       return false;
   }
 }

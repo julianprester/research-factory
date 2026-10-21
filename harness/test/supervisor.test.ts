@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { decide, phasesWithNodes, viewPhase, type Memory, type PhaseView } from "../supervisor.ts";
+import { STALL_RETRY_MS, decide, phasesWithNodes, viewPhase, type Memory, type PhaseView } from "../supervisor.ts";
 import { createChild, initRun, updateNode } from "../tree.ts";
 
 function makeRun(t: TestContext): string {
@@ -124,7 +124,27 @@ test("an owner stalls after three nudges at the same head", () => {
 
   const moved = decide([phase1], "head-2", fifth.memory);
   assert.equal(moved.actions[0]?.kind, "nudge", "a new head starts nudging again");
-  assert.deepEqual(moved.memory, { head: "head-2", nudges: { 1: 1 }, stalled: [], doneStreak: 0 });
+  assert.deepEqual(moved.memory, { head: "head-2", nudges: { 1: 1 }, stalled: [], doneStreak: 0, stalledAt: {} });
+});
+
+test("a stalled phase gets one more nudge after STALL_RETRY_MS with no new commit, then stalls again", () => {
+  const phase1 = view({ phase: 1, ready: ["T01"] });
+  let state: Memory = memory();
+  for (let call = 1; call <= 3; call++) state = decide([phase1], "head-1", state, 0).memory;
+  const stalled = decide([phase1], "head-1", state, 1_000);
+  assert.deepEqual(stalled.actions, [{ kind: "stalled", phase: 1 }]);
+
+  const early = decide([phase1], "head-1", stalled.memory, 1_000 + STALL_RETRY_MS - 1);
+  assert.deepEqual(early.actions, [], "no retry before the cool-down ends");
+
+  const retry = decide([phase1], "head-1", early.memory, 1_000 + STALL_RETRY_MS);
+  assert.equal(retry.actions[0]?.kind, "nudge", "the cool-down earns one nudge");
+  assert.deepEqual(retry.memory.stalled, [], "the phase is not stalled while it is being retried");
+
+  const again = decide([phase1], "head-1", retry.memory, 1_000 + STALL_RETRY_MS + 60_000);
+  assert.deepEqual(again.actions, [{ kind: "stalled", phase: 1 }], "still no commit: stalled again, once");
+  const quiet = decide([phase1], "head-1", again.memory, 1_000 + STALL_RETRY_MS + 120_000);
+  assert.deepEqual(quiet.actions, [], "and quiet until the next cool-down");
 });
 
 test("the run is done after two consecutive empty ticks", () => {
