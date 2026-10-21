@@ -23,19 +23,31 @@
 // and reporting `cap` there would hide that the loop had already converged.
 //
 // **The record.** Decisions live in `rounds.json`, an array of
-// `{ summary, decision }`. Two properties keep it trustworthy across crashes and
-// repeated calls. Writes are temp-file-then-rename, so a crash mid-write leaves
-// the previous record intact rather than a half-written one that a later reader
-// could mistake for a decided round. And an append is idempotent per round number:
-// a re-called `judge_round` replaces its round's entry instead of adding a second,
-// contradictory one. Rounds must be recorded in order, so a summary for round n is
-// refused unless 0..n-1 are already there - a hole would let rule 2 compare across
-// a round that never happened.
+// `{ summary, decision }`. Three properties keep it trustworthy across crashes,
+// repeated calls and resumed rounds. Writes are temp-file-then-rename, so a failed
+// or interrupted write leaves the previous record intact rather than a half-written
+// one that a later reader could mistake for a decided round. An append is
+// idempotent per round number: a re-called `judge_round` replaces its round's entry
+// instead of adding a second, contradictory one. And rounds are contiguous from 0,
+// so rule 2 never compares across a round that never happened.
 //
-// A damaged record is an error, not a fresh start: silently rewriting it as
-// "continue" would drop a stop the loop already made. Only an absent file reads
-// as `{ stop: false }`, which is the correct answer for a tournament that has not
-// run a round yet.
+// **STOP is a latch.** The design's wording ("while the latest recorded decision is
+// STOP") would let a resumed `judge_round` record a later round, or a re-called one
+// rewrite its summary, and quietly reopen the gate the loop had closed. So the
+// recorded stop, once made, is final: `readStop` returns the earliest stop however
+// later rounds would read, `appendRound` refuses every round after it, and a
+// re-record is refused if it would change any stop/continue outcome up to and
+// including the latch - so it can neither lift the stop nor move it earlier.
+// Re-recording a stopped round with the same outcome is still allowed: that is the
+// idempotent re-call the brief demands. `appendRound` reports the latch decision
+// whenever one stands, because that is what the owner's `tree_create` gate reads.
+//
+// Stored decisions are never trusted as the source of truth: every read and every
+// append recomputes them from the summaries with `decideStop`, so a hand-altered
+// `decision` field self-corrects instead of opening the gate. A damaged record is an
+// error, not a fresh start: silently rewriting it as "continue" would drop a stop
+// the loop already made. Only an absent file reads as `{ stop: false }`, which is
+// the correct answer for a tournament that has not run a round yet.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -175,13 +187,8 @@ function writeRounds(file: string, records: RoundRecord[]): void {
   renameSync(temp, file);
 }
 
-/** The record's latest decision: by round number, so file order cannot mislead. */
-function latestDecision(records: RoundRecord[]): Decision {
-  if (records.length === 0) return CONTINUE;
-  let latest = records[0]!;
-  for (const record of records) if (record.summary.round >= latest.summary.round) latest = record;
-  return latest.decision;
-}
+/** A stop, and the round it was first recorded at: the latch. */
+type StopRecord = { round: number; decision: Extract<Decision, { stop: true }> };
 
 /**
  * Pair each summary with the decision its own history produces, in round order. A
@@ -199,37 +206,97 @@ function recordedDecisions(summaries: RoundSummary[]): RoundRecord[] {
 }
 
 /**
- * The latest recorded decision for `file`, or continue when there is no record yet.
- * Throws on a file that exists but cannot be read: reporting continue there would
- * let the owner create a child after a stop the loop had already decided.
+ * The earliest recorded STOP, in round order, or undefined when the record has not
+ * stopped. This is the latch: it is what `readStop` reports and what refuses any
+ * later round, whatever the latest round's own decision says.
  */
-export function readStop(file: string): Decision {
-  return latestDecision(readRounds(file));
+function latchOf(records: RoundRecord[]): StopRecord | undefined {
+  for (const record of records) {
+    if (record.decision.stop) return { round: record.summary.round, decision: record.decision };
+  }
+  return undefined;
 }
 
 /**
- * Record `summary` and return the decision it produces.
+ * The decision that stands for `file`: the earliest recorded STOP, or the latest
+ * round's decision when the record has not stopped, or continue when there is no
+ * record yet. Decisions are recomputed from the summaries, so an edited `decision`
+ * field cannot open a gate the summaries had closed. Throws on a file that exists
+ * but cannot be read: reporting continue there would let the owner create a child
+ * after a stop the loop had already decided.
+ */
+export function readStop(file: string): Decision {
+  const records = recordedDecisions(readRounds(file).map((record) => record.summary));
+  const latch = latchOf(records);
+  if (latch !== undefined) return latch.decision;
+  return records.length === 0 ? CONTINUE : records[records.length - 1]!.decision;
+}
+
+/**
+ * The summary to record, or a thrown error naming what is wrong with it. The round
+ * number gets its own message: a fractional round (0.5, say) would otherwise slip
+ * between two recorded rounds and make the round set meaningless.
+ */
+function checkedSummary(value: unknown): RoundSummary {
+  if (typeof value !== "object" || value === null) {
+    throw new Error(
+      `stop: appendRound needs a summary { round, top, children }: ${JSON.stringify(value)?.slice(0, 160)}`,
+    );
+  }
+  const { round } = value as { round?: unknown };
+  if (typeof round !== "number" || !Number.isInteger(round) || round < 0) {
+    throw new Error(
+      `stop: appendRound needs an integer round number >= 0, got ${JSON.stringify(round)}: ` +
+        `${JSON.stringify(value)?.slice(0, 160)}`,
+    );
+  }
+  const checked = summaryOf(value);
+  if (checked === undefined) {
+    throw new Error(
+      `stop: appendRound needs a summary { round, top, children } with string ids and a boolean beatParent: ` +
+        `${JSON.stringify(value)?.slice(0, 160)}`,
+    );
+  }
+  return checked;
+}
+
+/**
+ * Record `summary` and return the decision that stands after it.
  *
- * Round n is refused unless rounds 0..n-1 are already recorded: a missing round
- * would let rule 2 compare the top set across a round that never happened, and
- * would hide the hole from the owner. A summary for a round already recorded
- * replaces that entry - a re-called `judge_round` must not leave two entries for
- * one round - and the record is rewritten atomically with every decision
- * recomputed, so the file cannot disagree with `decideStop`.
+ * Three refusals protect the record. A round after a recorded STOP is refused (the
+ * loop is over). A record whose resulting round set is not 0..max is refused (a
+ * hole, even one above the round being recorded, would silently skip rule 2 for the
+ * rounds after it). And once a STOP is recorded, a re-record that would change any
+ * stop/continue outcome up to and including the latch is refused - re-running a
+ * round may correct its data but may never lift the stop.
+ *
+ * An append that survives is written atomically with every decision recomputed from
+ * the summaries, and the returned decision is the latch's when one stands, so the
+ * caller's gate reads the same answer as `readStop`.
  */
 export function appendRound(file: string, summary: RoundSummary): Decision {
-  const checked = summaryOf(summary);
-  if (checked === undefined) {
-    throw new Error(`stop: appendRound needs a summary { round, top, children }: ${JSON.stringify(summary)}`);
-  }
+  const checked = checkedSummary(summary);
 
   // One entry per round, the last occurrence winning: a hand-damaged record with a
   // duplicated round heals here instead of growing another entry.
   const byRound = new Map<number, RoundSummary>();
   for (const record of readRounds(file)) byRound.set(record.summary.round, record.summary);
 
+  const before = recordedDecisions([...byRound.values()]);
+  const latch = latchOf(before);
+  if (latch !== undefined && checked.round > latch.round) {
+    throw new Error(`stop: STOP already recorded at round ${latch.round} (${latch.decision.reason}): no more rounds`);
+  }
+
+  byRound.set(checked.round, checked);
+  const next = recordedDecisions([...byRound.values()]);
+
+  // The resulting round set must be 0..max with no hole anywhere, not just below the
+  // round being recorded: a hand-edited record with a gap above it would otherwise
+  // survive, and rule 2 would skip the comparison for every round past the gap.
+  const rounds = next.map((record) => record.summary.round);
   const missing: number[] = [];
-  for (let round = 0; round < checked.round; round++) if (!byRound.has(round)) missing.push(round);
+  for (let round = 0; round < rounds[rounds.length - 1]!; round++) if (!byRound.has(round)) missing.push(round);
   if (missing.length > 0) {
     const holes = missing.length === 1 ? `round ${missing[0]} is` : `rounds ${missing.join(", ")} are`;
     throw new Error(
@@ -237,8 +304,26 @@ export function appendRound(file: string, summary: RoundSummary): Decision {
     );
   }
 
-  byRound.set(checked.round, checked);
-  const next = recordedDecisions([...byRound.values()]);
+  // A recorded stop stands: the re-record may correct the data of a round but not
+  // the fact that the loop stopped. Both directions are refused - lifting a stop and
+  // adding one earlier than the latch - because the recorded decision is what the
+  // owner has already acted on.
+  if (latch !== undefined) {
+    for (const record of before) {
+      if (record.summary.round > latch.round) continue;
+      const recomputed = next.find((entry) => entry.summary.round === record.summary.round);
+      if (recomputed === undefined || recomputed.decision.stop === record.decision.stop) continue;
+      const was = record.decision.stop ? `STOP (${record.decision.reason})` : "continue";
+      const now = recomputed.decision.stop ? `STOP (${recomputed.decision.reason})` : "continue";
+      throw new Error(
+        `stop: re-recording round ${checked.round} would change round ${record.summary.round} from ${was} to ` +
+          `${now}, but STOP is a latch and stands at round ${latch.round} (${latch.decision.reason})`,
+      );
+    }
+  }
+
   writeRounds(file, next);
+  const settled = latchOf(next);
+  if (settled !== undefined) return settled.decision;
   return next.find((record) => record.summary.round === checked.round)!.decision;
 }

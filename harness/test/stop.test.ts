@@ -8,10 +8,15 @@
 // stopped improving" mean different things to the owner's record.
 //
 // The stop record itself is `rounds.json`: an array of `{summary, decision}`.
-// It is written temp-file-and-rename, so a crash mid-write cannot shred the
-// record, and it is idempotent per round number, so a re-called judge_round
-// replaces its own entry instead of double-appending and turning a decided
-// round into two contradictory ones.
+// It is written temp-file-and-rename, so a failed or interrupted write cannot
+// shred the record, and it is idempotent per round number, so a re-called
+// judge_round replaces its own entry instead of double-appending and turning a
+// decided round into two contradictory ones. The record is also a **latch**: once
+// a round is recorded as STOP, no later round may be appended and no re-record may
+// change a stop/continue outcome up to and including that round. Without the latch
+// a re-run of an earlier round could quietly reopen a gate the loop had closed.
+// Decisions are always recomputed from the stored summaries, so a hand-altered
+// `decision` field cannot open it either.
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -131,13 +136,46 @@ const CASES: Case[] = [
     expected: { stop: true, reason: "top-stable" },
   },
   {
-    name: "round 2: sets that differ in size are never top-stable",
+    // Load-bearing for the size guard: the latest top is a **strict subset** of the
+    // previous round's five, so the membership loop alone would call the sets equal
+    // and report a spurious `top-stable`. Only the size check keeps this continue.
+    name: "round 2: a top 5 that shrinks to a strict subset of three is never top-stable",
+    history: [
+      round(0, TOP5),
+      round(1, ["p01", "p02", "p03", "p04", "p06"], [child("c1", "p01", true)]),
+      round(2, ["p01", "p02", "p03"], [child("c2", "p01", true)]),
+    ],
+    expected: CONTINUE,
+  },
+  {
+    name: "round 2: a top of three that grows to five is never top-stable",
     history: [
       round(0, ["p01", "p02", "p03"]),
       round(1, ["p01", "p02", "p03"], [child("c1", "p01", true)]),
       round(2, ["p01", "p02", "p03", "p04", "p05"], [child("c2", "p02", true)]),
     ],
     expected: CONTINUE,
+  },
+  {
+    // Deliberate, not an accident of implementation: rule 2 applies from round 1
+    // on, so a child that beats its parent without cracking the top five leaves the
+    // monitoring set equal to round 0's and stops the loop after a single round.
+    // The design says "the same in two consecutive rounds" with no exemption for
+    // round 1, and the owner skill will tell the owner to expect this.
+    name: "round 1: a child beat its parent but the top 5 equals round 0's, which is top-stable",
+    history: [round(0, TOP5), round(1, TOP5, [child("c1", "p06", true)])],
+    expected: { stop: true, reason: "top-stable" },
+  },
+  {
+    // `top` is compared as a set, so a repeated id collapses: a five-entry list with
+    // a repeat names the same four entrants as the previous round's four.
+    name: "round 2: a duplicated id in top collapses, so the sets can still be stable",
+    history: [
+      round(0, TOP5),
+      round(1, ["p01", "p02", "p03", "p04"], [child("c1", "p05", true)]),
+      round(2, ["p01", "p01", "p02", "p03", "p04"], [child("c2", "p05", true)]),
+    ],
+    expected: { stop: true, reason: "top-stable" },
   },
   {
     name: "round 2: one changed entrant in the top 5 is continue",
@@ -189,6 +227,9 @@ const CASES: Case[] = [
     expected: { stop: true, reason: "no-child-beat-parent" },
   },
   {
+    // `decideStop` is a pure rule over the history it is given and judges only the
+    // latest round; the latch that keeps a recorded stop closed lives in
+    // `readStop`/`appendRound`, not here.
     name: "the latest round decides, not an earlier stop",
     history: [
       round(0, TOP5),
@@ -278,12 +319,35 @@ test("appendRound: a gap in the rounds is refused", (t) => {
   assert.throws(() => appendRound(file, round(4, TOP5, [child("c4", "p01", true)])), /rounds 1, 2, 3 are missing/);
 });
 
-test("appendRound: the file is written atomically, leaving no temp file behind", (t) => {
+test("appendRound: a successful write leaves no temp file behind", (t) => {
   const file = roundsFile(t);
   appendRound(file, round(0, TOP5));
   appendRound(file, round(1, OTHER_TOP5, [child("c1", "p01", true)]));
   const left = readdirSync(path.dirname(file));
   assert.deepEqual(left, ["rounds.json"], `stray files after the writes: ${left.join(", ")}`);
+});
+
+test("appendRound: a failed write leaves the previous record intact", (t) => {
+  const file = roundsFile(t);
+  appendRound(file, round(0, TOP5));
+  const before = readFileSync(file, "utf8");
+
+  // The write goes to `<file>.<pid>.tmp`, so an unwritable temp path is a write
+  // failure in the middle of the update. The record must be exactly as it was:
+  // this is the property the temp-file-and-rename scheme exists for.
+  const temp = `${file}.${process.pid}.tmp`;
+  mkdirSync(temp, { recursive: true });
+  t.after(() => rmSync(temp, { recursive: true, force: true }));
+  assert.throws(
+    () => appendRound(file, round(1, OTHER_TOP5, [child("c1", "p01", true)])),
+    /EISDIR|illegal operation on a directory/,
+  );
+  assert.equal(readFileSync(file, "utf8"), before, "a failed write must not change the record");
+  assert.deepEqual(readStop(file), { stop: false });
+
+  // With the obstruction gone the same call succeeds, so the failure left no state.
+  rmSync(temp, { recursive: true, force: true });
+  assert.deepEqual(appendRound(file, round(1, OTHER_TOP5, [child("c1", "p01", true)])), { stop: false });
 });
 
 test("appendRound: a stale temp file from a crash is ignored, not read as the record", (t) => {
@@ -302,17 +366,148 @@ test("appendRound: re-recording an earlier round recomputes the later decisions"
   appendRound(file, round(0, TOP5));
   appendRound(file, round(1, ["p11", "p02", "p03", "p04", "p05"], [child("c1", "p02", true)]));
   appendRound(file, round(2, ["p12", "p02", "p03", "p04", "p05"], [child("c2", "p02", true)]));
+  appendRound(file, round(3, ["p13", "p02", "p03", "p04", "p05"], [child("c3", "p02", true)]));
+  assert.deepEqual(readStop(file), { stop: false });
+
+  // The re-run round 1 now ranks TOP5, which is round 0's top set: round 1 becomes
+  // top-stable, and every later decision is recomputed from the new history.
+  const decision = appendRound(file, round(1, TOP5, [child("c1", "p02", true)]));
+  assert.deepEqual(decision, { stop: true, reason: "top-stable" });
+  assert.deepEqual(readStop(file), { stop: true, reason: "top-stable" });
+  const stored = JSON.parse(readFileSync(file, "utf8")) as RoundRecord[];
+  assert.deepEqual(
+    stored.map((entry) => [entry.summary.round, entry.decision]),
+    [
+      [0, { stop: false }],
+      [1, { stop: true, reason: "top-stable" }],
+      [2, { stop: false }],
+      [3, { stop: false }],
+    ],
+  );
+});
+
+// --- the latch ---------------------------------------------------------------
+// A recorded STOP is what refuses the owner's `tree_create`, so it must not be
+// undone by a re-run of the round that produced it or by a later round being
+// recorded. Three paths, one each test: lifting the stop by re-recording, adding
+// a round after the stop, and the idempotent re-call that must still work.
+
+test("latch: a re-record that would lift the recorded stop is refused", (t) => {
+  const file = roundsFile(t);
+  appendRound(file, round(0, TOP5));
+  appendRound(file, round(1, ["p11", "p02", "p03", "p04", "p05"], [child("c1", "p02", true)]));
+  appendRound(file, round(2, ["p12", "p02", "p03", "p04", "p05"], [child("c2", "p02", true)]));
+  appendRound(file, round(3, ["p12", "p02", "p03", "p04", "p05"], [child("c3", "p02", true)]));
+  assert.deepEqual(readStop(file), { stop: true, reason: "top-stable" });
+  const before = readFileSync(file, "utf8");
+
+  // Re-ranking round 2 would break round 3's stable top and turn the STOP into a
+  // continue - exactly the silence the latch exists to prevent.
+  assert.throws(
+    () => appendRound(file, round(2, ["p22", "p02", "p03", "p04", "p05"], [child("c2", "p02", true)])),
+    /STOP is a latch and stands at round 3 \(top-stable\)/,
+  );
+  assert.equal(readFileSync(file, "utf8"), before, "a refused append must leave the record untouched");
+  assert.deepEqual(readStop(file), { stop: true, reason: "top-stable" });
+});
+
+test("latch: a round after a recorded stop is refused", (t) => {
+  const file = roundsFile(t);
+  appendRound(file, round(0, TOP5));
+  appendRound(file, round(1, OTHER_TOP5, [child("c1", "p01", false)]));
+  assert.deepEqual(readStop(file), { stop: true, reason: "no-child-beat-parent" });
+  const before = readFileSync(file, "utf8");
+
+  // This round would continue on its own (a beating child, a changed top), but the
+  // loop is over: recording it would reopen the gate.
+  assert.throws(
+    () => appendRound(file, round(2, ["p07", "p02", "p03", "p04", "p05"], [child("c2", "p02", true)])),
+    /STOP already recorded at round 1 \(no-child-beat-parent\): no more rounds/,
+  );
+  assert.equal(readFileSync(file, "utf8"), before, "a refused append must leave the record untouched");
+  assert.deepEqual(readStop(file), { stop: true, reason: "no-child-beat-parent" });
+});
+
+test("latch: an identical re-record of a stopped round is allowed and changes nothing", (t) => {
+  const file = roundsFile(t);
+  const stopped = round(1, OTHER_TOP5, [child("c1", "p01", false)]);
+  appendRound(file, round(0, TOP5));
+  appendRound(file, stopped);
+  const before = readFileSync(file, "utf8");
+
+  // The idempotent re-call the brief demands: same round, same summary, still STOP.
+  assert.deepEqual(appendRound(file, stopped), { stop: true, reason: "no-child-beat-parent" });
+  assert.equal(readFileSync(file, "utf8"), before, "an identical re-record must not touch the record");
+  assert.deepEqual(readStop(file), { stop: true, reason: "no-child-beat-parent" });
+});
+
+test("latch: a stopped round may be re-recorded while the stop outcome is unchanged", (t) => {
+  const file = roundsFile(t);
+  appendRound(file, round(0, TOP5));
+  appendRound(file, round(1, OTHER_TOP5, [child("c1", "p01", false)]));
+
+  // A different losing child is still a losing child, so round 1 still stops; the
+  // latch holds and the corrected record is accepted.
+  const decision = appendRound(file, round(1, OTHER_TOP5, [child("c9", "p01", false), child("c1", "p02", false)]));
+  assert.deepEqual(decision, { stop: true, reason: "no-child-beat-parent" });
+  assert.deepEqual(readStop(file), { stop: true, reason: "no-child-beat-parent" });
+  const stored = JSON.parse(readFileSync(file, "utf8")) as RoundRecord[];
+  assert.equal(stored.length, 2);
+  assert.deepEqual(stored[1]!.summary.children, [child("c9", "p01", false), child("c1", "p02", false)]);
+});
+
+test("latch: readStop self-corrects a record whose decision fields were altered to continue", (t) => {
+  const file = roundsFile(t);
+  mkdirSync(path.dirname(file), { recursive: true });
+  // Parseable, but the stored decisions lie: round 1's summary has no beating child.
+  writeFileSync(
+    file,
+    JSON.stringify([
+      { summary: round(0, TOP5), decision: { stop: false } },
+      { summary: round(1, OTHER_TOP5, [child("c1", "p01", false)]), decision: { stop: false } },
+    ]),
+  );
+  assert.deepEqual(readStop(file), { stop: true, reason: "no-child-beat-parent" });
+  // And the gate stays closed for an append, which derives the same latch.
+  assert.throws(
+    () => appendRound(file, round(2, ["p07", "p02", "p03", "p04", "p05"], [child("c2", "p02", true)])),
+    /STOP already recorded at round 1/,
+  );
+});
+
+test("latch: readStop reports the earliest stop even when a later round would continue", (t) => {
+  const file = roundsFile(t);
+  mkdirSync(path.dirname(file), { recursive: true });
+  // Only reachable by hand (appendRound refuses a round after a stop), but the read
+  // side must still answer with the stop: a later `continue` may not reopen the gate.
+  writeFileSync(
+    file,
+    JSON.stringify([
+      { summary: round(0, TOP5), decision: { stop: false } },
+      {
+        summary: round(1, OTHER_TOP5, [child("c1", "p01", false)]),
+        decision: { stop: true, reason: "no-child-beat-parent" },
+      },
+      { summary: round(2, ["p07", "p02", "p03", "p04", "p05"], [child("c2", "p02", true)]), decision: { stop: false } },
+    ]),
+  );
+  assert.deepEqual(readStop(file), { stop: true, reason: "no-child-beat-parent" });
+});
+
+test("latch: a re-record before the latch returns the latch's decision, not the round's own", (t) => {
+  const file = roundsFile(t);
+  appendRound(file, round(0, TOP5));
+  appendRound(file, round(1, ["p11", "p02", "p03", "p04", "p05"], [child("c1", "p02", true)]));
+  appendRound(file, round(2, ["p12", "p02", "p03", "p04", "p05"], [child("c2", "p02", true)]));
   appendRound(file, round(3, ["p12", "p02", "p03", "p04", "p05"], [child("c3", "p02", true)]));
   assert.deepEqual(readStop(file), { stop: true, reason: "top-stable" });
 
-  // The re-run round 2 now ranks differently, so round 3 is no longer stable.
-  appendRound(file, round(2, ["p22", "p02", "p03", "p04", "p05"], [child("c2", "p02", true)]));
-  assert.deepEqual(readStop(file), { stop: false });
+  // Round 2's own verdict stays continue, but the caller must be told the STOP that
+  // stands, because that is the decision the owner's tree_create gate reads.
+  const decision = appendRound(file, round(2, ["p12", "p02", "p03", "p04", "p05"], [child("c9", "p02", true)]));
+  assert.deepEqual(decision, { stop: true, reason: "top-stable" });
   const stored = JSON.parse(readFileSync(file, "utf8")) as RoundRecord[];
-  assert.deepEqual(
-    stored.map((entry) => entry.decision),
-    [{ stop: false }, { stop: false }, { stop: false }, { stop: false }],
-  );
+  assert.deepEqual(stored[2]!.decision, { stop: false });
 });
 
 test("appendRound: a duplicated round in a hand-damaged record heals to one entry", (t) => {
@@ -355,12 +550,43 @@ test("appendRound: a damaged stop record throws and is left untouched", (t) => {
 test("appendRound: a record of unknown shape is refused, not trusted", (t) => {
   const file = roundsFile(t);
   mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify([{ summary: { round: 0 }, decision: { stop: "maybe" } }]));
+  const altered = JSON.stringify([{ summary: { round: 0 }, decision: { stop: "maybe" } }]);
+  writeFileSync(file, altered);
   assert.throws(() => readStop(file), /entry 0/);
+  assert.throws(() => appendRound(file, round(1, TOP5, [child("c1", "p01", true)])), /entry 0/);
+  assert.equal(readFileSync(file, "utf8"), altered, "a refused append must not clobber the record");
 });
 
 test("appendRound: an invalid round number is refused", (t) => {
   const file = roundsFile(t);
-  assert.throws(() => appendRound(file, round(-1, TOP5)), /round/);
-  assert.throws(() => appendRound(file, round(0.5, TOP5)), /round/);
+  // Round 0 is recorded first, so only the integer guard can reject 0.5: without it
+  // the round would simply land between 0 and 1 and the append would succeed.
+  appendRound(file, round(0, TOP5));
+  const before = readFileSync(file, "utf8");
+  assert.throws(() => appendRound(file, round(0.5, TOP5)), /integer round number >= 0, got 0\.5/);
+  assert.throws(() => appendRound(file, round(-1, TOP5)), /integer round number >= 0, got -1/);
+  assert.equal(readFileSync(file, "utf8"), before, "a refused append must leave the record untouched");
+});
+
+test("appendRound: a hole above the recorded round is refused before writing", (t) => {
+  const file = roundsFile(t);
+  appendRound(file, round(0, TOP5));
+  appendRound(file, round(1, OTHER_TOP5, [child("c1", "p01", true)]));
+  const stored = JSON.parse(readFileSync(file, "utf8")) as RoundRecord[];
+  // A hand-edited record with round 4 missing: re-recording round 1 must not write
+  // a set that still has the hole, because rule 2 would silently skip round 4.
+  writeFileSync(
+    file,
+    JSON.stringify([
+      ...stored,
+      { summary: round(2, ["p07", "p02", "p03", "p04", "p05"], [child("c2", "p01", true)]), decision: { stop: false } },
+      { summary: round(4, ["p08", "p02", "p03", "p04", "p05"], [child("c4", "p01", true)]), decision: { stop: false } },
+    ]),
+  );
+  const before = readFileSync(file, "utf8");
+  assert.throws(
+    () => appendRound(file, round(1, OTHER_TOP5, [child("c1", "p01", true)])),
+    /round 3 is missing/,
+  );
+  assert.equal(readFileSync(file, "utf8"), before, "a refused append must leave the record untouched");
 });
