@@ -36,6 +36,15 @@ its `workspace/manifest.md` for the paths, then `expectations.md` §0 and its
 entries. The `input` node is the job list: never brief or dispatch it, and close
 it only when the phase is complete (§5).
 
+Phase 0 may have left warnings about particular entries, and they must not be
+lost between the phases. Read them before you brief anything: the node's
+`handoff.md`, its `workspace/summary.md`, and the hand-off note on the commit
+that moved it to phase 1
+(`git -C <run dir> log -1 --format=%b -- <input node dir>/node.json`). Note every
+entry they call **pre-known contradicted** (a feasibility scan already went the
+other way), **inferred** rather than stated by its source, or otherwise doubtful.
+Record each in the ledger as `Caveat: E<n> — <what Phase 0 said>`.
+
 If the input node has no `workspace/manifest.md`, or that manifest names no
 exploration list, do not improvise paths: write
 `Ruling: Phase 1 blocked — the input node has no <file> — cost: Phase 1 waits for
@@ -55,7 +64,9 @@ tree_create({ parentId: "D01", title: "E03 <short title>" })
 - **Skill:** `./harness/skills/roles/scan-expectation.md`
 - **Inputs:** every path in `workspace/manifest.md` except its hold-out lists;
   `expectations.md` §0 (the shared populations and the small-cell rule) and the
-  entry's id and full text.
+  entry's id and full text. When Phase 0 left a caveat on the entry, add a
+  `Caveat:` line to the brief with its words, so the scanner knows how the entry
+  is doubted.
 - **Outputs:** `workspace/measure.md`, `workspace/scripts/`,
   `workspace/results/`, `workspace/pattern.md`.
 - **Definition of Done:** the role file's DoD, copied in.
@@ -102,6 +113,13 @@ Only then act on the handoff's `Verdict:` line (line 3):
 
 - `violated`, `mixed` or `open` — a surprise, or a regularity Phase 2 should
   interpret: `tree_update({ nodeId, phase: 2, status: "ready", note: "<verdict>: <one line>" })`.
+  If you recorded a `Caveat:` for the entry, end the note with `— caveat: <it>`
+  so Phase 2 inherits the warning. Exception: an entry Phase 0 called **pre-known
+  contradicted** that comes back `violated` is not a surprise — Phase 0 said
+  so before anyone measured. Close it `status: "closed"`, note
+  `known: contradicted before measuring (<where Phase 0 said so>)`, with a
+  `Ruling:` (cost if wrong: Phase 2 never interprets a pattern that was real after
+  all). The same entry coming back `held` or `mixed` goes by the ordinary rules.
 - `held` — the expectation survived: `status: "closed"`, note
   `expected: <one line>`.
 - `unmeasurable` — `status: "closed"`, note `unmeasurable: <why>`; a blind
@@ -156,11 +174,12 @@ Record the decision before the final call:
 
 Then, as the **last** tree call, close the input node:
 
-`tree_update({ nodeId: "<input>", status: "closed", note: "Phase 1 complete: <n> to Phase 2, <m> expected, <k> unmeasurable, <d> duplicates/artifacts" })`
+`tree_update({ nodeId: "<input>", status: "closed", note: "Phase 1 complete: <n> to Phase 2, <m> expected, <k> unmeasurable, <d> duplicates/artifacts, <q> known" })`
 
 `<n>` counts the pattern nodes handed to Phase 2 (`violated`, `mixed`, `open`),
 `<m>` those closed `expected`, `<k>` those `unmeasurable`, `<d>` the combined
-duplicates and artifacts. Ledger each line before its `tree_*` call, as
+duplicates and artifacts, `<q>` those closed `known:` (`0` when Phase 0 left
+no pre-known entry). Ledger each line before its `tree_*` call, as
 phase-owner requires, and never write a ledger line after that last call.
 
 ## Never

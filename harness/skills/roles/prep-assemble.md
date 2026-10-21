@@ -121,6 +121,11 @@ Never invent an id, and never cite a chunk you have not read with
   raw total, behaviour not in the corpus, broken citation).
 - Every pooled, dropped or flagged small-cell comparison: the entry and the
   choice.
+- Every entry you kept although a feasibility check already went against its
+  direction, or that its source only implies: one line headed **Pre-known
+  contradicted** or **Inferred**, naming the entry. Phase 1 reads these lines and
+  closes a pre-known entry that is measured `violated` as `known`, instead of
+  handing it to Phase 2 as a discovery; repeat them in your handoff's concerns.
 - The final count, and the `check-citations` result line.
 
 ## Definition of Done

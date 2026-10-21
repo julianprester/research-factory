@@ -412,3 +412,27 @@ test("DEFAULT_CONFIG configures Phases 0 and 1", () => {
     assert.ok(existsSync(path.join(HARNESS_ROOT, skill, "SKILL.md")), `phase ${phase}'s skill ${skill} exists`);
   }
 });
+
+test("the Phase 1 skill carries Phase 0's caveats forward and closes pre-known violations as known", () => {
+  const body = read("harness/skills/phase-1/SKILL.md").replace(/\s+/g, " ");
+  for (const needed of ["summary.md", "pre-known contradicted", "Caveat:", "— caveat:", "known: contradicted before measuring", "<q> known"]) {
+    assert.ok(body.includes(needed), `the skill mentions ${needed}`);
+  }
+  // The caveat is read before anything is briefed, and routing applies it.
+  assert.ok(body.indexOf("Caveat: E<n>") < body.indexOf("## 1. One expectation scanner"), "caveats are recorded before briefing");
+  assert.match(body, /comes back `violated` is not a surprise/);
+});
+
+test("both scanner roles tell the worker to declare directory listing in measure.md", () => {
+  for (const role of PHASE1_ROLES) {
+    const markdown = read(`harness/skills/roles/${role}.md`).replace(/\s+/g, " ");
+    assert.match(markdown, /Enumerates: <why/, `${role} names the Enumerates: line`);
+    assert.match(markdown, /os\.walk/, `${role} says which calls count`);
+  }
+});
+
+test("the assembler marks pre-known and inferred entries in summary.md for Phase 1", () => {
+  const markdown = read("harness/skills/roles/prep-assemble.md").replace(/\s+/g, " ");
+  assert.match(markdown, /\*\*Pre-known contradicted\*\* or \*\*Inferred\*\*/);
+  assert.match(markdown, /closes a pre-known entry that is measured `violated` as `known`/);
+});

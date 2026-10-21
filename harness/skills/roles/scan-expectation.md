@@ -66,6 +66,11 @@ anywhere in a script — in any spelling: `holdout`, `hold-out`, `hold_out`,
 case-insensitive — not even in a comment: `check-pattern` fails the node on any
 of them. Small analyses only: counts, shares, cross-tabs, comparisons across
 slices, distinctive-word lists, co-occurrence, link counts. No fitted models.
+Avoid scripts that list directories (`os.walk`, `os.listdir`, `readdir`, `glob`,
+`rglob` and the like): they see the names of files outside the exploration list.
+If the measure truly needs one (to resolve link targets, say), put a line
+`Enumerates: <why, and that only file names are used>` in `measure.md` before you
+pre-register — `check-pattern` fails the node on such a script without it.
 Save each script's raw output under `workspace/results/`, so a reviewer can
 re-run it and compare it with the card.
 
