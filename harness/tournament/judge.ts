@@ -301,6 +301,12 @@ export async function judgeSame(a: Side, b: Side, transport: Transport): Promise
   return { same: firstVerdict.same && secondVerdict.same, reasons: [firstVerdict.reason, secondVerdict.reason] };
 }
 
+/** Options for the default process runner; the model call keeps the defaults. */
+export interface ExecRunnerOptions {
+  /** How long the child may run before it is killed. Tests shorten it. */
+  timeoutMs?: number;
+}
+
 /**
  * The default process runner: run `command` with argv, async and bounded, and
  * reject with the stderr text on a non-zero exit.
@@ -310,17 +316,31 @@ export async function judgeSame(a: Side, b: Side, transport: Transport): Promise
  * pipe open makes every real call hang until the timeout. `spawn` with
  * `stdio: ["ignore", ...]` would do as well; closing is explicit here so the
  * prompt can also be piped when a caller wants that.
+ *
+ * A child can exit before draining a piped input, which emits EPIPE on its
+ * stdin socket; that listener turns the write error into a rejection instead of
+ * an uncaught exception. The child's own callback may settle the promise first;
+ * the later settlement is ignored.
  */
-export function makeExecRunner(command: string): Runner {
+export function makeExecRunner(command: string, opts: ExecRunnerOptions = {}): Runner {
+  const timeoutMs = opts.timeoutMs ?? PI_TIMEOUT_MS;
   return (args, input) =>
     new Promise((resolve, reject) => {
-      const child = execFile(command, args, { timeout: PI_TIMEOUT_MS, maxBuffer: PI_MAX_BUFFER }, (error, stdout, stderr) => {
-        if (error) {
-          const detail = typeof stderr === "string" && stderr.trim() !== "" ? stderr.trim() : error.message;
-          reject(new Error(`${command} judge call failed: ${detail}`));
-          return;
-        }
-        resolve(stdout);
+      const child = execFile(
+        command,
+        args,
+        { timeout: timeoutMs, maxBuffer: PI_MAX_BUFFER },
+        (error, stdout, stderr) => {
+          if (error) {
+            const detail = typeof stderr === "string" && stderr.trim() !== "" ? stderr.trim() : error.message;
+            reject(new Error(`${command} judge call failed: ${detail}`));
+            return;
+          }
+          resolve(stdout);
+        },
+      );
+      child.stdin?.on("error", (error: Error) => {
+        reject(new Error(`${command} judge stdin failed: ${error.message}`));
       });
       // pi -p waits for EOF on stdin; without this every real call hangs.
       if (input !== undefined) child.stdin?.end(input);

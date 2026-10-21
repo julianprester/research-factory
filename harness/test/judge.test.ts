@@ -58,9 +58,6 @@ const SIDE_WITH_ID_IN_CARD: Side = {
   evidence: "Result: inherited from pz-gamma-9999.",
 };
 
-/** A review-looking string: none of its marker may reach the judge prompt. */
-const REVIEW_MARKER = "REVIEW-MARKER-7f21: the rival account is missing.";
-
 /** A fake judge that always names the first card it is shown. */
 const firstPosition: Transport = async () => JSON.stringify({ winner: 1, reason: "The first card looks stronger." });
 
@@ -72,7 +69,7 @@ const longerCard: Transport = async (prompt) => {
   return JSON.stringify({ winner, reason: "The longer card argues more." });
 };
 
-test("buildJudgePrompt carries both cards, both evidences and the criteria, but no ids or reviews", () => {
+test("buildJudgePrompt carries both cards, both evidences and the criteria, but no ids", () => {
   const prompt = buildJudgePrompt(SIDE_LONG, SIDE_SHORT);
 
   assert.match(prompt, /Puzzle 1/);
@@ -91,10 +88,8 @@ test("buildJudgePrompt carries both cards, both evidences and the criteria, but 
   assert.ok(!prompt.includes(SIDE_LONG.id), "the first id never reaches the judge");
   assert.ok(!prompt.includes(SIDE_SHORT.id), "the second id never reaches the judge");
 
-  // Review text cannot leak structurally: buildJudgePrompt takes no review.
-  // The marker is a boundary probe, not a keyword search of the prompt.
-  assert.ok(!SIDE_LONG.card.includes(REVIEW_MARKER) && !SIDE_SHORT.card.includes(REVIEW_MARKER));
-  assert.ok(!prompt.includes(REVIEW_MARKER), "no review text reaches the judge");
+  // Review text cannot leak structurally: buildJudgePrompt takes no review
+  // argument, so there is no review marker to assert against here.
 
   assert.ok(prompt.includes("Do not reward length, verbosity or style"), "the no-length/style instruction is present");
   assert.match(prompt, /one JSON object/i);
@@ -255,16 +250,30 @@ test("piTransport runs pi with the fixed no-tools flags and the prompt", async (
   assert.equal(output, '{"winner": 1, "reason": "ok"}');
 });
 
-test("makeExecRunner closes the child's stdin so a stdin-reading command cannot hang", { timeout: 1000 }, async () => {
-  const run = makeExecRunner("/bin/sh");
+test("makeExecRunner closes the child's stdin so a stdin-reading command cannot hang", { timeout: 5000 }, async () => {
+  const run = makeExecRunner("/bin/sh", { timeoutMs: 3000 });
   const started = Date.now();
 
   // `cat` reads until EOF. With stdin left open this would wait for the child's
-  // five-minute timeout; the test's own one-second timeout would then fail it.
+  // three-second timeout, so the test fails within ~3 s and the file exits
+  // quickly instead of hanging until the production five-minute timeout.
   const output = await run(["-c", "cat >/dev/null; echo ok"]);
 
   assert.equal(output.trim(), "ok");
   assert.ok(Date.now() - started < 1000, "the call returned within a second");
+});
+
+test("makeExecRunner survives an early-exiting child when stdin is fed", async () => {
+  const run = makeExecRunner("/bin/sh");
+
+  // `exit 0` never drains the pipe. Writing `abc` can emit EPIPE on stdin; the
+  // runner must settle (resolve or reject), not crash the process with an
+  // uncaught 'error' event.
+  const outcome = await run(["-c", "exit 0"], "abc").then(
+    (value) => ({ settled: true, value }),
+    (error: Error) => ({ settled: true, value: error }),
+  );
+  assert.ok(outcome.settled, "the call settled without an uncaught stdin error");
 });
 
 test("makeExecRunner rejects with the stderr text on a non-zero exit", async () => {
