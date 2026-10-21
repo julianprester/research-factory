@@ -270,10 +270,43 @@ test("makeExecRunner survives an early-exiting child when stdin is fed", async (
   // runner must settle (resolve or reject), not crash the process with an
   // uncaught 'error' event.
   const outcome = await run(["-c", "exit 0"], "abc").then(
-    (value) => ({ settled: true, value }),
-    (error: Error) => ({ settled: true, value: error }),
+    (stdout) => ({ resolved: true as const, stdout, error: null }),
+    (error: Error) => ({ resolved: false as const, stdout: "", error }),
   );
-  assert.ok(outcome.settled, "the call settled without an uncaught stdin error");
+
+  if (outcome.resolved) {
+    assert.equal(outcome.stdout.trim(), "", "an exit-0 child returns no stdout");
+  } else {
+    assert.match(outcome.error.message, /judge/, "a rejection still names the runner");
+  }
+});
+
+test("makeExecRunner reports the child's stderr when a large stdin write races the exit", { timeout: 10_000 }, async () => {
+  const run = makeExecRunner("/bin/sh");
+  const input = "x".repeat(200_000);
+
+  // The child exits before the pipe can drain, so the parent sees EPIPE on
+  // stdin while the child's real outcome is exit 3 with stderr. The stderr text
+  // must win every time; the stdin race is not the run's result.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await assert.rejects(run(["-c", "echo 'judge exploded' >&2; exit 3"], input), (error: Error) => {
+      assert.match(error.message, /judge exploded/, `attempt ${attempt + 1} keeps the child's stderr`);
+      assert.doesNotMatch(error.message, /write EPIPE/, `attempt ${attempt + 1} does not report the stdin race`);
+      return true;
+    });
+  }
+});
+
+test("makeExecRunner resolves an exit-0 child even when a large stdin write races the exit", { timeout: 10_000 }, async () => {
+  const run = makeExecRunner("/bin/sh");
+  const input = "x".repeat(200_000);
+
+  // The same race with a successful child: EPIPE on stdin is not a failure, so
+  // every repeat resolves with the child's empty stdout.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const stdout = await run(["-c", "exit 0"], input);
+    assert.equal(stdout, "", `attempt ${attempt + 1} resolves with empty stdout`);
+  }
 });
 
 test("makeExecRunner rejects with the stderr text on a non-zero exit", async () => {

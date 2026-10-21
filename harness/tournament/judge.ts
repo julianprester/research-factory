@@ -318,9 +318,11 @@ export interface ExecRunnerOptions {
  * prompt can also be piped when a caller wants that.
  *
  * A child can exit before draining a piped input, which emits EPIPE on its
- * stdin socket; that listener turns the write error into a rejection instead of
- * an uncaught exception. The child's own callback may settle the promise first;
- * the later settlement is ignored.
+ * stdin socket. EPIPE here is the normal race, not the run's outcome, so it is
+ * ignored and the child's own callback settles the promise with its exit code
+ * and stderr; any other stdin error rejects. The callback may also settle the
+ * promise before a non-EPIPE error arrives, in which case that rejection is
+ * ignored by the promise.
  */
 export function makeExecRunner(command: string, opts: ExecRunnerOptions = {}): Runner {
   const timeoutMs = opts.timeoutMs ?? PI_TIMEOUT_MS;
@@ -339,7 +341,11 @@ export function makeExecRunner(command: string, opts: ExecRunnerOptions = {}): R
           resolve(stdout);
         },
       );
-      child.stdin?.on("error", (error: Error) => {
+      child.stdin?.on("error", (error: Error & { code?: string }) => {
+        // The child exiting before draining the pipe emits EPIPE; the execFile
+        // callback reports the child's real outcome (stderr, exit status), so
+        // do not mask it with the stdin write error.
+        if (error.code === "EPIPE") return;
         reject(new Error(`${command} judge stdin failed: ${error.message}`));
       });
       // pi -p waits for EOF on stdin; without this every real call hangs.
