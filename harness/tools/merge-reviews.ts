@@ -53,7 +53,11 @@
 // finding (a prose paragraph where a finding belongs is named). Otherwise it
 // bends: only an exact level-2 `## ` heading starts a section, so `### …` (and
 // deeper) headings are body text — inside `## Findings` they are skipped and the
-// bullets beneath them still count; unknown `## …` sections are ignored;
+// bullets beneath them still count; a heading is compared with its text
+// normalised (case, surrounding emphasis, a trailing colon or full stop), so
+// `## findings` and `## Findings:` are the Findings section (a second one, after
+// normalising, is still a duplicate); unknown `## …` sections are ignored, but a
+// finding-shaped bullet under one is refused rather than silently dropped;
 // `Rating:`/`Result:`/`Status:` keys and their values are case-insensitive; a
 // value is the *first word* after the key (emphasis and trailing punctuation
 // stripped, anything else on the line ignored, so `Status: DONE — no concerns`
@@ -150,6 +154,28 @@ const HEADING: Record<ReviewCriterion | "data-character" | "known-result" | "fin
   phase3: "## Phase 3 must check",
 };
 const HEADINGS = Object.values(HEADING);
+
+/**
+ * `## findings`, `## FINDINGS`, `## Findings:`, `## **Findings**` are the same
+ * heading: the text after the hashes is lower-cased with emphasis, a trailing
+ * colon/full stop and stray whitespace removed. `## Findings (continued)` and
+ * `## Findings and Phase 3` are different names and stay unknown sections.
+ */
+function normaliseHeading(text: string): string {
+  let body = text.replace(/^##\s+/, "");
+  let previous: string;
+  do {
+    previous = body;
+    body = body
+      .replace(/^[*_`\s]+/, "")
+      .replace(/[*_`\s]+$/, "")
+      .replace(/[:.,;!?]+\s*$/, "")
+      .trim();
+  } while (body !== previous);
+  return body.toLowerCase().replace(/\s+/g, " ");
+}
+
+const HEADING_BY_NAME = new Map(HEADINGS.map((heading) => [normaliseHeading(heading), heading]));
 
 /** Only an exact level-2 `## ` heading starts a section; `###` and deeper are body text. */
 const SECTION_HEADING = /^##\s/;
@@ -303,22 +329,27 @@ interface Section {
 
 /**
  * Every format heading (three criteria, two checks, findings, Phase 3) with its
- * content. Any other level-2 heading ends a section and is otherwise ignored;
- * `###` and deeper headings are ordinary content lines (the Findings parser
- * skips them). A known heading that is missing or repeated is a problem. The
- * Status line is never section content: it is the file's last non-empty line,
- * wherever the reviewer put it.
+ * content. A heading is recognised after `normaliseHeading`, so case, emphasis
+ * and a trailing colon do not make a known section unknown. Any other level-2
+ * heading ends a section and is otherwise ignored, except that a finding-shaped
+ * bullet beneath it is a problem (it would otherwise vanish). `###` and deeper
+ * headings are ordinary content lines (the Findings parser skips them). A known
+ * heading that is missing or repeated is a problem. The Status line is never
+ * section content: it is the file's last non-empty line, wherever the reviewer
+ * put it.
  */
 function splitSections(lines: string[], statusIndex: number): { sections: Map<string, Section>; problems: string[] } {
   const problems: string[] = [];
-  const starts: { index: number; heading?: string }[] = [];
+  const starts: { index: number; heading?: string; name?: string }[] = [];
   for (let index = 0; index < lines.length; index++) {
     const text = (lines[index] ?? "").trim();
     if (!SECTION_HEADING.test(text)) continue;
-    if (HEADINGS.includes(text)) starts.push({ index, heading: text });
+    const known = HEADING_BY_NAME.get(normaliseHeading(text));
+    if (known !== undefined) starts.push({ index, heading: known });
     // Unknown `## …` sections (`## Summary`) are ignored: extra prose in a
-    // completed review must not cost the owner a re-run of the reviewer.
-    else starts.push({ index });
+    // completed review must not cost the owner a re-run of the reviewer. A
+    // finding-shaped bullet under one is refused below, never dropped.
+    else starts.push({ index, name: text.replace(/^##\s+/, "").trim() });
   }
 
   const seen = new Map<string, number>();
@@ -334,9 +365,22 @@ function splitSections(lines: string[], statusIndex: number): { sections: Map<st
 
   const sections = new Map<string, Section>();
   for (let position = 0; position < starts.length; position++) {
-    const start = starts[position] as { index: number; heading?: string };
-    if (start.heading === undefined) continue;
+    const start = starts[position] as { index: number; heading?: string; name?: string };
     const end = starts[position + 1]?.index ?? lines.length;
+    if (start.heading === undefined) {
+      // A bullet shaped like a finding belongs under `## Findings`; under any
+      // other heading it would be lost, so the review is refused instead.
+      for (let index = start.index + 1; index < end; index++) {
+        if (index === statusIndex) continue;
+        const text = (lines[index] ?? "").trim();
+        if (text.length === 0 || parseFinding(text) === null) continue;
+        problems.push(
+          `finding-shaped line under unknown heading '${start.name}' at line ${index + 1}: ` +
+            "put findings under ## Findings",
+        );
+      }
+      continue;
+    }
     const content: Section["lines"] = [];
     for (let index = start.index + 1; index < end; index++) {
       if (index === statusIndex) continue;

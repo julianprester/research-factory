@@ -724,6 +724,136 @@ test("the CLI accepts a review whose Findings and Phase 3 say None.", (t) => {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
+
+const NEAR_MISS_FINDINGS_HEADINGS = [
+  "## findings",
+  "## FINDINGS",
+  "## Findings:",
+  "## Findings (continued)",
+  "## Findings and Phase 3",
+];
+
+const BLOCKING_BULLET = "- [blocking] plausibility: existing theory already explains the pattern";
+
+test("a near-miss Findings heading is normalised to the known heading, or refused — never silent", () => {
+  for (const heading of NEAR_MISS_FINDINGS_HEADINGS) {
+    // The near-miss heading is the only Findings section, with a blocking bullet beneath it.
+    const markdown = review().replace("## Findings", `${heading}\n${BLOCKING_BULLET}`);
+    const parsed = parseReview(markdown);
+    if (parsed !== null) {
+      assert.deepEqual(
+        parsed.findings,
+        [{ severity: "blocking", criterion: "plausibility", text: "existing theory already explains the pattern" }],
+        `${heading}: a parsed review carries the blocking finding`,
+      );
+    } else {
+      const problems = reviewProblems(markdown);
+      assert.ok(
+        problems.some(
+          (problem) => /lacks the heading "## Findings"|finding-shaped line under unknown heading/.test(problem),
+        ),
+        `${heading}: ${problems.join("; ")}`,
+      );
+    }
+  }
+});
+
+test("a near-miss heading after the real ## Findings is refused, never dropped", () => {
+  for (const heading of ["## findings", "## FINDINGS", "## Findings:"]) {
+    const markdown = review().replace(
+      "## Phase 3 must check",
+      `${heading}\n${BLOCKING_BULLET}\n\n## Phase 3 must check`,
+    );
+    assert.equal(parseReview(markdown), null, `${heading}: a second Findings section is a duplicate`);
+    assert.ok(
+      reviewProblems(markdown).some((problem) => problem.includes('has the heading "## Findings" twice')),
+      `${heading}: ${reviewProblems(markdown).join("; ")}`,
+    );
+  }
+
+  for (const heading of ["## Findings (continued)", "## Findings and Phase 3"]) {
+    const markdown = review().replace(
+      "## Phase 3 must check",
+      `${heading}\n${BLOCKING_BULLET}\n\n## Phase 3 must check`,
+    );
+    assert.equal(parseReview(markdown), null, `${heading}: the finding-shaped bullet must be refused`);
+    const problems = reviewProblems(markdown);
+    assert.ok(
+      problems.some(
+        (problem) =>
+          problem.includes("finding-shaped line under unknown heading") &&
+          problem.includes(heading.slice(3)) &&
+          problem.includes("put findings under ## Findings"),
+      ),
+      `${heading}: ${problems.join("; ")}`,
+    );
+    assert.ok(
+      problems.some((problem) => problem.includes("put findings under ## Findings") && /at line \d+/.test(problem)),
+      `${heading} names the line: ${problems.join("; ")}`,
+    );
+  }
+});
+
+test("known headings tolerate case, emphasis and a trailing colon", () => {
+  const variant = review()
+    .replace("## Fit", "## fit")
+    .replace("## Plausibility", "## PLAUSIBILITY")
+    .replace("## Relevance", "## **Relevance**:")
+    .replace("## Data-character check", "## data-character CHECK:")
+    .replace("## Known-result check", "## _Known-result check_")
+    .replace("## Findings", "## FINDINGS:")
+    .replace("## Phase 3 must check", "## phase 3 must check:");
+  const parsed = mustParse(variant);
+  assert.deepEqual(parsed.criteria, { fit: "adequate", plausibility: "adequate", relevance: "adequate" });
+  assert.equal(parsed.dataCharacter, "ok");
+  assert.equal(parsed.knownResult, "not-applicable");
+  assert.deepEqual(parsed.phase3MustCheck, ["whether the handbook's silence is a rule or an omission"]);
+});
+
+test("a normalised duplicate of another known heading is refused", () => {
+  const duplicate = review().replace("## Plausibility", "## **plausibility**:\nA second one.\n\n## Plausibility");
+  assert.equal(parseReview(duplicate), null);
+  assert.ok(
+    reviewProblems(duplicate).some((problem) => problem.includes('has the heading "## Plausibility" twice')),
+    reviewProblems(duplicate).join("; "),
+  );
+});
+
+test("a blocking finding under a lower-case ## findings heading still drives the merge", () => {
+  const a = mustParse(review({ plausibility: "fails" }).replace("## Findings", `## findings\n${BLOCKING_BULLET}`));
+  const b = mustParse(review({ plausibility: "fails", findings: [BLOCKING_BULLET] }));
+  const merged = mergeReviews(a, b);
+  assert.equal(merged.flags.breakdown, true);
+  assert.deepEqual(
+    merged.findings.map((finding) => `${finding.severity}:${finding.confidence}`),
+    ["blocking:high"],
+  );
+});
+
+test("a finding-shaped bullet under ## Summary is refused; ordinary bullets there are ignored", () => {
+  const bad = review().replace(
+    "## Phase 3 must check",
+    `## Summary\n${BLOCKING_BULLET}\n\n## Phase 3 must check`,
+  );
+  assert.equal(parseReview(bad), null);
+  const problems = reviewProblems(bad);
+  assert.ok(
+    problems.some(
+      (problem) =>
+        problem.includes("finding-shaped line under unknown heading 'Summary'") &&
+        problem.includes("put findings under ## Findings"),
+    ),
+    problems.join("; "),
+  );
+
+  const good = review().replace(
+    "## Phase 3 must check",
+    "## Summary\nA paragraph.\n- an ordinary bullet\n* another one\n\n## Phase 3 must check",
+  );
+  assert.deepEqual(mustParse(good).findings, []);
+  assert.deepEqual(mustParse(good).phase3MustCheck, ["whether the handbook's silence is a rule or an omission"]);
+});
+
 test("the CLI treats a bad invocation as a usage error", (t) => {
   const none = spawnSync(process.execPath, [MERGE_REVIEWS], { encoding: "utf8" });
   assert.equal(none.status, 2);
