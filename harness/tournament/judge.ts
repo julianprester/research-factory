@@ -11,9 +11,11 @@
 // rank nothing. The same two-order rule decides the duplicate check: two cards
 // are the same puzzle only if both orders say so.
 //
-// The model call is injected as `Transport`, so the engine (and these tests)
-// never spawn a process. `piTransport` supplies the real one: one
-// `pi --print` subprocess with tools, sessions, extensions and skills disabled.
+// The model call is injected as `Transport`, so engine tests never spawn `pi`.
+// `piTransport` supplies the real one: one `pi --print` subprocess with tools,
+// sessions, extensions and skills disabled. The process runner is split out as
+// `makeExecRunner` so a shell stub can prove its stdin handling and its
+// non-zero-exit path without calling a model.
 import { execFile } from "node:child_process";
 
 import { loadCriteria } from "./criteria.ts";
@@ -33,7 +35,7 @@ export interface Side {
 }
 
 /** One order's verdict; null means the judge named no winner (or said nothing usable). */
-interface OrderVerdict {
+export interface OrderVerdict {
   winner: "a" | "b" | null;
   reason: string;
 }
@@ -50,10 +52,13 @@ export interface MatchRecord {
   result: Result;
 }
 
-interface Verdict {
+export interface Verdict {
   winner: 1 | 2 | 0;
   reason: string;
 }
+
+/** A process runner: argv in, stdout out; the optional stdin is closed for it. */
+export type Runner = (args: string[], input?: string) => Promise<string>;
 
 interface SameVerdict {
   same: boolean;
@@ -68,9 +73,11 @@ const PI_TIMEOUT_MS = 5 * 60 * 1000;
 const PI_MAX_BUFFER = 8 * 1024 * 1024;
 
 /**
- * The prompt for one match. The two sides are labelled by position; their ids
- * are deliberately absent, so the judge cannot recognise a puzzle it has seen
- * before, and no review text can leak in through this function.
+ * The prompt for one match. The two sides are labelled by position; only `card`
+ * and `evidence` are interpolated, never `Side.id`, so the judge cannot
+ * recognise a puzzle it has seen before. A card's own text passes through
+ * verbatim - if it happens to name an id, that is content and is not stripped.
+ * No review text can leak in through this function, because it takes none.
  *
  * The rubric is quoted whole, so what the judge measures is exactly what the
  * reviewers measure. The instruction not to reward length or style is explicit
@@ -165,6 +172,12 @@ function buildSamePrompt(first: Side, second: Side): string {
  * strings) and tries each candidate until one is a well-formed verdict. A
  * candidate with the wrong shape is skipped, not accepted by accident; prose
  * braces such as `{fit, plausibility}` fail to parse and are skipped too.
+ *
+ * One narrow case is not special-cased: if a model writes an unescaped nested
+ * verdict inside an unparseable outer object before its real answer, the inner
+ * object can be the one returned. That is the safe direction of "the first JSON
+ * object" - it still needs a valid winner and reason - and it would take the
+ * same mistake, asymmetrically, in both orders to change a match.
  */
 export function parseVerdict(output: string): Verdict | null {
   for (let start = output.indexOf("{"); start >= 0; start = output.indexOf("{", start + 1)) {
@@ -275,7 +288,10 @@ export async function judgeMatch(a: Side, b: Side, transport: Transport): Promis
  * The light distinctness check: are these two cards the same puzzle? Asked in
  * both orders, and only a pair of yeses counts - an order-sensitive answer is
  * treated as an unconfirmed duplicate, so the top set is not pruned on a coin
- * flip. Both orders' reasons are returned for the record.
+ * flip. An unparseable answer likewise leaves `same` false and keeps both
+ * entries on purpose: dropping an entry because a model's answer failed to
+ * parse (or because only one order saw a duplicate) is worse than carrying a
+ * near-duplicate into promotion. Both orders' reasons are returned for the log.
  */
 export async function judgeSame(a: Side, b: Side, transport: Transport): Promise<{ same: boolean; reasons: string[] }> {
   const first = parseSame(await transport(buildSamePrompt(a, b)));
@@ -285,18 +301,31 @@ export async function judgeSame(a: Side, b: Side, transport: Transport): Promise
   return { same: firstVerdict.same && secondVerdict.same, reasons: [firstVerdict.reason, secondVerdict.reason] };
 }
 
-/** The real transport's runner: one `pi` process, async, bounded. */
-function runPi(args: string[], _input?: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile("pi", args, { timeout: PI_TIMEOUT_MS, maxBuffer: PI_MAX_BUFFER }, (error, stdout, stderr) => {
-      if (error) {
-        const detail = typeof stderr === "string" && stderr.trim() !== "" ? stderr.trim() : error.message;
-        reject(new Error(`pi judge call failed: ${detail}`));
-        return;
-      }
-      resolve(stdout);
+/**
+ * The default process runner: run `command` with argv, async and bounded, and
+ * reject with the stderr text on a non-zero exit.
+ *
+ * The child's stdin is closed immediately (or fed `input` and then closed).
+ * This is not incidental: `pi -p` reads stdin and waits for EOF, so leaving the
+ * pipe open makes every real call hang until the timeout. `spawn` with
+ * `stdio: ["ignore", ...]` would do as well; closing is explicit here so the
+ * prompt can also be piped when a caller wants that.
+ */
+export function makeExecRunner(command: string): Runner {
+  return (args, input) =>
+    new Promise((resolve, reject) => {
+      const child = execFile(command, args, { timeout: PI_TIMEOUT_MS, maxBuffer: PI_MAX_BUFFER }, (error, stdout, stderr) => {
+        if (error) {
+          const detail = typeof stderr === "string" && stderr.trim() !== "" ? stderr.trim() : error.message;
+          reject(new Error(`${command} judge call failed: ${detail}`));
+          return;
+        }
+        resolve(stdout);
+      });
+      // pi -p waits for EOF on stdin; without this every real call hangs.
+      if (input !== undefined) child.stdin?.end(input);
+      else child.stdin?.end();
     });
-  });
 }
 
 /**
@@ -306,9 +335,6 @@ function runPi(args: string[], _input?: string): Promise<string> {
  * repository instruction; it sees only the prompt. The process runner is
  * injectable so the argv can be tested without spawning `pi`.
  */
-export function piTransport(
-  model: string,
-  run: (args: string[], input?: string) => Promise<string> = runPi,
-): Transport {
+export function piTransport(model: string, run: Runner = makeExecRunner("pi")): Transport {
   return (prompt) => run(["-p", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--model", model, prompt]);
 }

@@ -13,6 +13,7 @@ import {
   buildJudgePrompt,
   judgeMatch,
   judgeSame,
+  makeExecRunner,
   parseVerdict,
   piTransport,
   type Side,
@@ -50,6 +51,16 @@ const SIDE_SHORT: Side = {
   evidence: "Result: a thin regularity. Verdict: fragile. Worst fits: most cells.",
 };
 
+/** A card may legitimately mention another node's id; only `Side.id` is hidden. */
+const SIDE_WITH_ID_IN_CARD: Side = {
+  id: "pz-delta-0001",
+  card: "## Pattern\nAn evolution child, derived from pz-gamma-9999, which stays in the card verbatim.",
+  evidence: "Result: inherited from pz-gamma-9999.",
+};
+
+/** A review-looking string: none of its marker may reach the judge prompt. */
+const REVIEW_MARKER = "REVIEW-MARKER-7f21: the rival account is missing.";
+
 /** A fake judge that always names the first card it is shown. */
 const firstPosition: Transport = async () => JSON.stringify({ winner: 1, reason: "The first card looks stronger." });
 
@@ -75,18 +86,30 @@ test("buildJudgePrompt carries both cards, both evidences and the criteria, but 
   for (const heading of ["## Fit", "## Plausibility", "## Relevance"]) {
     assert.ok(prompt.includes(heading), `criteria heading ${heading} is quoted`);
   }
-  assert.ok(prompt.includes(criteria.trim().slice(0, 200)), "the criteria file's text is quoted");
+  assert.ok(prompt.includes(criteria), "the criteria file's whole text is quoted");
 
   assert.ok(!prompt.includes(SIDE_LONG.id), "the first id never reaches the judge");
   assert.ok(!prompt.includes(SIDE_SHORT.id), "the second id never reaches the judge");
-  assert.ok(!/reviews/i.test(prompt), "no review text reaches the judge");
 
-  assert.match(prompt, /do not reward/i);
-  assert.match(prompt, /length/i);
-  assert.match(prompt, /style/i);
+  // Review text cannot leak structurally: buildJudgePrompt takes no review.
+  // The marker is a boundary probe, not a keyword search of the prompt.
+  assert.ok(!SIDE_LONG.card.includes(REVIEW_MARKER) && !SIDE_SHORT.card.includes(REVIEW_MARKER));
+  assert.ok(!prompt.includes(REVIEW_MARKER), "no review text reaches the judge");
+
+  assert.ok(prompt.includes("Do not reward length, verbosity or style"), "the no-length/style instruction is present");
   assert.match(prompt, /one JSON object/i);
   assert.match(prompt, /"winner"/);
   assert.match(prompt, /"reason"/);
+});
+
+test("buildJudgePrompt interpolates cards verbatim and never the Side.id field", () => {
+  const prompt = buildJudgePrompt(SIDE_WITH_ID_IN_CARD, SIDE_SHORT);
+
+  // The id *field* is never read by the builder. A card that mentions a node id
+  // is content: stripping it would mangle the puzzle, so it passes through.
+  assert.ok(!prompt.includes("pz-delta-0001"), "the Side.id field is never interpolated");
+  assert.ok(prompt.includes("pz-gamma-9999"), "an id-looking string inside a card survives verbatim");
+  assert.ok(prompt.includes(SIDE_WITH_ID_IN_CARD.card), "the card itself is unmodified");
 });
 
 test("parseVerdict reads the first JSON object in free text", () => {
@@ -125,6 +148,28 @@ test("a judge that always names the first card yields a draw for every match", a
     assert.notEqual(record.order1.winner, null);
     assert.notEqual(record.order2.winner, null);
   }
+});
+
+test("a judge that always names no winner yields null in both orders and a draw", async () => {
+  const noWinner: Transport = async () => JSON.stringify({ winner: 0, reason: "Neither." });
+  const record = await judgeMatch(SIDE_LONG, SIDE_SHORT, noWinner);
+  assert.equal(record.order1.winner, null, "winner 0 is no winner in order 1");
+  assert.equal(record.order2.winner, null, "winner 0 is no winner in order 2");
+  assert.equal(record.order1.reason, "Neither.");
+  assert.equal(record.order2.reason, "Neither.");
+  assert.equal(record.result, "draw");
+});
+
+test("a split between a named winner and no winner is a draw", async () => {
+  const answers = ['{"winner": 1, "reason": "Puzzle 1 fits."}', '{"winner": 0, "reason": "But not under the swap."}'];
+  let calls = 0;
+  const split: Transport = async () => answers[calls++] ?? '{"winner": 0, "reason": "Neither."}';
+
+  const record = await judgeMatch(SIDE_LONG, SIDE_SHORT, split);
+  assert.equal(calls, 2);
+  assert.equal(record.order1.winner, "a");
+  assert.equal(record.order2.winner, null);
+  assert.equal(record.result, "draw", "a named winner plus a no-winner is not a win");
 });
 
 test("a content-following judge picks the same entrant in both orders", async () => {
@@ -208,4 +253,25 @@ test("piTransport runs pi with the fixed no-tools flags and the prompt", async (
     "THE PROMPT",
   ]);
   assert.equal(output, '{"winner": 1, "reason": "ok"}');
+});
+
+test("makeExecRunner closes the child's stdin so a stdin-reading command cannot hang", { timeout: 1000 }, async () => {
+  const run = makeExecRunner("/bin/sh");
+  const started = Date.now();
+
+  // `cat` reads until EOF. With stdin left open this would wait for the child's
+  // five-minute timeout; the test's own one-second timeout would then fail it.
+  const output = await run(["-c", "cat >/dev/null; echo ok"]);
+
+  assert.equal(output.trim(), "ok");
+  assert.ok(Date.now() - started < 1000, "the call returned within a second");
+});
+
+test("makeExecRunner rejects with the stderr text on a non-zero exit", async () => {
+  const run = makeExecRunner("/bin/sh");
+
+  await assert.rejects(run(["-c", "echo 'judge exploded' >&2; exit 3"]), (error: Error) => {
+    assert.match(error.message, /judge exploded/);
+    return true;
+  });
 });
