@@ -12,17 +12,28 @@
 // stronger card, which makes the ranking recoverable and every run bit-for-bit
 // reproducible.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { createChild, initRun } from "../tree.ts";
 import {
+  acquireRoundLock,
   loadEntrant,
   pairKey,
   promotionCandidates,
   RoundStuckError,
+  ROUND_LOCK_STALE_MS,
   runRound,
   schedulePairs,
   type RoundOptions,
@@ -252,6 +263,85 @@ test("seven identities are just enough for six matches each", async (t) => {
   assert.equal(result.matches.length, 21, "21 pairs is the complete graph on 7 identities");
 });
 
+/** Where a round's lock lives, so a test can plant one. */
+function lockFile(dir: string, round = 0): string {
+  return path.join(dir, `round-${round}.lock`);
+}
+
+test("an aged lock is broken even when its pid is alive", async (t) => {
+  const dir = tempDir(t);
+  const sides = makeSides(8);
+  // Same pid, but taken before the ageing limit: a crashed writer's pid can
+  // belong to an unrelated live process by now, so the pid alone is not proof.
+  writeFileSync(
+    lockFile(dir),
+    JSON.stringify({ pid: process.pid, at: Date.now() - ROUND_LOCK_STALE_MS - 60_000 }),
+  );
+
+  const result = await runRound(options({ dir, sides, batchSize: 4, minMatches: 3 }));
+  assert.equal(result.complete, true, "the round runs despite the aged lock");
+  assert.ok(!existsSync(lockFile(dir)), "and the aged lock is gone afterwards");
+});
+
+test("a young lock held by a live pid still fails fast", async (t) => {
+  const dir = tempDir(t);
+  const sides = makeSides(8);
+  const held = JSON.stringify({ pid: process.pid, at: Date.now() });
+  writeFileSync(lockFile(dir), held);
+
+  await assert.rejects(
+    runRound(options({ dir, sides, batchSize: 4, minMatches: 3 })),
+    /another round is already running/,
+  );
+  assert.equal(readFileSync(lockFile(dir), "utf8"), held, "a live lock is left alone");
+  assert.equal(readLog(dir, 0).length, 0, "and no match was judged");
+});
+
+test("a lock whose holder is gone is broken", async (t) => {
+  const dir = tempDir(t);
+  const sides = makeSides(8);
+  // A real, already-exited process: its pid is dead (and is unlikely to be reused
+  // within this test).
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
+  writeFileSync(lockFile(dir), JSON.stringify({ pid: dead, at: Date.now() }));
+
+  const result = await runRound(options({ dir, sides, batchSize: 4, minMatches: 3 }));
+  assert.equal(result.complete, true, "a dead holder's lock is broken and the round runs");
+  assert.ok(!existsSync(lockFile(dir)));
+});
+
+test("a legacy pid-only lock ages out by its file's mtime", async (t) => {
+  const dir = tempDir(t);
+  const sides = makeSides(8);
+  writeFileSync(lockFile(dir), String(process.pid)); // old format: a bare pid
+  const old = new Date(Date.now() - ROUND_LOCK_STALE_MS - 60_000);
+  utimesSync(lockFile(dir), old, old);
+
+  // The pid is this live process, so only the mtime age can justify breaking it.
+  const result = await runRound(options({ dir, sides, batchSize: 4, minMatches: 3 }));
+  assert.equal(result.complete, true);
+  assert.ok(!existsSync(lockFile(dir)));
+});
+
+test("a lock released in the EEXIST window is retried, not surfaced as an fs error", (t) => {
+  const dir = tempDir(t);
+  const file = lockFile(dir);
+  writeFileSync(file, JSON.stringify({ pid: process.pid, at: Date.now() }));
+
+  // The first `wx` fails, the holder releases in that window, the read sees no
+  // file: the acquisition must simply try again rather than throw ENOENT.
+  let conflicts = 0;
+  const release = acquireRoundLock(file, () => {
+    conflicts++;
+    rmSync(file, { force: true });
+  });
+
+  assert.equal(conflicts, 1);
+  assert.match(readFileSync(file, "utf8"), new RegExp(`"pid":${process.pid}`), "the lock was taken on the retry");
+  release();
+  assert.ok(!existsSync(file), "and released cleanly");
+});
+
 test("a second overlapping call on the same round fails fast instead of double counting", async (t) => {
   const dir = tempDir(t);
   const sides = makeSides(10);
@@ -305,6 +395,34 @@ test("the log is fingerprinted: another seed or entrant set is refused", async (
   assert.equal(again.complete, true);
   assert.equal(headerLine(dir, 0), header);
   assert.equal(readFileSync(path.join(dir, "round-0.matches.jsonl"), "utf8").split("\n").filter((line) => line.startsWith("{\"header\"")).length, 1);
+});
+
+test("a headerless log is refused, not silently truncated", async (t) => {
+  const dir = tempDir(t);
+  const sides = makeSides(8);
+  // An old-format (or damaged) log: one match, no header, and the last line has
+  // no trailing newline. Cutting its tail would leave an empty file, which the
+  // header writer would then happily re-fingerprint - a silent replay.
+  const legacy = JSON.stringify({
+    batch: 0,
+    pair: ["p01", "p02"],
+    match: {
+      a: "p01",
+      b: "p02",
+      order1: { winner: null, reason: "" },
+      order2: { winner: null, reason: "" },
+      result: "draw",
+    },
+  });
+  const file = path.join(dir, "round-0.matches.jsonl");
+  writeFileSync(file, legacy);
+
+  await assert.rejects(
+    runRound(options({ dir, sides, batchSize: 4, minMatches: 3 })),
+    /old-format or damaged log/,
+  );
+  assert.equal(readFileSync(file, "utf8"), legacy, "the log is left exactly as it was");
+  assert.ok(!existsSync(path.join(dir, "round-0.json")), "and no round file was written");
 });
 
 test("a damaged line is an error unless it is the log's last line", async (t) => {

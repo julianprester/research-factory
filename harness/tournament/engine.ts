@@ -23,7 +23,10 @@
 // the tail, where a crash can produce one - a damaged line in the middle is an
 // error naming the line, because silently dropping a match would change the
 // ranking. `runRound` also holds an O_EXCL `round-<n>.lock` for its round, so two
-// overlapping calls cannot both append batch 0 and double-count it.
+// overlapping calls cannot both append batch 0 and double-count it. The lock
+// records its pid and when it was taken, and ages out after `ROUND_LOCK_STALE_MS`
+// even if the pid is alive: pids are reused, so a crashed writer's pid can belong
+// to an unrelated process by the time the next call arrives.
 //
 // **Isolation (Review Focus 3).** `loadEntrant` reads exactly two files: the
 // puzzle's `workspace/puzzle.md` and the parent pattern's `workspace/pattern.md`,
@@ -41,6 +44,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -362,6 +366,10 @@ function replay(prior: Outcome[], entries: LogLine[], belowBatch: number): State
  * the file. So the damaged tail is cut and the truncated match is played again.
  * Damage anywhere else is not repaired: `readLog` refuses it, because silently
  * dropping a judged match would change the ranking.
+ *
+ * Only a new-format log (header on its first line) is repaired at all. A
+ * headerless non-empty file is an old-format or damaged log, and cutting its tail
+ * would silently reset the schedule; `ensureLogHeader` refuses it instead.
  */
 function repairTornLine(file: string): void {
   if (!existsSync(file)) return;
@@ -370,13 +378,9 @@ function repairTornLine(file: string): void {
   let lastContent = -1;
   for (let i = 0; i < raw.length; i++) if (raw[i]!.trim() !== "") lastContent = i;
   if (lastContent < 0) return;
+  if (headerOf(parseJson(raw[0]!.trim())) === undefined) return; // not ours to repair
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw[lastContent]!.trim());
-  } catch {
-    parsed = undefined;
-  }
+  const parsed = parseJson(raw[lastContent]!.trim());
   const sound = lastContent === 0 ? headerOf(parsed) !== undefined : lineOf(parsed) !== undefined;
   if (text.endsWith("\n") && sound) return;
 
@@ -479,7 +483,11 @@ function ensureLogHeader(file: string, seed: number, ids: string[], header: LogH
   const expected: LogHeader = { seed, ids: ids.slice().sort() };
   if (header === undefined) {
     if (existsSync(file) && readFileSync(file, "utf8").trim() !== "") {
-      throw new Error(`runRound: ${file} has no header line, so its seed and entrant set are unknown`);
+      throw new Error(
+        `runRound: ${file} has no header line and is not empty, so it is an old-format or damaged log; ` +
+          `this round only resumes a log that starts with a {"header":{"seed":…, "ids":[…]}} line - ` +
+          `move the file aside to replay the round from scratch`,
+      );
     }
     appendFileSync(file, `${JSON.stringify({ header: expected })}\n`);
     return;
@@ -506,17 +514,100 @@ function holderAlive(pid: number): boolean {
 }
 
 /**
- * Take `file` as an O_EXCL lockfile holding this process's pid, and return the
- * release. A lock whose holder is gone is stale (a crashed run) and is broken
- * once; a lock whose holder is alive fails fast, because the alternative is two
- * calls judging and appending the same batch - which is exactly the double count
- * this lock exists to stop. The lock is per round file, so two rounds of the same
- * pool may run side by side.
+ * How long a round lock may live before it counts as abandoned, whatever pid it
+ * names. A round's worst case is its 8-minute budget plus one in-flight batch, so
+ * 40 minutes is several times the legitimate maximum. The age rule exists because
+ * pids are reused: a crashed writer's pid can belong to a long-lived process by
+ * the time the next call arrives, and a pid-only rule would then wedge the round
+ * directory until somebody deleted the file by hand.
  */
-function acquireRoundLock(file: string): () => void {
-  for (let attempt = 0; attempt < 2; attempt++) {
+export const ROUND_LOCK_STALE_MS = 40 * 60 * 1000;
+
+/** What a lock file says: who held it, when, and how old the file itself is. */
+interface LockRecord {
+  /** The holder's pid, when the file names one. */
+  pid: number | undefined;
+  /** When the lock was taken, in ms; undefined for a legacy pid-only lock. */
+  at: number | undefined;
+  /** The lock file's own age, which covers a legacy or unreadable lock. */
+  ageMs: number;
+}
+
+/** JSON.parse, or undefined when the text is not JSON (a torn lock file, say). */
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The lock file's record, or undefined when the file has gone: a holder can
+ * release it between our failed `wx` and this read, and that is not an error.
+ */
+function readLock(file: string): LockRecord | undefined {
+  let text: string;
+  let ageMs: number;
+  try {
+    text = readFileSync(file, "utf8");
+    ageMs = Date.now() - statSync(file).mtimeMs;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+
+  const trimmed = text.trim();
+  const parsed = parseJson(trimmed);
+  if (typeof parsed === "object" && parsed !== null) {
+    const { pid, at } = parsed as { pid?: unknown; at?: unknown };
+    return {
+      pid: typeof pid === "number" && Number.isInteger(pid) && pid > 0 ? pid : undefined,
+      at: typeof at === "number" && Number.isFinite(at) ? at : undefined,
+      ageMs,
+    };
+  }
+  // A legacy lock is a bare pid, so its age is the file's mtime.
+  const legacy = Number.parseInt(trimmed, 10);
+  return { pid: Number.isInteger(legacy) && legacy > 0 ? legacy : undefined, at: undefined, ageMs };
+}
+
+/** A lock's age: its recorded acquisition time, else the file's mtime (clock skew counts as 0). */
+function lockAgeMs(record: LockRecord): number {
+  return record.at === undefined ? Math.max(0, record.ageMs) : Math.max(0, Date.now() - record.at);
+}
+
+/**
+ * Why a lock is stale, or undefined when it must be honoured: an hour-old lock is
+ * abandoned (a live pid is not proof - pids are reused), and so is one whose
+ * holder is gone. A young lock with an unreadable holder is honoured, so a
+ * half-written lock file fails safe instead of letting two calls in.
+ */
+function staleBecause(record: LockRecord): string | undefined {
+  const ageMs = lockAgeMs(record);
+  if (ageMs > ROUND_LOCK_STALE_MS) return `it is ${Math.round(ageMs / 60_000)} minutes old`;
+  if (record.pid === undefined) return undefined;
+  if (holderAlive(record.pid)) return undefined;
+  return `pid ${record.pid} is gone`;
+}
+
+/**
+ * Take `file` as an O_EXCL lockfile holding this process's pid and the time, and
+ * return the release.
+ *
+ * A stale lock (see `staleBecause`) is removed once and the acquisition retried,
+ * so a crashed run's lock heals itself; a live, young lock fails fast, because
+ * the alternative is two calls judging and appending the same batch. If the lock
+ * vanishes between our failed `wx` and the read (the holder released it in that
+ * window), the acquisition is simply retried rather than surfacing an ENOENT.
+ *
+ * `afterConflict` is called after every EEXIST and before the read; it exists so
+ * the release-window race can be tested without racing a real process.
+ */
+export function acquireRoundLock(file: string, afterConflict?: () => void): () => void {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      writeFileSync(file, String(process.pid), { flag: "wx" });
+      writeFileSync(file, JSON.stringify({ pid: process.pid, at: Date.now() }), { flag: "wx" });
       return () => {
         try {
           rmSync(file, { force: true });
@@ -527,11 +618,16 @@ function acquireRoundLock(file: string): () => void {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
-    const holder = Number.parseInt(readFileSync(file, "utf8").trim(), 10);
-    if (Number.isInteger(holder) && holder > 0 && holderAlive(holder)) {
-      throw new Error(`runRound: ${file} is held by pid ${holder} - another round is already running on this directory`);
+    afterConflict?.();
+    const record = readLock(file);
+    if (record === undefined) continue; // released in the window: take it now
+    if (staleBecause(record) === undefined) {
+      throw new Error(
+        `runRound: ${file} is held by pid ${record.pid ?? "unknown"} ` +
+          `(${Math.round(lockAgeMs(record) / 1000)} s old): another round is already running on this directory`,
+      );
     }
-    rmSync(file, { force: true }); // stale: its writer is gone
+    rmSync(file, { force: true }); // stale: break it and let the next attempt decide who wins
   }
   throw new Error(`runRound: could not take ${file}`);
 }
