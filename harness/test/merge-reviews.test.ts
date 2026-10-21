@@ -95,7 +95,14 @@ test("equal ratings on every criterion agree", () => {
     plausibility: { rating: "weak", agreement: "agree" },
     relevance: { rating: "strong", agreement: "agree" },
   });
-  assert.deepEqual(merged.flags, { breakdown: false, knownResultBlocking: false, dataCharacterViolated: false });
+  assert.deepEqual(merged.flags, {
+    breakdown: false,
+    knownResultBlocking: false,
+    dataCharacterViolated: false,
+    reviewBlocked: false,
+  });
+  assert.deepEqual(merged.status, { a: "DONE", b: "DONE" });
+  assert.deepEqual(merged.phase3, ["whether the handbook's silence is a rule or an omission"]);
 });
 
 test("the more severe rating wins, and disagreement is split", () => {
@@ -183,7 +190,7 @@ test("a finding only one reviewer raises keeps its reviewer tag", () => {
 
 test("a finding both reviewers raise appears once, at high confidence", () => {
   const a = "- [blocking] plausibility: existing theory already explains the pattern";
-  const b = "- [blocking] plausibility: existing theory already explains the pattern, so it is no puzzle";
+  const b = "- [blocking] plausibility: existing theory already explains the pattern, so it is a restatement";
   const merged = mergeReviews(mustParse(review({ findings: [a] })), mustParse(review({ findings: [b] })));
   assert.equal(merged.findings.length, 1, JSON.stringify(merged.findings));
   assert.deepEqual(merged.findings[0], {
@@ -388,7 +395,12 @@ test("the CLI writes merged.json and merged.md beside the reviews and prints ok"
     "merged.json is exactly mergeReviews of the two reviews",
   );
   assert.deepEqual(merged.criteria.fit, { rating: "weak", agreement: "split" });
-  assert.deepEqual(merged.flags, { breakdown: true, knownResultBlocking: true, dataCharacterViolated: false });
+  assert.deepEqual(merged.flags, {
+    breakdown: true,
+    knownResultBlocking: true,
+    dataCharacterViolated: false,
+    reviewBlocked: false,
+  });
   assert.equal(merged.findings.length, 1);
   assert.equal(merged.findings[0]?.confidence, "high");
 
@@ -417,6 +429,176 @@ test("the CLI reports a missing review by name and exits 1", (t) => {
   assert.equal(result.status, 1, result.stderr);
   assert.equal(result.stdout.trim(), "workspace/reviews/b.md is missing");
   assert.equal(existsSync(path.join(nodeDir, "workspace", "reviews", "merged.md")), false);
+});
+
+
+test("opposite polarity findings are not matched", () => {
+  const merged = mergeReviews(
+    mustParse(review({ findings: ["- [major] fit: the claim is supported"] })),
+    mustParse(review({ findings: ["- [major] fit: the claim is not supported"] })),
+  );
+  assert.equal(merged.findings.length, 2, JSON.stringify(merged.findings));
+  assert.ok(merged.findings.every((finding) => finding.confidence === "single-reviewer"));
+});
+
+test("emphasis and case around Rating/Result/Status values do not break the parse", () => {
+  const variant = review()
+    .replace("Rating: adequate", "**Rating:** _ADEQUATE_")
+    .replace("Result: ok", "result: **OK**")
+    .replace("Result: not-applicable", "RESULT: __not-applicable__")
+    .replace("Status: DONE", "status: **done**");
+  const parsed = mustParse(variant);
+  assert.deepEqual(parsed.criteria, { fit: "adequate", plausibility: "adequate", relevance: "adequate" });
+  assert.equal(parsed.dataCharacter, "ok");
+  assert.equal(parsed.knownResult, "not-applicable");
+  assert.equal(parsed.status, "DONE");
+});
+
+test("finding bullets, emphasis and case are accepted", () => {
+  const parsed = mustParse(
+    review({
+      findings: [
+        "- [major] fit: the worst fits go unanswered",
+        "* [minor] relevance: the debate is unnamed",
+        "+ [blocking] plausibility: existing theory already explains it",
+        "1. [major] data-character: the card claims what bots did",
+        "2) [minor] known-result: the caveat is ignored",
+        "- **[major] fit:** the negative case is not confronted",
+        "- __[MAJOR]__ __Fit__: the rival is not named",
+      ],
+    }),
+  );
+  assert.deepEqual(
+    parsed.findings.map((finding) => `${finding.severity}|${finding.criterion}|${finding.text}`),
+    [
+      "major|fit|the worst fits go unanswered",
+      "minor|relevance|the debate is unnamed",
+      "blocking|plausibility|existing theory already explains it",
+      "major|data-character|the card claims what bots did",
+      "minor|known-result|the caveat is ignored",
+      "major|fit|the negative case is not confronted",
+      "major|fit|the rival is not named",
+    ],
+  );
+});
+
+test("indented sub-bullets and continuation lines extend the finding above", () => {
+  const parsed = mustParse(
+    review({
+      findings: [
+        "- [major] fit: the card's worst fits are not answered",
+        "  - the two thin cells are never discussed",
+        "    and the rival is not named",
+        "* [minor] relevance: the debate is unnamed",
+        "  1) the etiquette literature is not cited",
+      ],
+    }),
+  );
+  assert.deepEqual(
+    parsed.findings.map((finding) => finding.text),
+    [
+      "the card's worst fits are not answered the two thin cells are never discussed and the rival is not named",
+      "the debate is unnamed the etiquette literature is not cited",
+    ],
+  );
+});
+
+test("unknown sections are ignored wherever they sit", () => {
+  const extraBefore = review().replace(
+    "## Findings",
+    "## Summary\nA paragraph the checker should ignore.\n- and a bullet it should ignore\n\n## Findings",
+  );
+  assert.deepEqual(mustParse(extraBefore).findings, []);
+
+  const extraSub = review().replace("## Phase 3 must check", "### Detail\nA sub-heading inside a section.\n\n## Phase 3 must check");
+  assert.deepEqual(mustParse(extraSub).criteria, { fit: "adequate", plausibility: "adequate", relevance: "adequate" });
+
+  const extraLast = review().replace("Status: DONE", "## Notes\nFree prose at the end, before the status.\n\nStatus: DONE");
+  assert.equal(mustParse(extraLast).status, "DONE");
+});
+
+test("a duplicated known heading is still a problem", () => {
+  const duplicate = review().replace("## Plausibility", "## Fit\nA second Fit section.\n\n## Plausibility");
+  assert.equal(parseReview(duplicate), null);
+  assert.ok(
+    reviewProblems(duplicate).some((problem) => problem.includes('has the heading "## Fit" twice')),
+    reviewProblems(duplicate).join("; "),
+  );
+});
+
+test("the merge carries both statuses, the phase-3 union and a reviewBlocked flag", () => {
+  const merged = mergeReviews(
+    mustParse(
+      review({
+        status: "DONE",
+        phase3: ["- whether the silence is a rule", "- which section accounts for the counts"],
+      }),
+    ),
+    mustParse(
+      review({
+        status: "BLOCKED",
+        phase3: ["- Whether the silence is a rule!", "- does the glossary define it"],
+      }),
+    ),
+  );
+  assert.deepEqual(merged.status, { a: "DONE", b: "BLOCKED" });
+  assert.equal(merged.flags.reviewBlocked, true);
+  assert.deepEqual(merged.phase3, [
+    "whether the silence is a rule",
+    "which section accounts for the counts",
+    "does the glossary define it",
+  ]);
+
+  const clean = mergeReviews(mustParse(review()), mustParse(review({ status: "DONE_WITH_CONCERNS" })));
+  assert.equal(clean.flags.reviewBlocked, false);
+  assert.deepEqual(clean.status, { a: "DONE", b: "DONE_WITH_CONCERNS" });
+});
+
+test("merged.md shows both statuses, warns on an unclean review, and lists the phase-3 union", (t) => {
+  const nodeDir = puzzleNode(
+    t,
+    review({
+      findings: [
+        "- [blocking] plausibility: existing theory already explains the pattern",
+        "- [minor] relevance: the debate it enters is not named",
+      ],
+      phase3: ["- whether the silence is a rule"],
+    }),
+    review({
+      status: "BLOCKED",
+      findings: [
+        "- [major] fit: the worst fits are unanswered",
+        "- [minor] relevance: the debate it enters is not named",
+      ],
+      phase3: ["- whether the silence is a rule", "- whether one section accounts for the counts"],
+    }),
+  );
+  const result = spawnSync(process.execPath, [MERGE_REVIEWS, nodeDir], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+
+  const markdown = readFileSync(path.join(nodeDir, "workspace", "reviews", "merged.md"), "utf8");
+  assert.match(markdown, /a: DONE/, markdown);
+  assert.match(markdown, /b: BLOCKED/, markdown);
+  assert.match(markdown, /review b is BLOCKED.*do not rank/i, markdown);
+  assert.match(markdown, /review blocked: yes/, markdown);
+  assert.match(markdown, /single reviewer, a/, markdown);
+  assert.match(markdown, /single reviewer, b/, markdown);
+  assert.match(markdown, /high confidence/, markdown);
+  for (const question of ["whether the silence is a rule", "whether one section accounts for the counts"]) {
+    assert.ok(markdown.includes(question), `${question} is in merged.md: ${markdown}`);
+  }
+  assert.equal(markdown.match(/whether the silence is a rule/g)?.length, 1, "the shared question is listed once");
+});
+
+test("merged.md notes DONE_WITH_CONCERNS and says None. when there are no findings", (t) => {
+  const nodeDir = puzzleNode(t, review({ status: "DONE_WITH_CONCERNS", phase3: [] }), review({ phase3: [] }));
+  const result = spawnSync(process.execPath, [MERGE_REVIEWS, nodeDir], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+
+  const markdown = readFileSync(path.join(nodeDir, "workspace", "reviews", "merged.md"), "utf8");
+  assert.match(markdown, /Review a is DONE_WITH_CONCERNS/, markdown);
+  assert.match(markdown, /read its findings/i, markdown);
+  assert.match(markdown, /None\./, markdown);
 });
 
 test("the CLI treats a bad invocation as a usage error", (t) => {

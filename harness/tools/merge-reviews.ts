@@ -7,22 +7,33 @@
 // merged flag (a `fails` plausibility is a breakdown; a `blocking` known-result
 // check blocks; a `violated` data-character check is a violation). A finding
 // both reviewers raise is high confidence; a finding only one raises keeps its
-// reviewer tag and is single-reviewer.
+// reviewer tag and is single-reviewer. A review's own closing `Status` and its
+// `Phase 3 must check` questions are carried into the merge: the owner must be
+// able to see that one reviewer stopped early before ranking on the result.
 //
 // "Both reviewers raise the same finding" is not defined by the brief, so this
-// file defines it: same criterion, same severity, and similar text. Text is
-// normalised to lower-case words (punctuation dropped, one-letter words and
-// function words removed; negations are kept) and the two word sets are
-// compared by Jaccard overlap, `|A and B| / |A or B| >= FINDING_OVERLAP` (0.5). Two
-// reviewers rarely phrase a finding identically, but they reuse the finding's
-// content words ("existing theory already explains the pattern" vs "existing
-// theory already explains the pattern, so it is no puzzle" overlap 5/6), while
-// two different findings under one criterion share little ("worst fits are
-// never discussed" vs "citation to the rival is the wrong chunk"). The rule is
-// deliberately conservative: an unmatched pair stays two single-reviewer
-// findings, which understates agreement rather than inventing it. Matching is
-// greedy in review order and each finding of `b` pairs at most once, so a
-// duplicated finding cannot be counted twice.
+// file defines it: same criterion, same severity, one shared polarity, and
+// similar text. Text is normalised to lower-case words (punctuation dropped,
+// one-letter words and function words removed) and the two word sets are
+// compared by Jaccard overlap, `|A and B| / |A or B| >= FINDING_OVERLAP` (0.5).
+// Two reviewers rarely phrase a finding identically, but they reuse the
+// finding's content words ("existing theory already explains the pattern" vs
+// "existing theory already explains the pattern, so it is a restatement"
+// overlap 5/6), while two different findings under one criterion share little ("worst
+// fits are never discussed" vs "citation to the rival is the wrong chunk").
+//
+// Exactly one side containing `no`, `not`, `never` or `without` blocks a match,
+// so "the claim is supported" and "the claim is not supported" stay two
+// findings. That is a narrow guard, not a full polarity test: an evaluative
+// opposite without a negation word ("the claim is supported" vs "the claim is
+// rejected") still shares enough other words to merge, and the merged text is
+// the `a` review's. Findings are supposed to voice problems, so this is rare;
+// it is the remaining limitation of a word-overlap rule.
+//
+// The rule is deliberately conservative: an unmatched pair stays two
+// single-reviewer findings, which understates agreement rather than inventing
+// it. Matching is greedy in review order and each finding of `b` pairs at most
+// once, so a duplicated finding cannot be counted twice.
 //
 // The review format is fixed by the Phase 2 plan (Task 10's reviewer role
 // teaches it and Task 7's `check-puzzle --reviews` enforces it):
@@ -31,13 +42,22 @@
 //   ## Data-character check                     first line `Result: ok|violated`
 //   ## Known-result check                       first line `Result: ok|blocking|not-applicable`
 //   ## Findings                                 lines `- [blocking|major|minor] <criterion>: <text>`
-//   ## Phase 3 must check                       a `- ` list
+//   ## Phase 3 must check                       a list
 //   last line                                   `Status: DONE|DONE_WITH_CONCERNS|BLOCKED`
 //
-// Parsing is strict: a missing heading, an invalid rating or check value, a
-// malformed finding line or a last line that is not a Status makes the whole
-// review malformed. `reviewProblems` says what is wrong (the CLI prints it with
-// the file name); `parseReview` returns only the review or null.
+// The parser is strict about the *content* and forgiving about the *formatting*
+// a worker will produce. The seven headings must each appear exactly once (a
+// missing or duplicated known heading is a problem), a rating/result/status
+// value must be in its allowed set after normalising, the last non-empty line
+// must be a `Status:` line, and a top-level line in `## Findings` must be a
+// finding (a prose paragraph where a finding belongs is named). Otherwise it
+// bends: unknown `## …` and `### …` sections are ignored, `Rating:`/`Result:`/
+// `Status:` and their values are case-insensitive, emphasis (`*`, `_`, `` ` ``)
+// around keys, values, severity brackets and criteria is dropped, bullets may
+// be `-`, `*`, `+`, `1.` or `1)`, and an indented line under a finding is a
+// continuation appended to that finding's text. Rejecting a review costs a
+// completed adversarial literature search; ignoring extra formatting costs
+// nothing.
 //
 // CLI: `node harness/tools/merge-reviews.ts <puzzleNodeDir>` reads
 // `workspace/reviews/a.md` and `b.md`, writes `merged.json` and `merged.md`
@@ -85,8 +105,18 @@ export interface MergedFinding {
 
 export interface Merged {
   criteria: Record<ReviewCriterion, { rating: Rating; agreement: "agree" | "split" }>;
-  flags: { breakdown: boolean; knownResultBlocking: boolean; dataCharacterViolated: boolean };
+  flags: {
+    breakdown: boolean;
+    knownResultBlocking: boolean;
+    dataCharacterViolated: boolean;
+    /** Either reviewer closed with `Status: BLOCKED`: do not rank or promote on this merge. */
+    reviewBlocked: boolean;
+  };
   findings: MergedFinding[];
+  /** Each reviewer's own closing status, so a review that stopped early is visible. */
+  status: { a: Status; b: Status };
+  /** Both reviews' `Phase 3 must check` questions, de-duplicated by normalised text. */
+  phase3: string[];
 }
 
 /** More severe wins: fails > weak > adequate > strong. */
@@ -98,6 +128,7 @@ const FINDING_OVERLAP = 0.5;
 
 const CRITERIA: ReviewCriterion[] = ["fit", "plausibility", "relevance"];
 const RATINGS: Rating[] = ["strong", "adequate", "weak", "fails"];
+const SEVERITIES: Severity[] = ["blocking", "major", "minor"];
 const FINDING_CRITERIA: FindingCriterion[] = [...CRITERIA, "data-character", "known-result"];
 const DATA_CHARACTER: Review["dataCharacter"][] = ["ok", "violated"];
 const KNOWN_RESULT: Review["knownResult"][] = ["ok", "blocking", "not-applicable"];
@@ -114,13 +145,29 @@ const HEADING: Record<ReviewCriterion | "data-character" | "known-result" | "fin
 };
 const HEADINGS = Object.values(HEADING);
 
-/** `- [blocking] plausibility: existing theory already explains it` */
-const FINDING_LINE = /^-\s*\[(blocking|major|minor)\]\s*(fit|plausibility|relevance|data-character|known-result):\s*(\S.*)$/;
+/** Any markdown heading (`#`, `##`, `###`, …): the seven known ones open a section, the rest are ignored. */
+const HEADING_LINE = /^#{1,6}\s/;
+/** A list marker: `-`, `*`, `+`, `1.` or `1)`, indented or not. */
+const BULLET = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/;
+/** Leading/trailing `*`, `_` or backticks are formatting (`**adequate**`), never content. */
+function unemphasise(token: string): string {
+  let value = token.trim();
+  let previous: string;
+  do {
+    previous = value;
+    value = value
+      .replace(/^[*_`]+/, "")
+      .replace(/[*_`]+$/, "")
+      .trim();
+  } while (value !== previous);
+  return value;
+}
+/** One of these on exactly one side of a pair keeps two findings apart. */
+const NEGATION = /\b(?:no|not|never|without)\b/;
 
 /**
  * Function words dropped before comparing finding texts. Negations ("no", "not")
- * stay: "the card claims no behaviour" and "the card claims behaviour" are
- * different findings.
+ * stay in the word sets; `sameFinding` also compares their presence directly.
  */
 const STOPWORDS = new Set([
   "an",
@@ -176,9 +223,10 @@ function words(text: string): Set<string> {
   return set;
 }
 
-/** True when the two findings are the same finding (criterion, severity, text overlap). */
+/** True when the two findings are the same finding (criterion, severity, polarity, text overlap). */
 function sameFinding(one: Finding, other: Finding): boolean {
   if (one.criterion !== other.criterion || one.severity !== other.severity) return false;
+  if (NEGATION.test(normaliseText(one.text)) !== NEGATION.test(normaliseText(other.text))) return false;
   if (normaliseText(one.text) === normaliseText(other.text)) return true;
   const a = words(one.text);
   const b = words(other.text);
@@ -190,30 +238,27 @@ function sameFinding(one: Finding, other: Finding): boolean {
 
 interface Section {
   heading: string;
-  /** Content lines (trimmed, non-empty) with their 1-based line numbers. */
-  lines: { number: number; text: string }[];
+  /** Content lines with their 1-based line numbers; `raw` keeps indentation, `text` is trimmed. */
+  lines: { number: number; raw: string; text: string }[];
 }
 
 /**
  * Every format heading (three criteria, two checks, findings, Phase 3) with its
- * content. A line that starts with `## ` but is not one of the known headings is
- * reported, and ends the section it interrupts. The Status line is never section
- * content: it is the file's last non-empty line, wherever the reviewer put it.
+ * content. Any other heading ends a section and is otherwise ignored; a known
+ * heading that is missing or repeated is a problem. The Status line is never
+ * section content: it is the file's last non-empty line, wherever the reviewer
+ * put it.
  */
-function splitSections(
-  lines: string[],
-  statusIndex: number,
-): { sections: Map<string, Section>; problems: string[] } {
+function splitSections(lines: string[], statusIndex: number): { sections: Map<string, Section>; problems: string[] } {
   const problems: string[] = [];
   const starts: { index: number; heading?: string }[] = [];
   for (let index = 0; index < lines.length; index++) {
     const text = (lines[index] ?? "").trim();
-    if (!text.startsWith("## ")) continue;
+    if (!HEADING_LINE.test(text)) continue;
     if (HEADINGS.includes(text)) starts.push({ index, heading: text });
-    else {
-      problems.push(`has an unknown heading ${JSON.stringify(text)}`);
-      starts.push({ index });
-    }
+    // Unknown sections (`## Summary`, `### Detail`) are ignored: extra prose in a
+    // completed review must not cost the owner a re-run of the reviewer.
+    else starts.push({ index });
   }
 
   const seen = new Map<string, number>();
@@ -232,16 +277,23 @@ function splitSections(
     const start = starts[position] as { index: number; heading?: string };
     if (start.heading === undefined) continue;
     const end = starts[position + 1]?.index ?? lines.length;
-    const content: { number: number; text: string }[] = [];
+    const content: Section["lines"] = [];
     for (let index = start.index + 1; index < end; index++) {
       if (index === statusIndex) continue;
-      const text = (lines[index] ?? "").trim();
-      if (text.length > 0) content.push({ number: index + 1, text });
+      const raw = (lines[index] ?? "").trimEnd();
+      if (raw.trim().length === 0) continue;
+      content.push({ number: index + 1, raw, text: raw.trim() });
     }
     // A duplicated heading keeps its first section; the duplicate is a problem already.
     if (!sections.has(start.heading)) sections.set(start.heading, { heading: start.heading, lines: content });
   }
   return { sections, problems };
+}
+
+/** The canonical spelling of `value` in `allowed` (case-insensitive), or undefined. */
+function canonical(allowed: readonly string[], value: string): string | undefined {
+  const normalised = value.toLowerCase();
+  return allowed.find((candidate) => candidate.toLowerCase() === normalised);
 }
 
 /** The first content line of a section must be `Rating: <value>` or `Result: <value>`. */
@@ -256,22 +308,46 @@ function firstLineValue(
     problems.push(`${section.heading} has no ${JSON.stringify(`${keyword}:`)} line`);
     return undefined;
   }
-  const parsed = new RegExp(`^${keyword}:\\s*(\\S+)$`).exec(first.text);
+  // Emphasis and backticks are formatting, not content: `**Rating:** _ADEQUATE_`.
+  const parsed = new RegExp(`^[*_\\s]*${keyword}[*_\\s]*:\\s*(.+)$`, "i").exec(first.text);
   if (parsed === null) {
     problems.push(
       `${section.heading} line ${first.number} is not a ${JSON.stringify(`${keyword}: <value>`)} line: ${JSON.stringify(first.text)}`,
     );
     return undefined;
   }
-  const value = parsed[1] as string;
-  if (!allowed.includes(value)) {
+  const raw = unemphasise((parsed[1] as string).trim());
+  const value = canonical(allowed, raw);
+  if (value === undefined) {
     const what = keyword === "Rating" ? "rating" : "result";
     problems.push(
-      `${section.heading} line ${first.number} has an invalid ${what} ${JSON.stringify(value)} (expected ${allowed.join("|")})`,
+      `${section.heading} line ${first.number} has an invalid ${what} ${JSON.stringify(raw)} (expected ${allowed.join("|")})`,
     );
     return undefined;
   }
   return value;
+}
+
+/**
+ * `- **[major] fit:** text` → a finding, or null when the line is not one.
+ * Emphasis around the bracket, the criterion and the colon is dropped; the
+ * finding's text keeps its own emphasis.
+ */
+function parseFinding(text: string): Finding | null {
+  const body = text.replace(BULLET, "");
+  if (body === text) return null; // no list marker
+  const severityMatch = /^[*_`\s]*\[\s*([A-Za-z-]+)\s*\][*_`\s]*/.exec(body);
+  if (severityMatch === null) return null;
+  const severity = canonical(SEVERITIES, severityMatch[1] as string);
+  if (severity === undefined) return null;
+  const rest = body.slice(severityMatch[0].length);
+  const criterionMatch = /^[*_`\s]*([A-Za-z-]+)[*_`\s]*:[*_`\s]*([\s\S]*)$/.exec(rest);
+  if (criterionMatch === null) return null;
+  const criterion = canonical(FINDING_CRITERIA, criterionMatch[1] as string);
+  if (criterion === undefined) return null;
+  const findingText = (criterionMatch[2] as string).trim();
+  if (findingText.length === 0) return null;
+  return { severity: severity as Severity, criterion: criterion as FindingCriterion, text: findingText };
 }
 
 interface Parsed {
@@ -297,14 +373,18 @@ function parseDetailed(markdown: string): Parsed {
 
   // The last non-empty line is the Status line; nothing may follow it.
   const last = (lines[statusIndex] ?? "").trim();
-  const statusLine = /^Status:\s*(\S+)$/.exec(last);
+  const statusLine = /^[*_\s]*Status[*_\s]*:\s*(.+)$/i.exec(last);
   let status: Status | undefined;
   if (statusLine === null) {
     problems.push(`the last line is not a Status: line (got ${JSON.stringify(last)})`);
-  } else if (!STATUSES.includes(statusLine[1] as Status)) {
-    problems.push(`the last line has an invalid status ${JSON.stringify(statusLine[1])} (expected ${STATUSES.join("|")})`);
   } else {
-    status = statusLine[1] as Status;
+    const raw = unemphasise((statusLine[1] as string).trim());
+    const value = canonical(STATUSES, raw);
+    if (value === undefined) {
+      problems.push(`the last line has an invalid status ${JSON.stringify(raw)} (expected ${STATUSES.join("|")})`);
+    } else {
+      status = value as Status;
+    }
   }
 
   const criteria = {} as Record<ReviewCriterion, Rating>;
@@ -321,29 +401,34 @@ function parseDetailed(markdown: string): Parsed {
     knownSection === undefined ? undefined : firstLineValue(knownSection, "Result", KNOWN_RESULT, problems);
 
   const findings: Finding[] = [];
+  let current: Finding | undefined;
   for (const line of sections.get(HEADING.findings)?.lines ?? []) {
-    const parsed = FINDING_LINE.exec(line.text);
-    if (parsed === null) {
-      problems.push(
-        `${HEADING.findings} line ${line.number} is not a finding line: ${JSON.stringify(line.text)} ` +
-          `(expected "- [blocking|major|minor] <${FINDING_CRITERIA.join("|")}>: <text>")`,
-      );
+    const parsed = parseFinding(line.text);
+    if (parsed !== null) {
+      findings.push(parsed);
+      current = parsed;
       continue;
     }
-    findings.push({
-      severity: parsed[1] as Severity,
-      criterion: parsed[2] as FindingCriterion,
-      text: (parsed[3] as string).trim(),
-    });
+    const indented = /^[ \t]/.test(line.raw);
+    if (indented && current !== undefined) {
+      // An indented sub-bullet or continuation belongs to the finding above it.
+      current.text = `${current.text} ${line.text.replace(BULLET, "").trim()}`.trim();
+      continue;
+    }
+    problems.push(
+      `${HEADING.findings} line ${line.number} is not a finding line: ${JSON.stringify(line.text)} ` +
+        `(expected "- [blocking|major|minor] <${FINDING_CRITERIA.join("|")}>: <text>")`,
+    );
+    current = undefined;
   }
 
   const phase3MustCheck: string[] = [];
   for (const line of sections.get(HEADING.phase3)?.lines ?? []) {
-    if (!line.text.startsWith("-")) {
+    if (BULLET.exec(line.raw) === null) {
       problems.push(`${HEADING.phase3} line ${line.number} is not a list item: ${JSON.stringify(line.text)}`);
       continue;
     }
-    const text = line.text.replace(/^-\s*/, "").trim();
+    const text = line.text.replace(BULLET, "").trim();
     if (text.length === 0) {
       problems.push(`${HEADING.phase3} line ${line.number} is an empty list item`);
       continue;
@@ -382,11 +467,25 @@ function moreSevere(one: Rating, other: Rating): Rating {
   return RATING_SEVERITY[one] >= RATING_SEVERITY[other] ? one : other;
 }
 
+/** The two reviews' questions, first-seen spelling kept, de-duplicated on normalised text. */
+function unionPhase3(a: string[], b: string[]): string[] {
+  const seen = new Set<string>();
+  const union: string[] = [];
+  for (const question of [...a, ...b]) {
+    const key = normaliseText(question);
+    if (key.length === 0 || seen.has(key)) continue;
+    seen.add(key);
+    union.push(question);
+  }
+  return union;
+}
+
 /**
  * Merge the two reviews of a puzzle: the more severe rating per criterion
- * (`agree` when they match), the union of the flags, and the findings with
- * their confidence. Findings are listed most severe first; within a severity
- * the order of `a` then the unmatched findings of `b` is kept.
+ * (`agree` when they match), the union of the flags, the findings with their
+ * confidence, both reviewers' closing statuses, and the union of their Phase 3
+ * questions. Findings are listed most severe first; within a severity the order
+ * of `a` then the unmatched findings of `b` is kept.
  */
 export function mergeReviews(a: Review, b: Review): Merged {
   const criteria = {} as Merged["criteria"];
@@ -420,8 +519,11 @@ export function mergeReviews(a: Review, b: Review): Merged {
       breakdown: a.criteria.plausibility === "fails" || b.criteria.plausibility === "fails",
       knownResultBlocking: a.knownResult === "blocking" || b.knownResult === "blocking",
       dataCharacterViolated: a.dataCharacter === "violated" || b.dataCharacter === "violated",
+      reviewBlocked: a.status === "BLOCKED" || b.status === "BLOCKED",
     },
     findings,
+    status: { a: a.status, b: b.status },
+    phase3: unionPhase3(a.phase3MustCheck, b.phase3MustCheck),
   };
 }
 
@@ -443,11 +545,30 @@ function renderMarkdown(merged: Merged): string {
       (criterion) => `| ${criterion} | ${merged.criteria[criterion].rating} | ${merged.criteria[criterion].agreement} |`,
     ),
     "",
-    `breakdown: ${yes(merged.flags.breakdown)}; known-result blocking: ${yes(merged.flags.knownResultBlocking)}; data character violated: ${yes(merged.flags.dataCharacterViolated)}`,
+    `Statuses: a: ${merged.status.a}; b: ${merged.status.b}`,
+    "",
+  ];
+  // A review that stopped early is the first thing the owner must see.
+  for (const [who, status] of [
+    ["a", merged.status.a],
+    ["b", merged.status.b],
+  ] as const) {
+    if (status === "BLOCKED") {
+      lines.push(
+        `**Review ${who} is BLOCKED; its review did not finish, so do not rank, evolve or promote on this merge alone.**`,
+        "",
+      );
+    } else if (status === "DONE_WITH_CONCERNS") {
+      lines.push(`**Review ${who} is DONE_WITH_CONCERNS; read its findings before ranking.**`, "");
+    }
+  }
+  lines.push(
+    `breakdown: ${yes(merged.flags.breakdown)}; known-result blocking: ${yes(merged.flags.knownResultBlocking)}; ` +
+      `data character violated: ${yes(merged.flags.dataCharacterViolated)}; review blocked: ${yes(merged.flags.reviewBlocked)}`,
     "",
     "## Findings",
     "",
-  ];
+  );
   if (merged.findings.length === 0) {
     lines.push("None.");
   } else {
@@ -455,6 +576,12 @@ function renderMarkdown(merged: Merged): string {
       const who = finding.confidence === "high" ? "high confidence" : `single reviewer, ${finding.reviewer}`;
       lines.push(`- [${finding.severity}] ${finding.criterion} (${who}): ${finding.text}`);
     }
+  }
+  lines.push("", "## Phase 3 must check", "");
+  if (merged.phase3.length === 0) {
+    lines.push("None.");
+  } else {
+    for (const question of merged.phase3) lines.push(`- ${question}`);
   }
   lines.push("");
   return lines.join("\n");
