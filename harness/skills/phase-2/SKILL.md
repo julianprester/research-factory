@@ -339,11 +339,11 @@ in the ledger that the loop was truncated, not converged.
 - **never call `judge_round` again** after a STOP: the stop is a latch and the
   tool refuses further rounds.
 - You cannot make an early `Ruling:` stop promotable: a ruling records no STOP,
-  so `promote` refuses. Leave budget for at least one evolution round that can
-  reach a code STOP (round 4 is the bounded cap). If the budget is nearly spent
-  mid-loop, record `loop truncated: no STOP recorded, nothing promotable`, park
-  every puzzle `no STOP reached`, and say the loop promoted nothing. Never stop
-  later than the tool.
+  so `promote` refuses. Fund the whole cap as §0 says (round 0 plus up to four
+  evolution rounds): anything less may leave no code STOP, and then nothing is
+  promotable. If the budget is nearly spent mid-loop, record `loop truncated:
+  no STOP recorded, nothing promotable`, park every puzzle `no STOP reached`,
+  and say the loop promoted nothing. Never stop later than the tool.
 
 ## 7. Promotion
 

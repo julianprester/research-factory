@@ -704,7 +704,13 @@ test("an owner ruling cannot fake the STOP that promotion needs", () => {
   assert.match(body, /`loop truncated: no STOP recorded, nothing promotable`/);
   assert.match(body, /park every puzzle `no STOP reached`/);
   assert.match(body, /rounds funded: round 0 plus <N> evolution rounds/, "the budget ruling states how many rounds it funds");
-  assert.match(body, /leave budget for at least one evolution round that can reach a code STOP/i);
+  assert.match(body, /Fund the whole cap as §0 says \(round 0 plus up to four evolution rounds\): anything less may leave no code STOP, and then nothing is promotable/);
+  assert.doesNotMatch(body, /at least one evolution round that can reach a code STOP/);
+  assert.doesNotMatch(body, /round 4 is the bounded cap/);
+
+  const design = normalise(read("docs/superpowers/specs/2026-10-21-ctc-phase2-puzzles-design.md"));
+  assert.match(design, /an early stop by ruling records no STOP, so nothing is promotable/);
+  assert.doesNotMatch(design, /may stop early by ruling/);
 });
 
 test("the evolution child brief names the move, round, lens and both combination parents", () => {
