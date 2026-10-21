@@ -854,6 +854,111 @@ test("a finding-shaped bullet under ## Summary is refused; ordinary bullets ther
   assert.deepEqual(mustParse(good).phase3MustCheck, ["whether the handbook's silence is a rule or an omission"]);
 });
 
+// Round 4: a line shaped like a finding belongs under `## Findings` and nowhere
+// else. Somewhere else it would vanish (or, under Phase 3, be counted as a
+// question), so the review is refused with the heading and the line named.
+// Only the shape is refused: ordinary prose and ordinary bullets (including
+// bracketed non-severity text like `- [see above] note`) stay accepted.
+
+const FIT_FINDING_BULLET = "- [major] fit: the worst fits are unanswered";
+
+/** A review with `line` added inside a section, after that section's first line. */
+function withLineAfter(heading: string, firstLine: string, line: string): string {
+  const anchor = `${heading}\n${firstLine}`;
+  assert.ok(review().includes(anchor), `the fixture has ${JSON.stringify(anchor)}`);
+  return review().replace(anchor, `${anchor}\n${line}`);
+}
+
+test("a finding-shaped line before the first heading is refused and named", () => {
+  const markdown = `${BLOCKING_BULLET}\n\n${review()}`;
+  assert.equal(parseReview(markdown), null);
+  assert.ok(
+    reviewProblems(markdown).some(
+      (problem) =>
+        problem.includes("finding-shaped line before the first heading at line 1") &&
+        problem.endsWith("put findings under ## Findings"),
+    ),
+    reviewProblems(markdown).join("; "),
+  );
+});
+
+const KNOWN_LOCATIONS: [string, string][] = [
+  ["## Fit", "Rating: adequate"],
+  ["## Plausibility", "Rating: adequate"],
+  ["## Relevance", "Rating: adequate"],
+  ["## Data-character check", "Result: ok"],
+  ["## Known-result check", "Result: not-applicable"],
+  ["## Phase 3 must check", "- whether the handbook's silence is a rule or an omission"],
+];
+
+for (const [heading, firstLine] of KNOWN_LOCATIONS) {
+  test(`a finding-shaped line under ${heading} is refused and named`, () => {
+    const markdown = withLineAfter(heading, firstLine, FIT_FINDING_BULLET);
+    assert.equal(parseReview(markdown), null);
+    assert.ok(
+      reviewProblems(markdown).some(
+        (problem) =>
+          problem.includes(`finding-shaped line under heading '${heading.slice(3)}'`) &&
+          /at line \d+/.test(problem) &&
+          problem.endsWith("put findings under ## Findings"),
+      ),
+      reviewProblems(markdown).join("; "),
+    );
+  });
+}
+
+test("a finding-shaped line under a non-Findings unknown heading is refused and named", () => {
+  const markdown = review().replace(
+    "## Phase 3 must check",
+    `## Methodology\nA paragraph.\n${FIT_FINDING_BULLET}\n\n## Phase 3 must check`,
+  );
+  assert.equal(parseReview(markdown), null);
+  assert.ok(
+    reviewProblems(markdown).some(
+      (problem) =>
+        problem.includes("finding-shaped line under unknown heading 'Methodology'") &&
+        /at line \d+/.test(problem) &&
+        problem.endsWith("put findings under ## Findings"),
+    ),
+    reviewProblems(markdown).join("; "),
+  );
+});
+
+test("a finding-shaped line under a ### sub-section of a non-Findings section is refused", () => {
+  const markdown = withLineAfter("## Fit", "Rating: adequate", `### Detail\n${FIT_FINDING_BULLET}`);
+  assert.equal(parseReview(markdown), null);
+  assert.ok(
+    reviewProblems(markdown).some(
+      (problem) =>
+        problem.includes("finding-shaped line under heading 'Fit'") &&
+        /at line \d+/.test(problem) &&
+        problem.endsWith("put findings under ## Findings"),
+    ),
+    reviewProblems(markdown).join("; "),
+  );
+});
+
+test("the same finding-shaped line under ## Findings still parses", () => {
+  const parsed = mustParse(review({ findings: [FIT_FINDING_BULLET] }));
+  assert.deepEqual(parsed.findings, [{ severity: "major", criterion: "fit", text: "the worst fits are unanswered" }]);
+});
+
+test("ordinary bullets, including bracketed text, are accepted in every non-Findings section", () => {
+  const withOrdinaryBullet = (markdown: string, heading: string, firstLine: string): string =>
+    markdown.replace(`${heading}\n${firstLine}`, `${heading}\n${firstLine}\n- [see above] note\n* an ordinary bullet`);
+  let markdown = review();
+  for (const [heading, firstLine] of KNOWN_LOCATIONS.slice(0, 5)) {
+    markdown = withOrdinaryBullet(markdown, heading, firstLine);
+  }
+  markdown = markdown.replace("## Phase 3 must check", "## Phase 3 must check\n- [see above] note");
+  markdown = `# Review\n- [see above] note\n\n${markdown}`;
+
+  const parsed = mustParse(markdown);
+  assert.deepEqual(parsed.findings, []);
+  assert.ok(parsed.phase3MustCheck.includes("[see above] note"));
+  assert.ok(parsed.phase3MustCheck.includes("whether the handbook's silence is a rule or an omission"));
+});
+
 test("the CLI treats a bad invocation as a usage error", (t) => {
   const none = spawnSync(process.execPath, [MERGE_REVIEWS], { encoding: "utf8" });
   assert.equal(none.status, 2);

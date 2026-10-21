@@ -57,7 +57,9 @@
 // normalised (case, surrounding emphasis, a trailing colon or full stop), so
 // `## findings` and `## Findings:` are the Findings section (a second one, after
 // normalising, is still a duplicate); unknown `## …` sections are ignored, but a
-// finding-shaped bullet under one is refused rather than silently dropped;
+// finding-shaped bullet anywhere except `## Findings` — in the preamble before
+// the first heading, under a criterion or check section, under Phase 3, or under
+// an unknown section — is refused rather than silently dropped;
 // `Rating:`/`Result:`/`Status:` keys and their values are case-insensitive; a
 // value is the *first word* after the key (emphasis and trailing punctuation
 // stripped, anything else on the line ignored, so `Status: DONE — no concerns`
@@ -328,15 +330,39 @@ interface Section {
 }
 
 /**
+ * Refuse a bullet shaped like a finding anywhere findings do not belong: it
+ * would otherwise vanish (or, under Phase 3, be mistaken for a question).
+ * `where` is the clause between "finding-shaped line" and "at line N", e.g.
+ * `before the first heading` or `under heading 'Fit'`.
+ */
+function refuseFindingShaped(
+  lines: string[],
+  from: number,
+  to: number,
+  where: string,
+  statusIndex: number,
+  problems: string[],
+): void {
+  for (let index = from; index < to; index++) {
+    if (index === statusIndex) continue;
+    const text = (lines[index] ?? "").trim();
+    if (text.length === 0 || parseFinding(text) === null) continue;
+    problems.push(`finding-shaped line ${where} at line ${index + 1}: put findings under ## Findings`);
+  }
+}
+
+/**
  * Every format heading (three criteria, two checks, findings, Phase 3) with its
  * content. A heading is recognised after `normaliseHeading`, so case, emphasis
  * and a trailing colon do not make a known section unknown. Any other level-2
- * heading ends a section and is otherwise ignored, except that a finding-shaped
- * bullet beneath it is a problem (it would otherwise vanish). `###` and deeper
- * headings are ordinary content lines (the Findings parser skips them). A known
- * heading that is missing or repeated is a problem. The Status line is never
- * section content: it is the file's last non-empty line, wherever the reviewer
- * put it.
+ * heading ends a section and is otherwise ignored. A finding-shaped bullet is
+ * refused everywhere except under `## Findings`: in the preamble, under a
+ * criterion or check section (including under a `###` sub-section there),
+ * under `## Phase 3 must check`, and under any unknown section. `###` and
+ * deeper headings are ordinary content lines (the Findings parser skips them).
+ * A known heading that is missing or repeated is a problem. The Status line is
+ * never section content: it is the file's last non-empty line, wherever the
+ * reviewer put it.
  */
 function splitSections(lines: string[], statusIndex: number): { sections: Map<string, Section>; problems: string[] } {
   const problems: string[] = [];
@@ -364,22 +390,36 @@ function splitSections(lines: string[], statusIndex: number): { sections: Map<st
   }
 
   const sections = new Map<string, Section>();
+  // Before the first `## ` heading (a title or stray prose): a finding-shaped
+  // bullet here belongs under `## Findings` too.
+  refuseFindingShaped(lines, 0, starts[0]?.index ?? lines.length, "before the first heading", statusIndex, problems);
   for (let position = 0; position < starts.length; position++) {
     const start = starts[position] as { index: number; heading?: string; name?: string };
     const end = starts[position + 1]?.index ?? lines.length;
     if (start.heading === undefined) {
       // A bullet shaped like a finding belongs under `## Findings`; under any
       // other heading it would be lost, so the review is refused instead.
-      for (let index = start.index + 1; index < end; index++) {
-        if (index === statusIndex) continue;
-        const text = (lines[index] ?? "").trim();
-        if (text.length === 0 || parseFinding(text) === null) continue;
-        problems.push(
-          `finding-shaped line under unknown heading '${start.name}' at line ${index + 1}: ` +
-            "put findings under ## Findings",
-        );
-      }
+      refuseFindingShaped(
+        lines,
+        start.index + 1,
+        end,
+        `under unknown heading '${start.name}'`,
+        statusIndex,
+        problems,
+      );
       continue;
+    }
+    if (start.heading !== HEADING.findings) {
+      // Under a criterion, a check or Phase 3 a finding-shaped bullet is not a
+      // finding (and under Phase 3 it is not a question): refuse, never drop.
+      refuseFindingShaped(
+        lines,
+        start.index + 1,
+        end,
+        `under heading '${start.heading.slice(3)}'`,
+        statusIndex,
+        problems,
+      );
     }
     const content: Section["lines"] = [];
     for (let index = start.index + 1; index < end; index++) {
