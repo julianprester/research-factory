@@ -592,9 +592,33 @@ test("reviewsRefusal refuses any read under reviews/ and bash naming it except c
   assert.equal(reviewsRefusal("bash", { command: "cat workspace/previews/x.md" }), undefined, "previews/ is not reviews/");
   assert.equal(reviewsRefusal("bash", { command: "cat workspace/reviews-notes.md" }), undefined, "reviews-notes.md is not the folder");
   assert.equal(
+    reviewsRefusal("bash", { command: "cd workspace && cat reviews/b.md" }) !== undefined,
+    true,
+    "a bare relative reviews/ segment after cd",
+  );
+  assert.equal(
+    reviewsRefusal("bash", { command: "cat reviews/merged.md" }) !== undefined,
+    true,
+    "a bare relative reviews/ segment",
+  );
+  assert.equal(reviewsRefusal("bash", { command: "ls workspace/previews" }), undefined, "previews is not reviews");
+  assert.equal(reviewsRefusal("bash", { command: "cat reviews-notes.md" }), undefined, "a file name is not the folder");
+  assert.equal(reviewsRefusal("bash", { command: "cat xreviews/foo" }), undefined, "xreviews is not reviews");
+  assert.equal(
     reviewsRefusal("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md" }),
     undefined,
     "check-citations may read the review it is checking",
+  );
+  assert.equal(
+    reviewsRefusal("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md 2>&1" }),
+    undefined,
+    "a trailing 2>&1 is not a pipe",
+  );
+  assert.equal(
+    reviewsRefusal("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md 2>&1 | tail -20" }) !==
+      undefined,
+    true,
+    "a pipe after the redirect is not allowed",
   );
   assert.equal(
     reviewsRefusal("bash", { command: "cat workspace/reviews/b.md && echo check-citations.ts" }) !== undefined,
@@ -625,6 +649,16 @@ test("ownersRefusal refuses the owners' folder, not a similar-looking name", () 
     ownersRefusal("bash", { command: "cat ../owners/phase-2/tournament/round-0.json" }) !== undefined,
     true,
     "bash is refused too",
+  );
+  assert.equal(
+    ownersRefusal("bash", { command: "cat owners/ledger.md" }) !== undefined,
+    true,
+    "a bare relative owners/ segment",
+  );
+  assert.equal(
+    ownersRefusal("bash", { command: "cd .. && cat owners/phase-2/tournament/round-0.json" }) !== undefined,
+    true,
+    "a bare owners/ segment after cd ..",
   );
   assert.equal(ownersRefusal("bash", { command: "cat workspace/owners-notes.md" }), undefined);
   assert.equal(ownersRefusal("bash", { command: "grep -r founders workspace/puzzle.md" }), undefined, "founders contains owners but is not a segment");
@@ -660,6 +694,27 @@ test("the reviewer extension refuses reviews, siblings and writes outside its ow
     "check-citations on its own review is allowed",
   );
   assert.equal(call("bash", { command: "cat workspace/reviews/b.md" })?.block, true, "reading a review by bash is refused");
+  assert.equal(call("bash", { command: "cd workspace && cat reviews/b.md" })?.block, true, "a bare reviews/ segment after cd");
+  assert.equal(call("bash", { command: "cat reviews/merged.md" })?.block, true, "a bare relative reviews/ segment");
+  assert.equal(call("bash", { command: "cat owners/ledger.md" })?.block, true, "a bare relative owners/ segment");
+  assert.equal(
+    call("bash", { command: "cd .. && cat owners/phase-2/ledger.md" })?.block,
+    true,
+    "owners/ behind a cd ..",
+  );
+  assert.equal(call("bash", { command: "ls workspace/previews" }), undefined, "previews is not reviews");
+  assert.equal(call("bash", { command: "cat reviews-notes.md" }), undefined, "a file name is not the folder");
+  assert.equal(call("bash", { command: "cat xreviews/foo" }), undefined, "xreviews is not reviews");
+  assert.equal(
+    call("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md 2>&1" }),
+    undefined,
+    "a trailing 2>&1 is fine",
+  );
+  assert.equal(
+    call("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md 2>&1 | tail -20" })?.block,
+    true,
+    "a pipe after the redirect is not",
+  );
   assert.equal(call("bash", { command: "cat " + path.join(p2, "workspace", "puzzle.md") })?.block, true, "a sibling by bash");
   assert.equal(
     call("bash", {

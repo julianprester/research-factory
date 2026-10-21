@@ -232,22 +232,27 @@ export function siblingRefusal(
   return undefined;
 }
 
-/** A `reviews` path segment named inside a shell command (not `previews/` or `reviews-notes.md`). */
-const REVIEWS_IN_COMMAND = /(^|[\\/])reviews([\\/\s'";&|]|$)/;
+/** A `reviews` path segment named inside a shell command (not `previews/`, `xreviews/` or `reviews-notes.md`). */
+const REVIEWS_IN_COMMAND = /(^|[^A-Za-z0-9._-])reviews([\\/\s'";&|]|$)/;
 
 /** An `owners` path segment named inside a shell command (judge verdicts and rulings live there). */
-const OWNERS_IN_COMMAND = /(^|[\\/])owners([\\/\s'";&|]|$)/;
+const OWNERS_IN_COMMAND = /(^|[^A-Za-z0-9._-])owners([\\/\s'";&|]|$)/;
 
 /** Shell operators that chain or nest a command: after one of these the guard no longer knows what runs. */
 const SHELL_OPERATOR = /;|&&|\|\||\||`|\$\(/;
 
+/** A trailing stderr redirect (`2>&1`, possibly repeated) is not a shell operator chain. */
+const TRAILING_STDERR_REDIRECT = /(?:\s+2>&1)+\s*$/;
+
 /**
- * The one command allowed to touch a review: a plain `node …/check-citations.ts`
- * with no shell operator anywhere. A chained command (`… && echo check-citations.ts`, `…; cat b.md`)
- * does not qualify, so the escape cannot be borrowed to read something else.
+ * The one command allowed to touch a review: a plain `node …/check-citations.ts`,
+ * optionally with a trailing `2>&1`, and with no other shell operator anywhere.
+ * A chained command (`… && echo check-citations.ts`, `…; cat b.md`) and a piped
+ * one (`… 2>&1 | tail -20`) do not qualify, so the escape cannot be borrowed to
+ * read something else.
  */
 function runsCheckCitations(command: string): boolean {
-  const trimmed = command.trimStart();
+  const trimmed = command.trimStart().replace(TRAILING_STDERR_REDIRECT, "");
   return /^node\b/.test(trimmed) && trimmed.includes("check-citations.ts") && !SHELL_OPERATOR.test(trimmed);
 }
 
