@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { Type } from "typebox";
 
 import { ownerMayWrite } from "./guard.ts";
+import { checkDuplicates, judgeRound } from "./tournament/tools.ts";
 import { createChild, findNode, listNodes, updateNode, type NodeRef } from "./tree.ts";
 
 interface ToolCallEventLike {
@@ -46,6 +47,26 @@ const TreeUpdateParams = Type.Object({
   note: Type.Optional(Type.String({ description: "Why: recorded in the commit message, not on the node" })),
 });
 
+const JudgeRoundParams = Type.Object({
+  round: Type.Number({ description: "The round to judge: 0 for the first ranking, then 1, 2, …" }),
+  entrants: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Round 1+: the incumbent puzzle ids this round ranks (round 0 takes every submitted puzzle)",
+    }),
+  ),
+  pairs: Type.Optional(
+    Type.Array(Type.Object({ child: Type.String(), parent: Type.String() }), {
+      description: "Round 1+: each evolution child and the incumbent parent it must be judged against",
+    }),
+  ),
+});
+
+const CheckDuplicatesParams = Type.Object({
+  ids: Type.Array(Type.String(), {
+    description: "The candidate puzzle ids to compare pairwise, e.g. the top 8 of the latest round",
+  }),
+});
+
 interface TreeListInput {
   phase?: number;
   status?: string;
@@ -63,6 +84,16 @@ interface TreeUpdateInput {
   status?: string;
   phase?: number;
   note?: string;
+}
+
+interface JudgeRoundInput {
+  round: number;
+  pairs?: { child: string; parent: string }[];
+  entrants?: string[];
+}
+
+interface CheckDuplicatesInput {
+  ids: string[];
 }
 
 function env(name: string): string {
@@ -84,6 +115,12 @@ function ownerPhase(): number {
 
 function actor(phase: number): string {
   return `owner-p${phase}`;
+}
+
+/** The tournament tools are Phase 2's alone, whatever tree the session can see. */
+function requirePhase2(tool: string): void {
+  const phase = ownerPhase();
+  if (phase !== 2) throw new Error(`Not your phase: ${tool} is a phase-2 tool and you own P${phase}`);
 }
 
 function refuseNotYourPhase(nodePhase: number, phase: number): Error {
@@ -154,6 +191,30 @@ export default function ownerExtension(pi: PiLike): void {
       if (found.phase !== phase) throw refuseNotYourPhase(found.phase, phase);
       const node = updateNode(dir, params.nodeId, { status: params.status, phase: params.phase }, actor(phase), params.note);
       return result(`updated ${line(node)}`);
+    },
+  });
+
+  pi.registerTool({
+    name: "judge_round",
+    label: "Judge a tournament round",
+    description:
+      "Judge one Phase 2 ranking round. Round 0 takes every submitted puzzle with its card and merged review and refuses until the pool is closed; later rounds take `entrants` plus `pairs` (child, parent) and play each child against its parent first. A PARTIAL answer means call again with the same arguments to resume. A COMPLETE answer appends the round's stop decision; STOP means no more evolution children may be created.",
+    parameters: JudgeRoundParams,
+    async execute(_toolCallId: string, params: JudgeRoundInput) {
+      requirePhase2("judge_round");
+      return result(await judgeRound(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "check_duplicates",
+    label: "Check duplicates",
+    description:
+      "Judge every pair among `ids` for being the same puzzle in both orders. A confirmed duplicate keeps the higher Bradley-Terry score from the latest round and drops the other; the record in owners/phase-2/tournament/distinct.json is unioned with earlier checks and is idempotent.",
+    parameters: CheckDuplicatesParams,
+    async execute(_toolCallId: string, params: CheckDuplicatesInput) {
+      requirePhase2("check_duplicates");
+      return result(await checkDuplicates(runDir(), params));
     },
   });
 
