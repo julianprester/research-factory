@@ -24,6 +24,7 @@ import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { checkPuzzle, citationProblems } from "../tools/check-puzzle.ts";
+import { mergeReviews, parseReview } from "../tools/merge-reviews.ts";
 import { createChild, findNode, initRun } from "../tree.ts";
 
 const CHECK_PUZZLE = fileURLToPath(new URL("../tools/check-puzzle.ts", import.meta.url));
@@ -117,6 +118,16 @@ function withoutHeading(markdown: string, heading: string): string {
   return markdown.replace(`${heading}\n`, `${heading.replace("## ", "")}\n`);
 }
 
+/** The card with one canonical section's body emptied (its heading stays). */
+function emptySection(markdown: string, heading: string): string {
+  const lines = markdown.split("\n");
+  const start = lines.indexOf(heading);
+  assert.ok(start >= 0, `${heading} is in the card`);
+  let end = lines.findIndex((line, at) => at > start && /^##\s/.test(line));
+  if (end < 0) end = lines.length;
+  return [...lines.slice(0, start + 1), "", ...lines.slice(end)].join("\n");
+}
+
 function problemsOf(fixture: Fixture, opts: { reviews?: boolean; citations?: (file: string) => string[] } = {}): string[] {
   return checkPuzzle(fixture.run, fixture.nodeDir, { ...NO_CITATIONS, ...opts }).problems;
 }
@@ -155,13 +166,33 @@ function review(status = "DONE"): string {
   ].join("\n");
 }
 
-/** The two reviews and the merge every reviewed puzzle must have. */
-function writeReviews(nodeDir: string, opts: { a?: string; b?: string | null; merged?: boolean } = {}): void {
+/**
+ * The two reviews and the merge every reviewed puzzle must have. `merge`
+ * overrides the stored merge (a stale or malformed one); by default the merge
+ * is the real one, computed with the same `mergeReviews` the tool compares to.
+ */
+function writeReviews(
+  nodeDir: string,
+  opts: { a?: string; b?: string | null; merged?: boolean; merge?: string } = {},
+): void {
   const dir = path.join(nodeDir, "workspace", "reviews");
   mkdirSync(dir, { recursive: true });
-  write(path.join(dir, "a.md"), opts.a ?? review());
-  if (opts.b !== null) write(path.join(dir, "b.md"), opts.b ?? review());
-  if (opts.merged !== false) write(path.join(dir, "merged.json"), "{}\n");
+  const a = opts.a ?? review();
+  const b = opts.b === null ? undefined : (opts.b ?? review());
+  write(path.join(dir, "a.md"), a);
+  if (b !== undefined) write(path.join(dir, "b.md"), b);
+  if (opts.merged === false) return;
+
+  const mergedFile = path.join(dir, "merged.json");
+  if (opts.merge !== undefined) {
+    write(mergedFile, opts.merge);
+    return;
+  }
+  const reviewA = parseReview(a);
+  const reviewB = b === undefined ? null : parseReview(b);
+  // A review that does not parse has no merge: leave the file absent.
+  if (reviewA === null || reviewB === null) return;
+  write(mergedFile, `${JSON.stringify(mergeReviews(reviewA, reviewB), null, 2)}\n`);
 }
 
 test("a complete card has no problems", (t) => {
@@ -187,6 +218,76 @@ test("each missing heading is a problem", (t) => {
       `${heading}: ${problems.join("\n")}`,
     );
   }
+});
+
+test("each section must have a body", (t) => {
+  const emptyLimits = puzzleNode(t, { card: emptySection(card(), "## Limits") });
+  assert.deepEqual(problemsOf(emptyLimits), ['workspace/puzzle.md\'s "## Limits" section is empty']);
+
+  for (const heading of HEADINGS) {
+    const problems = problemsOf(puzzleNode(t, { card: emptySection(card(), heading) }));
+    assert.ok(
+      problems.includes(`workspace/puzzle.md's "${heading}" section is empty`),
+      `${heading}: ${problems.join("\n")}`,
+    );
+  }
+});
+
+test("a duplicated heading is named once, and both copies' bodies count", (t) => {
+  const duplicatedLimits = puzzleNode(t, { card: `${card()}\n## Limits\nAn extra copy.\n` });
+  assert.deepEqual(problemsOf(duplicatedLimits), ['workspace/puzzle.md has the heading "## Limits" twice']);
+
+  // The second copy is empty; the first one's readings still count.
+  const emptySecondCopy = puzzleNode(t, { card: `${card()}\n## Admissible explanations\n` });
+  assert.deepEqual(problemsOf(emptySecondCopy), ['workspace/puzzle.md has the heading "## Admissible explanations" twice']);
+});
+
+test("content inside a code fence is not card structure", (t) => {
+  const fencedTemplate = [
+    "# Puzzle P01",
+    "",
+    "Lens: status quo",
+    "Round: 0",
+    "",
+    "The template I was given:",
+    "",
+    "```markdown",
+    ...HEADINGS.flatMap((heading) => [heading, "template text", ""]),
+    "```",
+    "",
+  ].join("\n");
+  const problems = problemsOf(puzzleNode(t, { card: fencedTemplate }));
+  assert.deepEqual(problems, HEADINGS.map((heading) => `workspace/puzzle.md lacks the heading "${heading}"`));
+});
+
+test("a fenced reading does not satisfy ## Admissible explanations", (t) => {
+  const fenced = card().replace(
+    "- The status-quo reading: existing theory already explains the share.\n- An artifact reading: the corpus's page form produced the count.",
+    [
+      "```",
+      "- The status-quo reading: existing theory already explains the share.",
+      "- An artifact reading: the corpus's page form produced the count.",
+      "```",
+    ].join("\n"),
+  );
+  assert.deepEqual(problemsOf(puzzleNode(t, { card: fenced })), [
+    'workspace/puzzle.md\'s "## Admissible explanations" lacks a status-quo reading',
+    'workspace/puzzle.md\'s "## Admissible explanations" lacks an artifact reading',
+  ]);
+});
+
+test("a header line must be in the preamble and outside a fence", (t) => {
+  // A `Lens:` in a section is not a header line (design §4: "in its first lines").
+  const buried = puzzleNode(t, {
+    card: card().replace(/^Lens:.*\n/m, "").replace("## Literature log\n", "## Literature log\nLens: status quo\n"),
+  });
+  assert.deepEqual(problemsOf(buried), ['workspace/puzzle.md lacks a "Lens:" line']);
+
+  // A `Lens:` in a fenced template before the first heading is not this card's.
+  const fenced = puzzleNode(t, {
+    card: card().replace(/^Lens:.*\n/m, "").replace(/^Round: (\d+)\n/m, "Round: $1\n\n```\nLens: status quo\n```\n"),
+  });
+  assert.deepEqual(problemsOf(fenced), ['workspace/puzzle.md lacks a "Lens:" line']);
 });
 
 test("a card with only some headings names every missing one", (t) => {
@@ -338,6 +439,16 @@ test("empty workspace/scripts and workspace/results directories are fine", (t) =
   assert.deepEqual(problemsOf(fixture), []);
 });
 
+test("workspace/scripts or workspace/results as a plain file is a finding, not a crash", (t) => {
+  const scripts = puzzleNode(t);
+  write(path.join(scripts.nodeDir, "workspace", "scripts"), "not a directory\n");
+  assert.deepEqual(problemsOf(scripts), ["workspace/scripts exists: Phase 2 runs no analysis"]);
+
+  const results = puzzleNode(t);
+  write(path.join(results.nodeDir, "workspace", "results"), "not a directory\n");
+  assert.deepEqual(problemsOf(results), ["workspace/results exists: Phase 2 runs no analysis"]);
+});
+
 test("with reviews: true the two reviews and their merge are required", (t) => {
   const fixture = puzzleNode(t);
   assert.deepEqual(problemsOf(fixture, { reviews: true }), [
@@ -358,9 +469,38 @@ test("an unparseable review is named with its file and its problems", (t) => {
   const fixture = puzzleNode(t);
   writeReviews(fixture.nodeDir, { a: review().replace("## Fit\nRating: adequate", "## Fit\nno rating here") });
   const problems = problemsOf(fixture, { reviews: true });
-  assert.equal(problems.length, 1, problems.join("\n"));
+  // A review that does not parse has no merge to store, so the merge is absent too.
+  assert.deepEqual(problems.slice(1), ["workspace/reviews/merged.json is missing"], problems.join("\n"));
   assert.match(problems[0] ?? "", /^workspace\/reviews\/a\.md: /);
   assert.match(problems[0] ?? "", /Fit/i);
+});
+
+test("a merge that matches the two reviews passes, and one that does not is named", (t) => {
+  const matching = puzzleNode(t);
+  writeReviews(matching.nodeDir, {});
+  assert.deepEqual(problemsOf(matching, { reviews: true }), []);
+
+  // A review edited after the merge: the stored merge still carries the old ratings.
+  const stale = puzzleNode(t);
+  writeReviews(stale.nodeDir, {});
+  write(
+    path.join(stale.nodeDir, "workspace", "reviews", "a.md"),
+    review().replace("Rating: adequate", "Rating: strong"),
+  );
+  assert.deepEqual(problemsOf(stale, { reviews: true }), [
+    "workspace/reviews/merged.json does not match the reviews — re-run merge-reviews.ts",
+  ]);
+
+  // A merge that was never run (the empty object the old fixture wrote).
+  const empty = puzzleNode(t);
+  writeReviews(empty.nodeDir, { merge: "{}\n" });
+  assert.deepEqual(problemsOf(empty, { reviews: true }), [
+    "workspace/reviews/merged.json does not match the reviews — re-run merge-reviews.ts",
+  ]);
+
+  const unparseable = puzzleNode(t);
+  writeReviews(unparseable.nodeDir, { merge: "not a merge\n" });
+  assert.deepEqual(problemsOf(unparseable, { reviews: true }), ["workspace/reviews/merged.json is not valid JSON"]);
 });
 
 test("the citation check must pass on both review files", (t) => {
