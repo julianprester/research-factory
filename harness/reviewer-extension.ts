@@ -7,21 +7,25 @@
 //
 // - `write`/`edit` only to `<nodeDir>/workspace/reviews/a.md` or `b.md`; the
 //   merge (`merged.md`), the card and `handoff.md` are not a reviewer's files.
-//   A session not inside a node folder fails closed.
+//   A session outside a puzzle node folder is refused every tool call, so a
+//   dispatch that lands in the run root or a pattern node fails closed instead
+//   of silently losing the isolation.
 // - `read` and `bash` may not see a review: any path with a `reviews` segment is
 //   refused, including the reviewer's own draft (its only exit is
-//   `check-citations.ts` in bash), and so is any command naming `reviews/`.
+//   `check-citations.ts` in bash), and so is any command naming that segment.
 // - `read` and `bash` may not see another puzzle: `siblingRefusal` runs with
 //   `allowDerived: false`, so even an evolved puzzle's parent — which its own
 //   worker may read — is another puzzle to the reviewer.
+// - `owners/` (the ledger, rulings and tournament round files with judge
+//   verdicts) is refused on `read` and `bash`.
 // - The hold-out stays locked for every Phase 2 session.
 //
-// None of this is a sandbox. A shell command is only scanned for names, and a
-// script that walks the tree is not seen; the guard closes the direct,
-// accidental spellings a model reaches for.
+// None of this is a sandbox. A shell command is only scanned for names and
+// globs, and a script that walks the tree is not seen; the guard closes the
+// direct, accidental spellings a model reaches for.
 import * as path from "node:path";
 
-import { holdoutRefusal, reviewsRefusal, reviewerMayWrite, siblingRefusal } from "./guard.ts";
+import { holdoutRefusal, isPuzzleNode, ownersRefusal, reviewsRefusal, reviewerMayWrite, siblingRefusal } from "./guard.ts";
 import { findNodeDir } from "./worker-extension.ts";
 
 interface ToolCallEventLike {
@@ -39,7 +43,8 @@ function refusal(nodeDir: string, event: ToolCallEventLike): string | undefined 
     return (
       holdoutRefusal(event.toolName, event.input) ??
       siblingRefusal(nodeDir, event.toolName, event.input, { allowDerived: false }) ??
-      reviewsRefusal(event.toolName, event.input)
+      reviewsRefusal(event.toolName, event.input) ??
+      ownersRefusal(event.toolName, event.input)
     );
   }
   if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
@@ -55,13 +60,18 @@ function refusal(nodeDir: string, event: ToolCallEventLike): string | undefined 
 
 export default function reviewerExtension(pi: PiLike): void {
   pi.on("tool_call", (event) => {
-    // A reviewer that cannot be placed in a node folder has no review file to be
-    // trusted with, so it is refused every read and write rather than left free.
+    // A reviewer must sit in a puzzle node: anywhere else (the run root, a
+    // pattern node, outside a run) there is no review file to trust it with and
+    // no puzzle whose siblings the guard could recognise, so every call fails
+    // closed rather than falling open.
     const nodeDir = findNodeDir(process.cwd());
-    const reason =
-      nodeDir === undefined
-        ? `Refusing ${event.toolName}: this session is not inside a puzzle node folder (no node.json above ${process.cwd()})`
-        : refusal(nodeDir, event);
+    if (nodeDir === undefined || !isPuzzleNode(nodeDir)) {
+      return {
+        block: true,
+        reason: `Refusing ${event.toolName}: a reviewer must run inside a puzzle node folder (cwd ${process.cwd()})`,
+      };
+    }
+    const reason = refusal(nodeDir, event);
     return reason === undefined ? undefined : { block: true, reason };
   });
 }

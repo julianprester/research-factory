@@ -14,6 +14,11 @@
 // script that walks the tree or a command built from a variable is not seen.
 // `check-puzzle` and the judge's own prompt are the other half of that
 // separation.
+//
+// Paths are compared case-sensitively (`P`, `reviews` and `owners` match
+// exactly); the run environment is Linux, where the file system is too. Both
+// reviewers may write either review slot: the brief names one, and a swapped or
+// clobbered file is visible to `merge-reviews.ts` and `check-puzzle --reviews`.
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -87,12 +92,27 @@ export function holdoutLocked(phase: number): boolean {
 /** A puzzle folder name: `P<nn>-<slug>`, as tree.ts's createChild makes them. */
 const PUZZLE_FOLDER = /^P(\d+)-/;
 
-/** A puzzle folder named inside a shell command (the heuristic cannot parse shell). */
-const PUZZLE_IN_COMMAND = /P\d+-[A-Za-z0-9._-]*/g;
+/**
+ * A puzzle folder named inside a shell command (the heuristic cannot parse
+ * shell): `P02-x`, `P02-*`, `P02*` and `P02?` all count. A glob may replace the
+ * whole suffix, so the name scan alone would miss `../P02*` and `../*`; the
+ * traversal-plus-glob rule in `siblingRefusal` catches those.
+ */
+const PUZZLE_IN_COMMAND = /P\d+(?:-[A-Za-z0-9._-]*|[*?])/g;
+
+/** Shell glob metacharacters; a path with one of these is not a path the guard can see. */
+const GLOB = /[*?\[]/;
 
 /** `P01` and `P1` name the same puzzle; compare the number, not the spelling. */
 function canonicalPuzzleId(id: string): string | undefined {
   const match = /^P(\d+)$/.exec(id.trim());
+  const digits = match?.[1];
+  return digits === undefined ? undefined : `P${Number.parseInt(digits, 10)}`;
+}
+
+/** The id a command token stands for: `P02-x`, `P02*` and `P02?` all mean P02. */
+function commandPuzzleId(token: string): string | undefined {
+  const match = /^P(\d+)/.exec(token);
   const digits = match?.[1];
   return digits === undefined ? undefined : `P${Number.parseInt(digits, 10)}`;
 }
@@ -105,9 +125,22 @@ function puzzleIdOf(folderName: string): string | undefined {
 }
 
 /** A puzzle node: its own folder is `P<nn>-<slug>` and its parent folder is `puzzles`. */
-function isPuzzleNode(nodeDir: string): boolean {
+export function isPuzzleNode(nodeDir: string): boolean {
   const dir = path.resolve(nodeDir);
   return path.basename(path.dirname(dir)) === PUZZLES_DIR && puzzleIdOf(path.basename(dir)) !== undefined;
+}
+
+/**
+ * The real path when the target exists, so a symlink cannot step around the
+ * segment walk; otherwise the resolved path (a file not created yet has no real
+ * path to compare, and remains a documented gap).
+ */
+function realPathOrSelf(absPath: string): string {
+  try {
+    return fs.realpathSync(absPath);
+  } catch {
+    return path.resolve(absPath);
+  }
 }
 
 /** The puzzle ids in a node's `node.json` `derivedFrom`; missing or unreadable means none. */
@@ -156,9 +189,11 @@ function puzzleFoldersInPath(absPath: string): PuzzleFolder[] {
  * merged reviews. Reviewers pass `{ allowDerived: false }`: an evolved puzzle's
  * parent is another puzzle to them. A node that is not a puzzle is unaffected.
  *
- * Both checks are heuristics on a string: the path is resolved first, but a
- * shell command is only scanned for `P<nn>-<slug>` names. This is a guard
- * against accidental reads, not a sandbox.
+ * Both checks are heuristics on a string: the read path is made real when it
+ * exists (so a symlink cannot step around the walk) and otherwise resolved,
+ * while a shell command is scanned for `P<nn>` names and refused when it
+ * combines a `..` traversal with a glob, which the guard cannot expand. This is
+ * a guard against accidental reads, not a sandbox.
  */
 export function siblingRefusal(
   nodeDir: string,
@@ -168,12 +203,12 @@ export function siblingRefusal(
 ): string | undefined {
   if (!isPuzzleNode(nodeDir)) return undefined;
   const allowDerived = options.allowDerived ?? true;
-  const ownDir = path.resolve(nodeDir);
+  const ownDir = realPathOrSelf(nodeDir);
   const ownId = puzzleIdOf(path.basename(ownDir));
   const derived = allowDerived ? derivedPuzzleIds(ownDir) : new Set<string>();
 
   if (toolName === "read" && typeof input?.path === "string") {
-    const absPath = path.resolve(input.path);
+    const absPath = realPathOrSelf(input.path);
     if (relativeInside(ownDir, absPath) !== undefined) return undefined;
     for (const folder of puzzleFoldersInPath(absPath)) {
       if (folder.dir === ownDir) continue;
@@ -184,8 +219,11 @@ export function siblingRefusal(
   }
 
   if (toolName === "bash" && typeof input?.command === "string") {
+    if (input.command.includes("..") && GLOB.test(input.command)) {
+      return "This command combines a `..` traversal with a glob: name every path you read explicitly";
+    }
     for (const match of input.command.matchAll(PUZZLE_IN_COMMAND)) {
-      const id = puzzleIdOf(match[0]);
+      const id = commandPuzzleId(match[0]);
       if (id === ownId) continue;
       if (id !== undefined && derived.has(id)) continue;
       return `This command names ${match[0]}: sibling puzzles are invisible, and a shell command is checked by name only`;
@@ -194,17 +232,33 @@ export function siblingRefusal(
   return undefined;
 }
 
-/** A `reviews/` folder named inside a shell command (both separators, for safety). */
-const REVIEWS_IN_COMMAND = /reviews[/\\]/;
+/** A `reviews` path segment named inside a shell command (not `previews/` or `reviews-notes.md`). */
+const REVIEWS_IN_COMMAND = /(^|[\\/])reviews([\\/\s'";&|]|$)/;
+
+/** An `owners` path segment named inside a shell command (judge verdicts and rulings live there). */
+const OWNERS_IN_COMMAND = /(^|[\\/])owners([\\/\s'";&|]|$)/;
+
+/** Shell operators that chain or nest a command: after one of these the guard no longer knows what runs. */
+const SHELL_OPERATOR = /;|&&|\|\||\||`|\$\(/;
+
+/**
+ * The one command allowed to touch a review: a plain `node …/check-citations.ts`
+ * with no shell operator anywhere. A chained command (`… && echo check-citations.ts`, `…; cat b.md`)
+ * does not qualify, so the escape cannot be borrowed to read something else.
+ */
+function runsCheckCitations(command: string): boolean {
+  const trimmed = command.trimStart();
+  return /^node\b/.test(trimmed) && trimmed.includes("check-citations.ts") && !SHELL_OPERATOR.test(trimmed);
+}
 
 /**
  * Why a reviewer may not run this tool call, or undefined when it may. A
  * reviewer's inputs are the card and the pattern files its brief names, never a
  * review: any `read` of a path with a `reviews` segment — including the
- * reviewer's own `a.md` — is refused, and so is a `bash` command naming
- * `reviews/`, unless the command runs `check-citations.ts` (a reviewer must
- * cite-check its own review). A script that walks the folder is not caught;
- * this is a guard against accidental reads, not a sandbox.
+ * reviewer's own `a.md` — is refused, and so is any `bash` command naming the
+ * segment (`grep -r . workspace/reviews`, `cd workspace/reviews && …`), except a
+ * single `check-citations.ts` run on its own file. A script that walks the
+ * folder is not caught; this is a guard against accidental reads, not a sandbox.
  */
 export function reviewsRefusal(
   toolName: string,
@@ -216,8 +270,31 @@ export function reviewsRefusal(
     }
   }
   if (toolName === "bash" && typeof input?.command === "string") {
-    if (REVIEWS_IN_COMMAND.test(input.command) && !input.command.includes("check-citations.ts")) {
-      return "This command names reviews/: reviewers read no review, except through check-citations.ts";
+    if (REVIEWS_IN_COMMAND.test(input.command) && !runsCheckCitations(input.command)) {
+      return "This command names reviews/: reviewers read no review, except a single check-citations.ts run on their own file";
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Why a reviewer may not read the owners' folder, or undefined when it may. The
+ * phase-2 owner's ledger, rulings and `owners/phase-2/tournament/round-*.json`
+ * hold judge verdicts and ratings, and §5.3 says a reviewer sees no judge
+ * output. A script that reads the folder indirectly is not caught.
+ */
+export function ownersRefusal(
+  toolName: string,
+  input: { path?: unknown; command?: unknown } | undefined,
+): string | undefined {
+  if (toolName === "read" && typeof input?.path === "string") {
+    if (path.resolve(input.path).split(path.sep).includes("owners")) {
+      return `Reading ${input.path} is not allowed: reviewers never read the owners' folder (rulings and judge verdicts)`;
+    }
+  }
+  if (toolName === "bash" && typeof input?.command === "string") {
+    if (OWNERS_IN_COMMAND.test(input.command)) {
+      return "This command names owners/: reviewers never read the owners' folder (rulings and judge verdicts)";
     }
   }
   return undefined;
