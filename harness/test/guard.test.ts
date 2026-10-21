@@ -833,6 +833,69 @@ test("the reviewer extension refuses reviews, siblings and writes outside its ow
   );
 });
 
+test("a backslash-escaped quote is an escaped character, not a quote", (t) => {
+  const { p1 } = puzzleRun(t);
+  const call = reviewerGuard(t, p1);
+
+  // The round-4 bug: an escaped quote opened a phantom quoted span that swallowed
+  // the rest of the command, so a plain `cat reviews/b.md` behind it was allowed.
+  for (const command of [
+    "echo don\\'t; cat reviews/b.md",
+    "echo it\\'s fine && cat reviews/b.md",
+    'echo \\"x; cat reviews/b.md',
+  ]) {
+    assert.equal(reviewsRefusal("bash", { command }) !== undefined, true, `an escaped quote opens no span: ${command}`);
+    assert.equal(call("bash", { command })?.block, true, `refused for the reviewer: ${command}`);
+  }
+  // The splitter alone: a phantom span would fold the tail into a `deepis`
+  // command, which is skipped whole, and the refusal would disappear.
+  for (const command of ["deepis search don\\'t; cat reviews/b.md", 'deepis search \\"x; cat reviews/b.md']) {
+    assert.equal(reviewsRefusal("bash", { command }) !== undefined, true, `the tail is its own command: ${command}`);
+    assert.equal(call("bash", { command })?.block, true, `refused for the reviewer: ${command}`);
+  }
+  // shellWords alone: a phantom span would fold the words into a "quoted phrase".
+  for (const command of ["grep -n don\\'t reviews/b.md", 'grep -n "a\\"b" reviews/b.md']) {
+    assert.equal(reviewsRefusal("bash", { command }) !== undefined, true, `the words stay separate: ${command}`);
+    assert.equal(call("bash", { command })?.block, true, `refused for the reviewer: ${command}`);
+  }
+  // Inside single quotes a backslash is literal, so the next quote closes the span.
+  assert.equal(
+    reviewsRefusal("bash", { command: "echo 'a\\'; cat reviews/b.md" }) !== undefined,
+    true,
+    "a backslash inside single quotes escapes nothing",
+  );
+
+  // Still allowed: quotes and escapes as the shell reads them.
+  for (const command of [
+    'deepis search "it\'s about owners" -n 5',
+    `deepis search 'a "quoted" word' -n 5`,
+    `deepis search "he said \\"owners\\" twice"`,
+    `echo "a \\" b" ; ls workspace`,
+    "cat reviews-notes.md",
+  ]) {
+    assert.equal(reviewsRefusal("bash", { command }), undefined, `allowed: ${command}`);
+    assert.equal(call("bash", { command }), undefined, `allowed for the reviewer: ${command}`);
+  }
+  // A separator inside a quoted query does not split the command: were it split,
+  // the tail would be a non-deepis command naming `owners` and be refused.
+  for (const command of [
+    'deepis search "a | b"',
+    'deepis search "reviews | owners" -n 5',
+    'deepis search "x\\" ; cat reviews/b.md"',
+  ]) {
+    assert.equal(reviewsRefusal("bash", { command }), undefined, `one simple command: ${command}`);
+    assert.equal(call("bash", { command }), undefined, `one simple command for the reviewer: ${command}`);
+  }
+  // An unbalanced trailing quote neither crashes nor frees the guard: the unclosed
+  // word is still a path token, so it is refused; a lone deepis query is allowed.
+  assert.equal(
+    reviewsRefusal("bash", { command: 'cat "reviews/b.md' }) !== undefined,
+    true,
+    "an unclosed quoted word is still a path token",
+  );
+  assert.equal(reviewsRefusal("bash", { command: 'deepis search "unbalanced' }), undefined, "harmless");
+});
+
 test("a reviewer of an evolved puzzle may not read its parent's reviews or folder", (t) => {
   const { p1, evolved } = puzzleRun(t);
   const call = reviewerGuard(t, evolved);

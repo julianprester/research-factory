@@ -238,7 +238,11 @@ const RESTRICTED_SEGMENTS = new Set(["reviews", "owners"]);
 /**
  * Split a shell command into simple commands on `;`, `&&`, `||`, `|` and
  * newlines, respecting single and double quotes, so a separator inside a quoted
- * query does not split. `2>&1` stays inside its command.
+ * query does not split. `2>&1` stays inside its command. Shell escaping is
+ * honoured: outside quotes a backslash and the next character are consumed
+ * verbatim (an escaped separator does not split and an escaped quote opens no
+ * span), inside single quotes a backslash is literal, and inside double quotes
+ * a backslash escapes the next character so `\"` does not close the quote.
  */
 function splitSimpleCommands(command: string): string[] {
   const parts: string[] = [];
@@ -246,9 +250,24 @@ function splitSimpleCommands(command: string): string[] {
   let quote: "'" | '"' | undefined;
   for (let i = 0; i < command.length; i += 1) {
     const char = command[i] ?? "";
-    if (quote !== undefined) {
+    if (quote === "'") {
       current += char;
-      if (char === quote) quote = undefined;
+      if (char === "'") quote = undefined;
+      continue;
+    }
+    if (quote === '"') {
+      if (char === "\\" && i + 1 < command.length) {
+        current += char + (command[i + 1] ?? "");
+        i += 1;
+        continue;
+      }
+      current += char;
+      if (char === '"') quote = undefined;
+      continue;
+    }
+    if (char === "\\" && i + 1 < command.length) {
+      current += char + (command[i + 1] ?? "");
+      i += 1;
       continue;
     }
     if (char === "'" || char === '"') {
@@ -282,19 +301,44 @@ function splitSimpleCommands(command: string): string[] {
 /**
  * The shell words of one simple command. Quotes are removed, and a quoted span
  * stays one word, so `"owners of firms"` is a phrase rather than three words.
+ * Escaping follows the shell: outside quotes `\x` is the ordinary character `x`
+ * (so `don\'t` is one word, not the start of a phantom quoted span), inside
+ * single quotes a backslash is literal, and inside double quotes `\"` is a
+ * quote rather than the end of the span.
  */
 function shellWords(simple: string): string[] {
   const words: string[] = [];
   let current = "";
   let started = false;
   let quote: "'" | '"' | undefined;
-  for (const char of simple) {
-    if (quote !== undefined) {
-      if (char === quote) quote = undefined;
+  for (let i = 0; i < simple.length; i += 1) {
+    const char = simple[i] ?? "";
+    if (quote === "'") {
+      if (char === "'") quote = undefined;
       else {
         current += char;
         started = true;
       }
+      continue;
+    }
+    if (quote === '"') {
+      if (char === "\\" && i + 1 < simple.length) {
+        current += simple[i + 1] ?? "";
+        started = true;
+        i += 1;
+        continue;
+      }
+      if (char === '"') quote = undefined;
+      else {
+        current += char;
+        started = true;
+      }
+      continue;
+    }
+    if (char === "\\" && i + 1 < simple.length) {
+      current += simple[i + 1] ?? "";
+      started = true;
+      i += 1;
       continue;
     }
     if (char === "'" || char === '"') {
