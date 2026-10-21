@@ -51,13 +51,19 @@
 // value must be in its allowed set after normalising, the last non-empty line
 // must be a `Status:` line, and a top-level line in `## Findings` must be a
 // finding (a prose paragraph where a finding belongs is named). Otherwise it
-// bends: unknown `## …` and `### …` sections are ignored, `Rating:`/`Result:`/
-// `Status:` and their values are case-insensitive, emphasis (`*`, `_`, `` ` ``)
-// around keys, values, severity brackets and criteria is dropped, bullets may
-// be `-`, `*`, `+`, `1.` or `1)`, and an indented line under a finding is a
-// continuation appended to that finding's text. Rejecting a review costs a
-// completed adversarial literature search; ignoring extra formatting costs
-// nothing.
+// bends: only an exact level-2 `## ` heading starts a section, so `### …` (and
+// deeper) headings are body text — inside `## Findings` they are skipped and the
+// bullets beneath them still count; unknown `## …` sections are ignored;
+// `Rating:`/`Result:`/`Status:` keys and their values are case-insensitive; a
+// value is the *first word* after the key (emphasis and trailing punctuation
+// stripped, anything else on the line ignored, so `Status: DONE — no concerns`
+// and `Result: not applicable` parse); an empty `## Findings` or
+// `## Phase 3 must check` may say `None.`, `None`, `n/a` or `-`; emphasis (`*`,
+// `_`, `` ` ``) around keys, values, severity brackets and criteria is dropped;
+// bullets may be `-`, `*`, `+`, `1.` or `1)`; and an indented line under a
+// finding is a continuation appended to that finding's text. Rejecting a review
+// costs a completed adversarial literature search; ignoring extra formatting
+// costs nothing.
 //
 // CLI: `node harness/tools/merge-reviews.ts <puzzleNodeDir>` reads
 // `workspace/reviews/a.md` and `b.md`, writes `merged.json` and `merged.md`
@@ -145,8 +151,12 @@ const HEADING: Record<ReviewCriterion | "data-character" | "known-result" | "fin
 };
 const HEADINGS = Object.values(HEADING);
 
-/** Any markdown heading (`#`, `##`, `###`, …): the seven known ones open a section, the rest are ignored. */
-const HEADING_LINE = /^#{1,6}\s/;
+/** Only an exact level-2 `## ` heading starts a section; `###` and deeper are body text. */
+const SECTION_HEADING = /^##\s/;
+/** `###` and deeper: body text, never a section boundary (skipped inside `## Findings`). */
+const SUBHEADING = /^#{3,}\s/;
+/** What a section says when it has nothing in it. */
+const EMPTY_MARKERS = new Set(["none", "n/a", "-"]);
 /** A list marker: `-`, `*`, `+`, `1.` or `1)`, indented or not. */
 const BULLET = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/;
 /** Leading/trailing `*`, `_` or backticks are formatting (`**adequate**`), never content. */
@@ -211,6 +221,55 @@ const STOPWORDS = new Set([
   "would",
 ]);
 
+/** True for a `### …` (or deeper) line: body text, not a section boundary. */
+function isSubheading(text: string): boolean {
+  return SUBHEADING.test(text);
+}
+
+/**
+ * `None.`, `None`, `n/a` or `-` (also as a bullet's whole text) means the
+ * section is empty. Emphasis and a trailing full stop are formatting.
+ */
+function isEmptyMarker(text: string): boolean {
+  const value = unemphasise(text.replace(BULLET, ""))
+    .toLowerCase()
+    .replace(/[.!?]+$/, "")
+    .trim();
+  return EMPTY_MARKERS.has(value);
+}
+
+/**
+ * The first word after a key, with surrounding emphasis and trailing
+ * punctuation stripped: `**Adequate**.` → `Adequate`, `DONE.` → `DONE`.
+ * `Result: not applicable` (a space instead of the hyphen) is combined back
+ * into `not-applicable` when `combineNot` is set.
+ */
+function firstWordValue(rest: string, combineNot: boolean): string {
+  const clean = (token: string): string => {
+    let value = token;
+    for (;;) {
+      const next = value
+        .replace(/^[*_`]+/, "")
+        .replace(/[.,;:!?]+$/, "")
+        .replace(/[*_`]+$/, "")
+        .trim();
+      if (next === value) return value;
+      value = next;
+    }
+  };
+  // `** _ADEQUATE_` splits into an emphasis-only token first: skip those.
+  const tokens = rest.trim().split(/\s+/);
+  let index = 0;
+  while (index < tokens.length && clean(tokens[index] ?? "").length === 0) index++;
+  const first = clean(tokens[index] ?? "");
+  if (combineNot && first.toLowerCase() === "not") {
+    let next = index + 1;
+    while (next < tokens.length && clean(tokens[next] ?? "").length === 0) next++;
+    if (next < tokens.length) return `not-${clean(tokens[next] ?? "")}`;
+  }
+  return first;
+}
+
 function normaliseText(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
@@ -244,19 +303,20 @@ interface Section {
 
 /**
  * Every format heading (three criteria, two checks, findings, Phase 3) with its
- * content. Any other heading ends a section and is otherwise ignored; a known
- * heading that is missing or repeated is a problem. The Status line is never
- * section content: it is the file's last non-empty line, wherever the reviewer
- * put it.
+ * content. Any other level-2 heading ends a section and is otherwise ignored;
+ * `###` and deeper headings are ordinary content lines (the Findings parser
+ * skips them). A known heading that is missing or repeated is a problem. The
+ * Status line is never section content: it is the file's last non-empty line,
+ * wherever the reviewer put it.
  */
 function splitSections(lines: string[], statusIndex: number): { sections: Map<string, Section>; problems: string[] } {
   const problems: string[] = [];
   const starts: { index: number; heading?: string }[] = [];
   for (let index = 0; index < lines.length; index++) {
     const text = (lines[index] ?? "").trim();
-    if (!HEADING_LINE.test(text)) continue;
+    if (!SECTION_HEADING.test(text)) continue;
     if (HEADINGS.includes(text)) starts.push({ index, heading: text });
-    // Unknown sections (`## Summary`, `### Detail`) are ignored: extra prose in a
+    // Unknown `## …` sections (`## Summary`) are ignored: extra prose in a
     // completed review must not cost the owner a re-run of the reviewer.
     else starts.push({ index });
   }
@@ -303,7 +363,8 @@ function firstLineValue(
   allowed: readonly string[],
   problems: string[],
 ): string | undefined {
-  const first = section.lines[0];
+  // A `### …` sub-heading before the value is body text, not the value line.
+  const first = section.lines.find((line) => !isSubheading(line.text));
   if (first === undefined) {
     problems.push(`${section.heading} has no ${JSON.stringify(`${keyword}:`)} line`);
     return undefined;
@@ -316,7 +377,7 @@ function firstLineValue(
     );
     return undefined;
   }
-  const raw = unemphasise((parsed[1] as string).trim());
+  const raw = firstWordValue(parsed[1] as string, keyword === "Result");
   const value = canonical(allowed, raw);
   if (value === undefined) {
     const what = keyword === "Rating" ? "rating" : "result";
@@ -378,7 +439,7 @@ function parseDetailed(markdown: string): Parsed {
   if (statusLine === null) {
     problems.push(`the last line is not a Status: line (got ${JSON.stringify(last)})`);
   } else {
-    const raw = unemphasise((statusLine[1] as string).trim());
+    const raw = firstWordValue(statusLine[1] as string, false);
     const value = canonical(STATUSES, raw);
     if (value === undefined) {
       problems.push(`the last line has an invalid status ${JSON.stringify(raw)} (expected ${STATUSES.join("|")})`);
@@ -403,10 +464,19 @@ function parseDetailed(markdown: string): Parsed {
   const findings: Finding[] = [];
   let current: Finding | undefined;
   for (const line of sections.get(HEADING.findings)?.lines ?? []) {
+    if (isSubheading(line.text)) {
+      // `### Finding 1` is a label, not a finding: skip it, keep the bullets under it.
+      current = undefined;
+      continue;
+    }
     const parsed = parseFinding(line.text);
     if (parsed !== null) {
       findings.push(parsed);
       current = parsed;
+      continue;
+    }
+    if (isEmptyMarker(line.text)) {
+      current = undefined;
       continue;
     }
     const indented = /^[ \t]/.test(line.raw);
@@ -424,6 +494,7 @@ function parseDetailed(markdown: string): Parsed {
 
   const phase3MustCheck: string[] = [];
   for (const line of sections.get(HEADING.phase3)?.lines ?? []) {
+    if (isSubheading(line.text) || isEmptyMarker(line.text)) continue;
     if (BULLET.exec(line.raw) === null) {
       problems.push(`${HEADING.phase3} line ${line.number} is not a list item: ${JSON.stringify(line.text)}`);
       continue;
@@ -433,6 +504,7 @@ function parseDetailed(markdown: string): Parsed {
       problems.push(`${HEADING.phase3} line ${line.number} is an empty list item`);
       continue;
     }
+    if (isEmptyMarker(text)) continue;
     phase3MustCheck.push(text);
   }
 

@@ -510,7 +510,8 @@ test("unknown sections are ignored wherever they sit", () => {
   );
   assert.deepEqual(mustParse(extraBefore).findings, []);
 
-  const extraSub = review().replace("## Phase 3 must check", "### Detail\nA sub-heading inside a section.\n\n## Phase 3 must check");
+  // A `###` sub-heading is body text of the section it sits in, not a boundary.
+  const extraSub = review().replace("## Plausibility", "### Detail\nA sub-heading's prose stays in Fit.\n\n## Plausibility");
   assert.deepEqual(mustParse(extraSub).criteria, { fit: "adequate", plausibility: "adequate", relevance: "adequate" });
 
   const extraLast = review().replace("Status: DONE", "## Notes\nFree prose at the end, before the status.\n\nStatus: DONE");
@@ -599,6 +600,128 @@ test("merged.md notes DONE_WITH_CONCERNS and says None. when there are no findin
   assert.match(markdown, /Review a is DONE_WITH_CONCERNS/, markdown);
   assert.match(markdown, /read its findings/i, markdown);
   assert.match(markdown, /None\./, markdown);
+});
+
+
+test("### sub-headings inside ## Findings are skipped and the bullets beneath them count", () => {
+  const parsed = mustParse(
+    review({
+      findings: [
+        "### Finding 1",
+        "- [blocking] plausibility: existing theory already explains the pattern",
+        "### Finding 2",
+        "- [minor] fit: the worst fits are unanswered",
+      ],
+    }),
+  );
+  assert.deepEqual(
+    parsed.findings.map((finding) => `${finding.severity}|${finding.criterion}|${finding.text}`),
+    ["blocking|plausibility|existing theory already explains the pattern", "minor|fit|the worst fits are unanswered"],
+  );
+});
+
+test("a finding under a ### sub-heading still drives the merged flags and ordering", () => {
+  const a = mustParse(
+    review({
+      plausibility: "fails",
+      findings: [
+        "### Finding 1",
+        "- [blocking] plausibility: existing theory already explains the pattern",
+        "- [minor] fit: the worst fits are unanswered",
+      ],
+    }),
+  );
+  const b = mustParse(
+    review({ plausibility: "fails", findings: ["- [blocking] plausibility: existing theory already explains the pattern"] }),
+  );
+  const merged = mergeReviews(a, b);
+  assert.equal(merged.flags.breakdown, true);
+  assert.deepEqual(
+    merged.findings.map((finding) => `${finding.severity}:${finding.confidence}`),
+    ["blocking:high", "minor:single-reviewer"],
+  );
+});
+
+test("a ### sub-heading does not end a criterion section", () => {
+  const before = mustParse(
+    review().replace("## Fit\nRating: adequate", "## Fit\n### Why this rating\nRating: adequate"),
+  );
+  assert.equal(before.criteria.fit, "adequate");
+
+  const after = mustParse(
+    review().replace(
+      "Rating: adequate\nIt follows the card's numbers.",
+      "Rating: adequate\n### Detail\nMore prose, still inside Fit.",
+    ),
+  );
+  assert.equal(after.criteria.fit, "adequate");
+  assert.deepEqual(after.findings, []);
+});
+
+test("a ### sub-heading inside Phase 3 must check is skipped, not an error", () => {
+  const parsed = mustParse(review({ phase3: ["### Questions", "- whether the silence is a rule"] }));
+  assert.deepEqual(parsed.phase3MustCheck, ["whether the silence is a rule"]);
+});
+
+test("None., None, n/a and - mean an empty Findings or Phase 3 section", () => {
+  for (const marker of ["None.", "None", "n/a", "-"]) {
+    const parsed = mustParse(review({ findings: [marker], phase3: [marker] }));
+    assert.deepEqual(parsed.findings, [], marker);
+    assert.deepEqual(parsed.phase3MustCheck, [], marker);
+  }
+
+  const bulleted = mustParse(review({ findings: ["- None."], phase3: ["* n/a", "- None"] }));
+  assert.deepEqual(bulleted.findings, []);
+  assert.deepEqual(bulleted.phase3MustCheck, []);
+
+  // A marker after a real finding adds nothing and is not a continuation of it.
+  const mixed = mustParse(review({ findings: ["- [minor] fit: the worst fits are unanswered", "None."] }));
+  assert.deepEqual(mixed.findings.map((finding) => finding.text), ["the worst fits are unanswered"]);
+});
+
+test("a Rating/Result/Status value is its first word; trailing text and punctuation are ignored", () => {
+  const parsed = mustParse(
+    review({
+      fit: "Adequate — because the card's numbers line up",
+      plausibility: "**Weak**: the rival is not named",
+      relevance: "adequate.",
+      dataCharacter: "ok — no behaviour claim",
+      knownResult: "not-applicable; no caveat applies",
+      status: "DONE — no blocking concerns",
+    }),
+  );
+  assert.deepEqual(parsed.criteria, { fit: "adequate", plausibility: "weak", relevance: "adequate" });
+  assert.equal(parsed.dataCharacter, "ok");
+  assert.equal(parsed.knownResult, "not-applicable");
+  assert.equal(parsed.status, "DONE");
+});
+
+test("Result: not applicable with a space is not-applicable", () => {
+  assert.equal(mustParse(review({ knownResult: "not applicable" })).knownResult, "not-applicable");
+  assert.equal(mustParse(review({ knownResult: "**not** applicable" })).knownResult, "not-applicable");
+  assert.equal(mustParse(review({ knownResult: "Not Applicable." })).knownResult, "not-applicable");
+});
+
+test("a first word outside the allowed set is still refused, even with trailing text", () => {
+  const cases: [string, RegExp][] = [
+    [review({ fit: "excellent — the puzzle is marvellous" }), /invalid rating "excellent"/],
+    [review({ dataCharacter: "mostly ok" }), /invalid result "mostly"/],
+    [review({ knownResult: "violated; the caveat applies" }), /invalid result "violated"/],
+    [review({ status: "DONEISH" }), /invalid status "DONEISH"/],
+  ];
+  for (const [markdown, pattern] of cases) {
+    assert.equal(parseReview(markdown), null, markdown);
+    assert.ok(
+      reviewProblems(markdown).some((problem) => pattern.test(problem)),
+      `${pattern}: ${reviewProblems(markdown).join("; ")}`,
+    );
+  }
+});
+
+test("the CLI accepts a review whose Findings and Phase 3 say None.", (t) => {
+  const nodeDir = puzzleNode(t, review({ findings: ["None."], phase3: ["None."] }), review());
+  const result = spawnSync(process.execPath, [MERGE_REVIEWS, nodeDir], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
 test("the CLI treats a bad invocation as a usage error", (t) => {
