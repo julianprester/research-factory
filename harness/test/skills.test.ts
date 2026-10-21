@@ -19,11 +19,52 @@ const ROLES = ["prep-profile", "prep-expectations", "prep-assemble", "deepis"];
 /** The role files Phase 1's briefs name on their Skill line. */
 const PHASE1_ROLES = ["scan-expectation", "scan-blind"];
 
+/** The role files Phase 2's briefs name on their Skill line. */
+const PHASE2_ROLES = ["puzzle-generate", "puzzle-review", "puzzle-evolve"];
+
 /** The pattern card's headings, as check-pattern.ts checks them. */
 const CARD_HEADINGS = ["## Measure", "## Result", "## Verdict", "## Robustness", "## Worst fits", "## Deviations"];
 
+/** The puzzle card's headings, as check-puzzle.ts checks them. */
+const PUZZLE_HEADINGS = [
+  "## Pattern",
+  "## Violated expectation",
+  "## A case of",
+  "## Why it matters",
+  "## Admissible explanations",
+  "## Limits",
+  "## Literature log",
+];
+
+/** The review's headings, as merge-reviews.ts checks them. */
+const REVIEW_HEADINGS = [
+  "## Fit",
+  "## Plausibility",
+  "## Relevance",
+  "## Data-character check",
+  "## Known-result check",
+  "## Findings",
+  "## Phase 3 must check",
+];
+
+/** The book's three evaluation questions, as docs/abduction.md states them. */
+const BOOK_QUESTIONS = [
+  "Are the theoretical claims supported by the empirical materials?",
+  "Are the theoretical claims stronger than competing theories?",
+  "Do the theorizations matter in the broader intellectual community?",
+];
+
 function read(relative: string): string {
   return readFileSync(path.join(HARNESS_ROOT, relative), "utf8");
+}
+
+/** Curly quotes to ASCII, any run of whitespace to one space. */
+function normalise(text: string): string {
+  return text
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /** The frontmatter's `key: value` pairs, with surrounding quotes removed. */
@@ -403,10 +444,11 @@ test("phase-1 and its roles only point at harness/tools files that exist", () =>
   for (const file of named) assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
 });
 
-test("DEFAULT_CONFIG configures Phases 0 and 1", () => {
+test("DEFAULT_CONFIG configures Phases 0, 1 and 2", () => {
   assert.deepEqual(DEFAULT_CONFIG.phases, {
     "0": "harness/skills/phase-0",
     "1": "harness/skills/phase-1",
+    "2": "harness/skills/phase-2",
   });
   for (const [phase, skill] of Object.entries(DEFAULT_CONFIG.phases)) {
     assert.ok(existsSync(path.join(HARNESS_ROOT, skill, "SKILL.md")), `phase ${phase}'s skill ${skill} exists`);
@@ -435,4 +477,189 @@ test("the assembler marks pre-known and inferred entries in summary.md for Phase
   const markdown = read("harness/skills/roles/prep-assemble.md").replace(/\s+/g, " ");
   assert.match(markdown, /\*\*Pre-known contradicted\*\* or \*\*Inferred\*\*/);
   assert.match(markdown, /closes a pre-known entry that is measured `violated` as `known`/);
+});
+
+test("phase-2 has the phase-2 frontmatter and describes the puzzle workflow", () => {
+  const file = "harness/skills/phase-2/SKILL.md";
+  assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
+  const markdown = read(file);
+
+  const fields = frontmatter(markdown);
+  assert.equal(fields.name, "phase-2");
+  assert.match(fields.description ?? "", /Phase 2/);
+  assert.match(fields.description ?? "", /puzzles/);
+
+  const body = markdown.slice(markdown.indexOf("\n---\n") + 5);
+  // The job list, generation, reviews, the round tool and promotion are the
+  // workflow's spine; a skill that omits one sends the owner improvising.
+  for (const needed of [
+    "tree_list({ phase: 2 })",
+    'tree_update({ nodeId: "<T..>", status: "input" })',
+    'tree_create({ parentId: "<T..>", title: "<lens>: <short title>" })',
+    "judge_round",
+    "check_duplicates",
+    "promote",
+    "merge-reviews.ts",
+    "check-puzzle.ts",
+    "PARTIAL",
+    "identical arguments",
+    "pairs",
+    "STOP",
+    "input",
+    "parked",
+    "submitted",
+    "Pattern request:",
+    "Caveat:",
+    "meta-review",
+    "ctc-reviewer",
+    "brief-review.md",
+    "Ruling:",
+  ]) {
+    assert.ok(body.includes(needed), `the body mentions ${needed}`);
+  }
+  // The two calls the barrier will not wait for, and the independence rule.
+  assert.match(body, /both reviewers of a puzzle concurrently/i, "the reviewers are dispatched concurrently");
+  assert.match(body, /no analysis/i, "Phase 2 runs no analysis");
+  assert.match(body, /never shown to the judge/i, "the meta-review never reaches the judge");
+});
+
+test("phase-2 puts the ledger, the closing call and the STOP latch in order", () => {
+  const body = read("harness/skills/phase-2/SKILL.md").replace(/\s+/g, " ");
+  assert.match(body, /ledger line (immediately )?before/i, "every ledger line goes before its tree/tool call");
+  assert.match(body, /as the \*\*last\*\* tree call/i, "the pattern nodes are closed by the last tree call");
+  assert.match(body, /never create an evolution child after STOP/i, "no evolved puzzle after STOP");
+  assert.match(body, /never call `judge_round` again/i, "no second judge_round after STOP");
+  assert.match(body, /repeat it with the identical arguments/i, "a PARTIAL round is resumed unchanged");
+  assert.match(body, /never write or edit anything under `owners\/phase-2\/tournament\/`/i, "the tournament files are tools-only");
+  assert.match(body, /Never promote around `promote`/i, "promotion only through the gated tool");
+});
+
+test("every Phase 2 role file exists and is named by absolute path in the skill", () => {
+  const body = read("harness/skills/phase-2/SKILL.md");
+  for (const role of PHASE2_ROLES) {
+    const file = path.join(SKILLS, "roles", `${role}.md`);
+    assert.ok(existsSync(file), `${file} exists`);
+    const markdown = readFileSync(file, "utf8");
+    assert.match(frontmatter(markdown).name ?? "", new RegExp(role), `${role}.md names itself`);
+    assert.ok(body.includes(file), `phase-2's Skill lines use the absolute path ${file}`);
+  }
+});
+
+test("the Phase 2 skills only name tool and skill paths that exist", () => {
+  const files = ["harness/skills/phase-2/SKILL.md", ...PHASE2_ROLES.map((role) => `harness/skills/roles/${role}.md`)];
+  const named = new Set<string>();
+  for (const file of files) {
+    for (const match of read(file).matchAll(/harness\/(?:tools|skills)\/[\w./-]+\.(?:ts|md)/g)) named.add(match[0]);
+  }
+  for (const file of [
+    "harness/tools/check-puzzle.ts",
+    "harness/tools/merge-reviews.ts",
+    "harness/tools/check-citations.ts",
+  ]) {
+    assert.ok(named.has(file), `a Phase 2 skill names ${file}`);
+  }
+  for (const file of named) assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
+});
+
+test("puzzle-generate and puzzle-evolve teach the seven-heading card and its header lines", () => {
+  for (const role of ["puzzle-generate", "puzzle-evolve"]) {
+    const markdown = read(`harness/skills/roles/${role}.md`);
+    for (const needed of [...PUZZLE_HEADINGS, "Lens:", "Round:"]) {
+      assert.ok(markdown.includes(needed), `${role}.md mentions ${needed}`);
+    }
+  }
+  const evolve = read("harness/skills/roles/puzzle-evolve.md");
+  for (const needed of ["Derived from:", "Move:", "grounding", "simplification", "out-of-the-box", "combination"]) {
+    assert.ok(evolve.includes(needed), `puzzle-evolve.md mentions ${needed}`);
+  }
+});
+
+test("puzzle-review teaches every review heading and the rating lines", () => {
+  const markdown = read("harness/skills/roles/puzzle-review.md");
+  for (const needed of [...REVIEW_HEADINGS, "Rating:", "Result:", "Status:"]) {
+    assert.ok(markdown.includes(needed), `puzzle-review.md mentions ${needed}`);
+  }
+});
+
+test("the three book questions appear verbatim in docs/abduction.md and in puzzle-review.md", () => {
+  const book = normalise(read("docs/abduction.md"));
+  const review = normalise(read("harness/skills/roles/puzzle-review.md"));
+  for (const question of BOOK_QUESTIONS) {
+    assert.ok(book.includes(normalise(question)), `the book states: ${question}`);
+    assert.ok(review.includes(normalise(question)), `puzzle-review.md quotes: ${question}`);
+  }
+});
+
+test("puzzle-review forbids analysis and keeps the reviewer independent", () => {
+  const prose = read("harness/skills/roles/puzzle-review.md").replace(/\s+/g, " ");
+  for (const needed of [
+    "No analysis",
+    "no scripts",
+    "no dataset reads",
+    "Phase 3 must check:",
+    "strongest rival account",
+    "existing theory already explains",
+    "Data-character check",
+    "Known-result check",
+    "ALL findings only under `## Findings`",
+    "never read another review",
+    "write tool",
+    "spell paths in full",
+    "without pipes",
+    "same severity",
+  ]) {
+    assert.ok(prose.includes(needed), `puzzle-review.md says ${needed}`);
+  }
+  assert.match(prose, /plausibility `fails`/i, "a breakdown is plausibility fails");
+  assert.match(prose, /never read under `owners\/`/i, "a reviewer never reads owner files");
+});
+
+test("puzzle-generate grounds the card and parks when no puzzle exists", () => {
+  const prose = read("harness/skills/roles/puzzle-generate.md").replace(/\s+/g, " ");
+  for (const needed of [
+    "RECOMMEND_PARK",
+    "check-citations",
+    "data-character.md",
+    "glossary.md",
+    "never the dataset",
+    "No scripts, no counts",
+    "known result",
+    "T04",
+    "T10",
+  ]) {
+    assert.ok(prose.includes(needed), `puzzle-generate.md says ${needed}`);
+  }
+});
+
+test("puzzle-evolve reads the parent's card and merge, and freezes the parent", () => {
+  const prose = read("harness/skills/roles/puzzle-evolve.md").replace(/\s+/g, " ");
+  for (const needed of [
+    "workspace/puzzle.md",
+    "workspace/reviews/merged.md",
+    "meta-review",
+    "parent is frozen",
+    "combination",
+    "check-citations",
+    "No scripts, no counts",
+  ]) {
+    assert.ok(prose.includes(needed), `puzzle-evolve.md says ${needed}`);
+  }
+});
+
+test("the design spec follows the Phase 2 design's §10 edits", () => {
+  const spec = read("docs/superpowers/specs/2026-10-12-ctc-research-factory-design.md");
+  const phase2 = spec.slice(spec.indexOf("### Phase 2: Puzzles"), spec.indexOf("### Phase 3: Explanations"));
+  for (const criterion of ["fit", "plausibility", "relevance"]) {
+    assert.match(phase2, new RegExp(criterion), `§6 Phase 2 names ${criterion}`);
+  }
+  assert.match(phase2, /Tavory & Timmermans/, "§6 Phase 2 names the book's criteria");
+  assert.match(phase2, /Phase 1's evidence/, "step 2 judges fit against Phase 1's evidence");
+  assert.match(phase2, /may not reopen Phase 1/, "step 5 forbids reopening Phase 1");
+  assert.match(phase2, /no fixed number/i, "promotion has no fixed number");
+
+  const tournament = spec.slice(spec.indexOf("### 7.1 Tournament mechanics"), spec.indexOf("### 7.2 Sibling distinctness"));
+  assert.match(tournament, /judgeModel/, "§7.1 names the judgeModel config key");
+  assert.match(tournament, /`promote` tool/, "§7.1 says promotion is code-gated through promote");
+  assert.match(tournament, /three-part stopping rule/, "§7.1 names the plateau/stopping rule");
+  assert.match(tournament, /fit, plausibility and relevance/, "§7.1 uses the three criteria for puzzles");
 });
