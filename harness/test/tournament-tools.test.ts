@@ -22,7 +22,14 @@ import ownerExtension from "../owner-extension.ts";
 import { createChild, findNode, initRun, updateNode } from "../tree.ts";
 import type { Transport } from "../tournament/judge.ts";
 import { appendRound, readStop } from "../tournament/stop.ts";
-import { checkDuplicates, judgeRound, setTransportForTests, tournamentDir } from "../tournament/tools.ts";
+import {
+  checkDuplicates,
+  judgeRound,
+  setBudgetForTests,
+  setTransportFactoryForTests,
+  setTransportForTests,
+  tournamentDir,
+} from "../tournament/tools.ts";
 
 const STRENGTH = /SIDE (\S+) strength (-?[0-9.]+)/g;
 
@@ -405,6 +412,131 @@ test("check_duplicates needs two ids and a round that ranked them", async (t) =>
   );
 });
 
+test("round 1 resumes with the same forced pairs and records the started head-to-head", async (t) => {
+  const fixture = phase2Run(t, 9);
+  await judgeRound(fixture.run, { round: 0 }, { transport: strengthJudge(), bootstrap: 20 });
+  const child = createChild(fixture.run, "T01", "grounding: crowd", "owner-p2", ["P01", "P02"]);
+  addDraft(fixture.run, child.id, 99);
+  updateNode(fixture.run, child.id, { status: "submitted" }, "owner-p2");
+  const entrants = fixture.ids.slice(0, 6);
+
+  const partial = await judgeRound(
+    fixture.run,
+    { round: 1, entrants, pairs: [{ child: child.id, parent: "P01" }] },
+    { transport: strengthJudge(), bootstrap: 20, budgetMs: 0 },
+  );
+  assert.ok(partial.startsWith("PARTIAL — call judge_round again with the same arguments to resume"), partial);
+  assert.ok(existsSync(path.join(fixture.tournament, "round-1.matches.jsonl")), "the forced batch landed");
+
+  const complete = await judgeRound(
+    fixture.run,
+    { round: 1, entrants, pairs: [{ child: child.id, parent: "P01" }] },
+    { transport: strengthJudge(), bootstrap: 20 },
+  );
+  assert.match(complete, /^COMPLETE/);
+  const rounds = readRounds(fixture.tournament);
+  const round1 = rounds.find((entry) => entry.summary.round === 1);
+  assert.deepEqual(round1?.summary.children, [{ child: child.id, parent: "P01", beatParent: true }]);
+});
+
+test("a round-1 resume with a different parent is refused before it judges anything", async (t) => {
+  const fixture = phase2Run(t, 9);
+  await judgeRound(fixture.run, { round: 0 }, { transport: strengthJudge(), bootstrap: 20 });
+  const child = createChild(fixture.run, "T01", "grounding: crowd", "owner-p2", ["P01", "P02"]);
+  addDraft(fixture.run, child.id, 99);
+  updateNode(fixture.run, child.id, { status: "submitted" }, "owner-p2");
+  const entrants = fixture.ids.slice(0, 6);
+
+  await judgeRound(
+    fixture.run,
+    { round: 1, entrants, pairs: [{ child: child.id, parent: "P01" }] },
+    { transport: strengthJudge(), bootstrap: 20, budgetMs: 0 },
+  );
+  const logBefore = readLog(fixture.tournament, 1).length;
+
+  const message = await rejectMessage(
+    judgeRound(
+      fixture.run,
+      { round: 1, entrants, pairs: [{ child: child.id, parent: "P02" }] },
+      { transport: strengthJudge(), bootstrap: 20 },
+    ),
+  );
+  assert.match(message, new RegExp(`started with child ${child.id} against parent P01`));
+  assert.match(message, /resume with the same pairs/);
+  assert.equal(readLog(fixture.tournament, 1).length, logBefore, "the refused resume judged nothing");
+  assert.ok(!readRounds(fixture.tournament).some((entry) => entry.summary.round === 1), "and recorded nothing");
+});
+
+test("a round without children is refused: it would latch STOP with no warning", async (t) => {
+  const fixture = phase2Run(t, 9);
+  appendRound(path.join(fixture.tournament, "rounds.json"), { round: 0, top: fixture.ids, children: [] });
+
+  const message = await rejectMessage(
+    judgeRound(
+      fixture.run,
+      { round: 1, entrants: fixture.ids.slice(0, 6), pairs: [] },
+      { transport: strengthJudge() },
+    ),
+  );
+  assert.match(message, /at least one child\/parent pair/);
+  assert.match(message, /latches STOP/);
+});
+
+test("a forced pair whose ids already met in an earlier round is refused, naming the pair", async (t) => {
+  const fixture = phase2Run(t, 9);
+  // The child exists before round 0, so it and P01 are both in the first round's
+  // match log: naming them as a round-1 head-to-head would re-use an old pair.
+  const child = createChild(fixture.run, "T01", "grounding: crowd", "owner-p2", ["P01"]);
+  addDraft(fixture.run, child.id, 99);
+  updateNode(fixture.run, child.id, { status: "submitted" }, "owner-p2");
+  await judgeRound(fixture.run, { round: 0 }, { transport: strengthJudge(), bootstrap: 20 });
+
+  const message = await rejectMessage(
+    judgeRound(
+      fixture.run,
+      { round: 1, entrants: fixture.ids.slice(0, 6), pairs: [{ child: child.id, parent: "P01" }] },
+      { transport: strengthJudge(), bootstrap: 20 },
+    ),
+  );
+  assert.match(message, new RegExp(`child ${child.id} and parent P01 already met`));
+  assert.match(message, /old verdict would not be replayed/);
+});
+
+test("an engine failure (a held round lock) carries the judge_round prefix", async (t) => {
+  const fixture = phase2Run(t, 9);
+  const lock = path.join(fixture.tournament, "round-0.lock");
+  mkdirSync(lock, { recursive: true });
+  writeFileSync(path.join(lock, "pid"), String(process.pid));
+
+  const message = await rejectMessage(judgeRound(fixture.run, { round: 0 }, { transport: strengthJudge() }));
+  assert.match(message, /^judge_round: /);
+  assert.match(message, /another round is already running/);
+});
+
+test("check_duplicates orients a re-checked pair by the latest scores, keeping one entry", async (t) => {
+  const fixture = phase2Run(t, 4);
+  const roundFile = path.join(fixture.tournament, "round-0.json");
+  const stored = (scores: Record<string, number>): string =>
+    JSON.stringify({ round: 0, matches: [], fit: { scores, lower: {}, upper: {} }, top: fixture.ids, played: {} });
+
+  write(roundFile, stored({ P01: 1, P02: 0, P03: -1, P04: -2 }));
+  await checkDuplicates(fixture.run, { ids: ["P01", "P02"] }, { transport: sameJudge() });
+  const file = path.join(fixture.tournament, "distinct.json");
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).duplicates, [{ keep: "P01", drop: "P02" }]);
+
+  // A later round flips the ranking: the fresh verdict replaces the old
+  // orientation instead of sitting beside it.
+  write(roundFile, stored({ P01: 0, P02: 1, P03: -1, P04: -2 }));
+  await checkDuplicates(fixture.run, { ids: ["P01", "P02"] }, { transport: sameJudge() });
+  const flipped = JSON.parse(readFileSync(file, "utf8"));
+  assert.deepEqual(flipped.duplicates, [{ keep: "P02", drop: "P01" }]);
+  assert.equal(flipped.duplicates.length, 1, "one entry per unordered pair");
+
+  const bytes = readFileSync(file, "utf8");
+  await checkDuplicates(fixture.run, { ids: ["P02", "P01"] }, { transport: sameJudge() });
+  assert.equal(readFileSync(file, "utf8"), bytes, "a re-call is idempotent at the same scores");
+});
+
 interface CapturedTool {
   name: string;
   execute(toolCallId: string, params: Record<string, unknown>): Promise<{ content: { type: string; text: string }[] }>;
@@ -425,8 +557,8 @@ function fakePi(): { pi: { registerTool(tool: CapturedTool): void; on(): void };
   };
 }
 
-test("the owner extension registers judge_round and check_duplicates as phase-2 tools only", async (t) => {
-  const fixture = phase2Run(t, 2);
+test("the registered judge_round uses the hooked transport and a tiny test budget", async (t) => {
+  const fixture = phase2Run(t, 7);
   const { pi, tools } = fakePi();
 
   const savedRun = process.env.CTC_RUN_DIR;
@@ -437,9 +569,19 @@ test("the owner extension registers judge_round and check_duplicates as phase-2 
     if (savedPhase === undefined) delete process.env.CTC_PHASE;
     else process.env.CTC_PHASE = savedPhase;
     setTransportForTests(undefined);
+    setTransportFactoryForTests(undefined);
+    setBudgetForTests(undefined);
   });
   process.env.CTC_RUN_DIR = fixture.run;
   setTransportForTests(strengthJudge());
+  setBudgetForTests(0);
+  // If the hook is not consulted, the factory throws and this test fails fast:
+  // deleting the hook line can no longer leave the suite green.
+  let factoryCalls = 0;
+  setTransportFactoryForTests(() => {
+    factoryCalls++;
+    throw new Error("the transport factory must not be used when the hook is set");
+  });
   ownerExtension(pi);
 
   const judge = tools.get("judge_round");
@@ -452,6 +594,35 @@ test("the owner extension registers judge_round and check_duplicates as phase-2 
   await assert.rejects(() => duplicates.execute("c2", { ids: ["P01", "P02"] }), /check_duplicates is a phase-2 tool and you own P1/);
 
   process.env.CTC_PHASE = "2";
-  await assert.rejects(() => judge.execute("c3", { round: 0 }), /at least 7/);
+  const answer = await judge.execute("c3", { round: 0 });
+  assert.ok(
+    answer.content[0]?.text.startsWith("PARTIAL — call judge_round again with the same arguments to resume"),
+    `the registered tool reached the module and the hooked judge: ${answer.content[0]?.text}`,
+  );
+  assert.equal(factoryCalls, 0, "the hook wins over the factory");
   await assert.rejects(() => duplicates.execute("c4", { ids: ["P01"] }), /at least 2/);
+});
+
+test("the default transport is built from the run's judgeModel, falling back to model", async (t) => {
+  const fixture = phase2Run(t, 7);
+  write(
+    path.join(fixture.run, "config.json"),
+    JSON.stringify({ model: "worker/model", judgeModel: "judge/model", phases: {} }),
+  );
+  const seen: string[] = [];
+  setTransportForTests(undefined);
+  setTransportFactoryForTests((model) => {
+    seen.push(model);
+    return strengthJudge();
+  });
+  t.after(() => setTransportFactoryForTests(undefined));
+
+  const first = await judgeRound(fixture.run, { round: 0 }, { budgetMs: 0, bootstrap: 20 });
+  assert.match(first, /^PARTIAL/);
+  assert.deepEqual(seen, ["judge/model"], "the judge model, not the worker model");
+
+  write(path.join(fixture.run, "config.json"), JSON.stringify({ model: "worker/model", phases: {} }));
+  const second = await judgeRound(fixture.run, { round: 0 }, { budgetMs: 0, bootstrap: 20 });
+  assert.match(second, /^PARTIAL/);
+  assert.deepEqual(seen, ["judge/model", "worker/model"], "an absent judgeModel falls back to model");
 });

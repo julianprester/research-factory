@@ -11,7 +11,7 @@ import * as path from "node:path";
 import { Type } from "typebox";
 
 import { ownerMayWrite } from "./guard.ts";
-import { checkDuplicates, judgeRound } from "./tournament/tools.ts";
+import { checkDuplicates, judgeRound, type CheckDuplicatesInput, type JudgeRoundInput } from "./tournament/tools.ts";
 import { createChild, findNode, listNodes, updateNode, type NodeRef } from "./tree.ts";
 
 interface ToolCallEventLike {
@@ -84,16 +84,6 @@ interface TreeUpdateInput {
   status?: string;
   phase?: number;
   note?: string;
-}
-
-interface JudgeRoundInput {
-  round: number;
-  pairs?: { child: string; parent: string }[];
-  entrants?: string[];
-}
-
-interface CheckDuplicatesInput {
-  ids: string[];
 }
 
 function env(name: string): string {

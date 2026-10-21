@@ -71,37 +71,140 @@ export interface CheckDuplicatesInput {
 /**
  * The injected seams. `transport` is the judge; tests pass a fake. `budgetMs` and
  * `bootstrap` exist so a test can make a real round cheap: production uses the
- * 8-minute budget and the engine's 200 bootstrap resamples. `now` is reserved for
- * callers that need a deterministic clock.
+ * 8-minute budget and the engine's 200 bootstrap resamples.
  */
 export interface ToolDeps {
   transport?: Transport;
-  now?: () => number;
   budgetMs?: number;
   bootstrap?: number;
 }
 
+/** Builds the real transport for a model; tests replace it to observe `judgeModel`. */
+type TransportFactory = (model: string) => Transport;
+
+const defaultTransportFactory: TransportFactory = (model) => piTransport(model);
+
 let testTransport: Transport | undefined;
+let testTransportFactory: TransportFactory = defaultTransportFactory;
+let testBudgetMs: number | undefined;
 
 /**
- * Install the transport the extension's tools should use instead of
- * `piTransport(judgeModel)`. Tests call it with a fake and clear it afterwards.
- * It only affects the extension path; a caller passing `ToolDeps.transport`
- * always wins.
+ * Install the transport the extension's tools should use instead of building one
+ * with `piTransport`. Tests call it with a fake and clear it afterwards. It only
+ * affects the extension path; a caller passing `ToolDeps.transport` always wins.
  */
 export function setTransportForTests(transport: Transport | undefined): void {
   testTransport = transport;
 }
 
+/**
+ * Replace the transport factory (default `piTransport`). This is how a test
+ * observes which model the default path passes: the run's `judgeModel`, falling
+ * back to `model`. Clear it with `undefined` to restore `piTransport`.
+ */
+export function setTransportFactoryForTests(factory: TransportFactory | undefined): void {
+  testTransportFactory = factory ?? defaultTransportFactory;
+}
+
+/**
+ * Override the round budget for extension-path calls (the tool registrations do
+ * not pass `ToolDeps`). Tests use 0 so a registered `judge_round` returns PARTIAL
+ * after one batch instead of judging a whole round.
+ */
+export function setBudgetForTests(ms: number | undefined): void {
+  testBudgetMs = ms;
+}
+
 function transportFor(runDir: string, deps: ToolDeps): Transport {
   if (deps.transport !== undefined) return deps.transport;
+  // The hook comes before the factory on purpose: a test that installs a fake
+  // must be in control even when it also spies on the factory.
   if (testTransport !== undefined) return testTransport;
   const config = readConfig(runDir);
-  return piTransport(config.judgeModel ?? config.model);
+  return testTransportFactory(config.judgeModel ?? config.model);
 }
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** One tool's error text, prefixed exactly once. */
+function prefixedError(tool: string, error: unknown): Error {
+  const text = message(error);
+  return new Error(text.startsWith(`${tool}:`) ? text : `${tool}: ${text}`);
+}
+
+/** A pair key that ignores order: two ids met or not, whichever was shown first. */
+function unorderedPairKey(left: string, right: string): string {
+  return left < right ? `${left}\u0000${right}` : `${right}\u0000${left}`;
+}
+
+/**
+ * The forced matches already on disk for a partial round. The engine's log
+ * header fingerprints the seed and the entrant set but not the child/parent
+ * pairs, so a resume with a different `pairs` list would pass the header check
+ * and play a new head-to-head while the old one stayed in the log. Reading the
+ * batch -1 lines lets the tool refuse that instead of recording a summary for a
+ * pair the round was not started with.
+ */
+function loggedForcedPairs(dir: string, round: number): { child: string; parent: string }[] {
+  const file = path.join(dir, `round-${round}.matches.jsonl`);
+  if (!existsSync(file)) return [];
+  const pairs: { child: string; parent: string }[] = [];
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue; // a torn tail: the match it described never landed
+    }
+    const entry = parsed as { batch?: unknown; pair?: unknown; header?: unknown };
+    if (entry.header !== undefined) continue;
+    if (entry.batch !== -1 || !Array.isArray(entry.pair)) continue;
+    const [child, parent] = entry.pair as unknown[];
+    if (typeof child === "string" && typeof parent === "string") pairs.push({ child, parent });
+  }
+  return pairs;
+}
+
+/**
+ * Refuse a resume whose logged forced pairs are not all in the current `forced`
+ * list. A subset check, not equality: a torn forced batch (a crash mid-write)
+ * resumes with the remaining pairs, and the logged ones are what the summary
+ * must be computed from.
+ */
+function ensureForcedUnchanged(dir: string, round: number, forced: [string, string][]): void {
+  const current = new Set(forced.map(([child, parent]) => `${child}\u0000${parent}`));
+  for (const { child, parent } of loggedForcedPairs(dir, round)) {
+    if (!current.has(`${child}\u0000${parent}`)) {
+      throw new Error(
+        `judge_round: round ${round} was started with child ${child} against parent ${parent}; resume with the same pairs`,
+      );
+    }
+  }
+}
+
+/**
+ * Refuse a forced pair whose two ids already met in an earlier round. The
+ * head-to-head summary reads only this round's log, so an old verdict would not
+ * be replayed into `beatParent`; the owner must name a pair the round will
+ * actually judge.
+ */
+function ensurePairsNew(
+  prior: { a: string; b: string; result: MatchRecord["result"] }[],
+  forced: [string, string][],
+): void {
+  const met = new Set(prior.map((outcome) => unorderedPairKey(outcome.a, outcome.b)));
+  for (const [child, parent] of forced) {
+    if (met.has(unorderedPairKey(child, parent))) {
+      throw new Error(
+        `judge_round: child ${child} and parent ${parent} already met in an earlier round; ` +
+          `their old verdict would not be replayed into this round's head-to-head`,
+      );
+    }
+  }
 }
 
 /** One stored `round-<n>.json`, validated enough that the tools can read it. */
@@ -281,6 +384,11 @@ function laterRoundInput(
   if (!Array.isArray(input.pairs)) {
     throw new Error(`judge_round: round ${round} needs pairs (each child and its parent)`);
   }
+  if (input.pairs.length === 0) {
+    throw new Error(
+      `judge_round: round ${round} needs at least one child/parent pair; a round without children latches STOP`,
+    );
+  }
 
   const entrants = [...new Set(input.entrants)];
   for (const id of entrants) namedPuzzle(runDir, id, "entrant", "judge_round");
@@ -329,6 +437,7 @@ function completeText(round: number, result: RoundResult, decision: Decision): s
     candidates.breaks.length > 0
       ? candidates.breaks.map((n) => `after rank ${n}`).join(", ")
       : "none (no interval gap separates the top from the rest)";
+  const shown = Math.min(8, candidates.ranked.length);
   const lines = [
     `COMPLETE — round ${round}`,
     `Decision: ${decisionLabel(decision)}`,
@@ -336,7 +445,7 @@ function completeText(round: number, result: RoundResult, decision: Decision): s
       ? ["STOP is final: no more evolution children may be created (tree_create with derivedFrom is refused)."]
       : []),
     `Matches played: ${result.matches.length}`,
-    "Top 8 (score, 80% interval, matches):",
+    `Top ${shown} (score, 80% interval, matches):`,
     ...top,
     `Promotion breaks (promoting the top n leaves an interval gap): ${breaks}`,
     `Underplayed (<${MIN_MATCHES} matches): ${candidates.underplayed.length > 0 ? candidates.underplayed.join(", ") : "none"}`,
@@ -357,7 +466,12 @@ export async function judgeRound(runDir: string, input: JudgeRoundInput, deps: T
 
   // In this order: a recorded STOP closes the loop whatever round is asked for;
   // then the round number must be the next one (or the resumable partial one).
-  const stop = readStop(roundsFile);
+  let stop: Decision;
+  try {
+    stop = readStop(roundsFile);
+  } catch (error) {
+    throw prefixedError("judge_round", error);
+  }
   if (stop.stop) throw new Error(`judge_round: STOP already recorded (${stop.reason}): no more rounds`);
   if (!Number.isInteger(round) || round < 0) {
     throw new Error(`judge_round: round must be a whole number >= 0, got ${JSON.stringify(round)}`);
@@ -384,6 +498,10 @@ export async function judgeRound(runDir: string, input: JudgeRoundInput, deps: T
     forced = later.forced;
   }
 
+  const prior = priorOutcomes(dir, round);
+  ensureForcedUnchanged(dir, round, forced);
+  ensurePairsNew(prior, forced);
+
   mkdirSync(dir, { recursive: true });
   let result: RoundResult;
   try {
@@ -392,21 +510,18 @@ export async function judgeRound(runDir: string, input: JudgeRoundInput, deps: T
       round,
       sides,
       forced,
-      prior: priorOutcomes(dir, round),
+      prior,
       transport: transportFor(runDir, deps),
       seed: 1000 + round,
-      budgetMs: deps.budgetMs ?? ROUND_BUDGET_MS,
+      budgetMs: deps.budgetMs ?? testBudgetMs ?? ROUND_BUDGET_MS,
       minMatches: MIN_MATCHES,
       ...(deps.bootstrap !== undefined ? { bootstrap: deps.bootstrap } : {}),
     });
   } catch (error) {
-    // RoundStuckError (the pool cannot reach the minimum) and the round lock
-    // ("another round is already running") are both owner-facing refusals, not
-    // crashes, so their messages become the tool error unchanged.
-    if (error instanceof RoundStuckError || !(error instanceof Error)) {
-      throw new Error(`judge_round: ${message(error)}`);
-    }
-    throw error;
+    // Every engine failure is an owner-facing refusal, not a crash: a stuck pool
+    // (RoundStuckError), a log fingerprint mismatch, and a held round lock all
+    // become one clear tool error with the tool's prefix.
+    throw prefixedError("judge_round", error);
   }
 
   if (!result.complete) {
@@ -424,7 +539,12 @@ export async function judgeRound(runDir: string, input: JudgeRoundInput, deps: T
     beatParent: result.matches.some((match) => match.a === child && match.b === parent && match.result === "a"),
   });
   const children = forced.map(([child, parent]) => pairOutcome(child, parent));
-  const decision = appendRound(roundsFile, { round, top: result.top, children });
+  let decision: Decision;
+  try {
+    decision = appendRound(roundsFile, { round, top: result.top, children });
+  } catch (error) {
+    throw prefixedError("judge_round", error);
+  }
   return completeText(round, result, decision);
 }
 
@@ -550,10 +670,13 @@ export async function checkDuplicates(
   const file = path.join(dir, "distinct.json");
   const existing = readDistinct(file);
   const checked = [...new Set([...existing.checked, ...ids])].sort();
-  const key = (entry: { keep: string; drop: string }): string => `${entry.keep}\u0000${entry.drop}`;
-  const byPair = new Map(existing.duplicates.map((entry) => [key(entry), entry]));
-  for (const entry of confirmed) byPair.set(key(entry), entry);
-  const duplicates = [...byPair.values()].sort((x, y) =>
+  // Union on the UNORDERED pair: a re-check after a ranking flip replaces the
+  // old orientation with the fresh verdict, so the record never carries both
+  // `keep A, drop B` and `keep B, drop A` for the same two ids. Pairs not judged
+  // this time keep their earlier entries.
+  const judged = new Set(pairs.map(([left, right]) => unorderedPairKey(left, right)));
+  const kept = existing.duplicates.filter((entry) => !judged.has(unorderedPairKey(entry.keep, entry.drop)));
+  const duplicates = [...kept, ...confirmed].sort((x, y) =>
     x.keep === y.keep ? (x.drop < y.drop ? -1 : x.drop > y.drop ? 1 : 0) : x.keep < y.keep ? -1 : 1,
   );
 
