@@ -9,6 +9,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { DEFAULT_CONFIG } from "../factory.ts";
+import { parseReview, reviewProblems } from "../tools/merge-reviews.ts";
 
 const HARNESS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SKILLS = path.join(HARNESS_ROOT, "harness", "skills");
@@ -688,7 +689,7 @@ test("every evolution round teaches the seven-identity minimum", () => {
 
   const example = /judge_round\(\{ round: 1, entrants: \[([^\]]+)\], pairs:/.exec(body);
   assert.ok(example, "the evolution example is a round-1 judge_round call");
-  assert.ok((example[1] as string).match(/P\d+/g)?.length === 7, "the example names seven entrants, so the round has eight identities");
+  assert.ok((example[1] as string).match(/P\d+/g)?.length === 8, "the example names the top 8 as entrants, so the round has nine identities");
 });
 
 test("the Phase 2 design requires seven identities in a later round", () => {
@@ -702,7 +703,7 @@ test("an owner ruling cannot fake the STOP that promotion needs", () => {
   assert.match(body, /records no STOP/, "the skill says a ruling records no STOP");
   assert.match(body, /`loop truncated: no STOP recorded, nothing promotable`/);
   assert.match(body, /park every puzzle `no STOP reached`/);
-  assert.match(body, /how many rounds fit/, "the budget ruling states how many rounds fit");
+  assert.match(body, /rounds funded: round 0 plus <N> evolution rounds/, "the budget ruling states how many rounds it funds");
   assert.match(body, /leave budget for at least one evolution round that can reach a code STOP/i);
 });
 
@@ -754,4 +755,59 @@ test("the design spec no longer lets Phase 2 run analyses", () => {
   const spec = normalise(read("docs/superpowers/specs/2026-10-12-ctc-research-factory-design.md"));
   assert.match(spec, /Phase 1 may use small analyses only; Phase 2 runs none \(its evidence is Phase 1's cards\)/);
   assert.doesNotMatch(spec, /Phases 1–2 may use small analyses/);
+});
+
+
+test("the review role's worked example parses cleanly and rates the criteria differently", () => {
+  const markdown = read("harness/skills/roles/puzzle-review.md");
+  const start = markdown.indexOf("BEGIN REVIEW EXAMPLE\n");
+  const end = markdown.indexOf("END REVIEW EXAMPLE", start);
+  assert.ok(start >= 0 && end > start, "the role marks its worked example with BEGIN/END");
+  const example = markdown.slice(start + "BEGIN REVIEW EXAMPLE\n".length, end).trim();
+
+  assert.deepEqual(reviewProblems(example), [], "the worked example is a valid review");
+  const parsed = parseReview(example);
+  assert.ok(parsed !== null, "parseReview accepts the worked example");
+  assert.deepEqual(parsed.criteria, { fit: "weak", plausibility: "adequate", relevance: "strong" });
+  assert.equal(parsed.dataCharacter, "ok");
+  assert.equal(parsed.knownResult, "ok");
+  assert.equal(parsed.findings.length, 3, "the example has one finding per severity");
+  assert.deepEqual(parsed.findings.map((finding) => finding.severity), ["blocking", "major", "minor"]);
+  assert.equal(parsed.status, "DONE");
+  assert.ok(parsed.phase3MustCheck.length >= 2, "the example has a Phase 3 list");
+
+  const prose = normalise(markdown);
+  assert.match(prose, /its values are ILLUSTRATIVE and must be replaced by your own judgement/);
+  assert.match(prose, /The file stops at the `Status:` line — add nothing after it/);
+});
+
+test("Phase 2's budget funds round 0 plus four evolution rounds", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /Budget round 0 plus up to four evolution rounds/);
+  assert.match(body, /the cap at round 4 is the only point where a code STOP is guaranteed/);
+  assert.match(body, /funds fewer than four can end in `CONTINUE` with no STOP/);
+  assert.match(body, /generation and reviews are hours at concurrency 4/);
+  assert.match(body, /each judge round is the engine's 8-minute stretches repeated/);
+  assert.match(body, /each evolution round adds its children, their two reviews and a judge round/);
+  assert.match(body, /rounds funded: round 0 plus <N> evolution rounds/);
+});
+
+test("the reviewer recovery cap overrides phase-owner's and a breakdown stays in the pool", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /This cap \(2 re-dispatches plus 1 fresh reviewer\) overrides phase-owner's fix-loop cap here/);
+  assert.match(body, /rate plausibility `fails` — a breakdown — \*\*still enters the round-0 pool\*\*/);
+  assert.doesNotMatch(body, /breakdown or a restatement/);
+});
+
+test("the Phase 2 design has no promoted status", () => {
+  const design = normalise(read("docs/superpowers/specs/2026-10-21-ctc-phase2-puzzles-design.md"));
+  assert.match(design, /there is no `promoted` status/);
+  assert.doesNotMatch(design, /→ promoted/);
+});
+
+test("the reviewer agent attaches the free-prose rule to bash paths", () => {
+  const agent = normalise(read("harness/agents/ctc-reviewer.md"));
+  assert.match(agent, /Spell paths in full in your bash commands — a review is free prose — and never combine/);
+  const role = normalise(read("harness/skills/roles/puzzle-review.md"));
+  assert.match(role, /The rules for bash: spell paths in full in your bash commands/);
 });

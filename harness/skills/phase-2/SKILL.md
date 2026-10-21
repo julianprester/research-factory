@@ -23,14 +23,20 @@ Before anything else, expect hours, not minutes: a live run is 20+ generation
 workers, twice as many reviewers, and a judge that plays every match in both
 orders. Record the budget you will hold yourself to:
 
-`Ruling: Phase 2 budget — <hours, and how many rounds fit: round 0 plus up to N evolution rounds> — <cost if wrong: an unfinished loop, or a round cut short>`
+`Ruling: Phase 2 budget — <hours> — rounds funded: round 0 plus <N> evolution rounds — <does that fund the cap of four evolution rounds, and so a guaranteed code STOP? if not, say so> — <cost if wrong: an unfinished loop, or nothing promotable>`
 
 A `Ruling:` can stop the loop, but it records no STOP: only `judge_round`
-records one, and `promote` refuses without it. Budget so that at least one
-round reaches a code STOP (the cap is round 4, so the loop is bounded), and say
-in the ruling how many rounds fit. If the budget is nearly spent mid-loop,
-record `loop truncated: no STOP recorded, nothing promotable` and park every
-puzzle `no STOP reached` — do not pretend promotion is possible.
+records one, and `promote` refuses without it. **Budget round 0 plus up to four
+evolution rounds**: the cap at round 4 is the only point where a code STOP is
+guaranteed, so a budget that funds fewer than four can end in `CONTINUE` with no
+STOP — say plainly in the ruling that a code STOP is not guaranteed and
+promotion may be impossible. Estimate before you promise: generation and
+reviews are hours at concurrency 4 (22 generators plus 44 reviewers in the first
+run); each judge round is the engine's 8-minute stretches repeated until it
+reports `COMPLETE`; each evolution round adds its children, their two reviews
+and a judge round. If the budget is nearly spent mid-loop, record `loop
+truncated: no STOP recorded, nothing promotable` and park every puzzle `no STOP
+reached` — do not pretend promotion is possible.
 
 Then resume. Call `tree_list({})` — all phases, not just phase 2 — and continue
 from what exists. Never recreate work:
@@ -201,7 +207,9 @@ brief). If it still fails, park the puzzle `review-failed: <why>` — a puzzle
 with no usable merge cannot be ranked. The same cap applies when `reviewBlocked`
 is set: re-dispatch the blocked reviewer up to 2 times, then once fresh, then
 park `review-failed: reviewer blocked`. Never re-dispatch both reviewers for one
-failing file, and never loop past that cap.
+failing file, and never loop past that cap. **This cap (2 re-dispatches plus 1
+fresh reviewer) overrides phase-owner's fix-loop cap here**, because
+phase-owner's cap is written for a worker's `handoff.md`, not for a review file.
 
 ## 5. Round 0
 
@@ -212,11 +220,11 @@ the merge — call:
 `judge_round({ round: 0 })`
 
 Round 0 ranks the whole pool and needs at least 7 puzzles. A puzzle whose
-reviews call it a breakdown or a restatement **still enters the round-0 pool**:
-a ranked loss is information, nothing is culled before round 0, and every
-puzzle not promoted is parked only after the final ranking. It can be neither
-an evolution parent nor promoted, which the gates enforce. It can take a while.
-It answers either `PARTIAL` or `COMPLETE`:
+reviews rate plausibility `fails` — a breakdown — **still enters the round-0
+pool**: a ranked loss is information, nothing is culled before round 0, and
+every puzzle not promoted is parked only after the final ranking. It can be
+neither an evolution parent nor promoted, which the gates enforce. It can take
+a while. It answers either `PARTIAL` or `COMPLETE`:
 
 - `PARTIAL` — the round hit its 8-minute stretch. Do not change anything:
   **repeat it with the identical arguments** (same round; for round 0 that is
@@ -300,11 +308,10 @@ merge; `check-puzzle --reviews`; `submitted`).
 
 When every child of the round is `submitted`, judge it:
 
-`judge_round({ round: 1, entrants: ["P01", "P02", "P03", "P04", "P05", "P06", "P07"], pairs: [{ child: "P20", parent: "P01" }] })`
+`judge_round({ round: 1, entrants: ["P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08"], pairs: [{ child: "P20", parent: "P01" }] })`
 
-- `entrants` is the previous round's top 8 (or every submitted incumbent that
-  was ranked in it); every parent of every child must be among them. Seven
-  entrants plus one child is 8 identities, over the minimum.
+- `entrants` is the previous round's top 8; every parent of every child must be
+  among them. Eight entrants plus one child is 9 identities, over the minimum.
 - `pairs` is required for round 1 and later: one entry for every child and its
   parent. Every round needs **at least one child**: the stop *rule* treats a
   childless round as a stop, but `judge_round` refuses an empty `pairs` list.

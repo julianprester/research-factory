@@ -80,44 +80,65 @@ text names** (the brief never names a slot), and nothing else — with the **wri
 tool**, never through bash. It has exactly these `## ` sections, each once. Extra
 `## ` sections are allowed but must not contain a finding-shaped line.
 
-The lines below are the review's exact layout. Write them as ordinary text:
-**write the file's content, not a code fence around it** — the closing fence
-would become the last line and the merge tool would reject the file.
+The block between the markers below is a **worked example**, not a template to
+copy blindly: its values are ILLUSTRATIVE and must be replaced by your own
+judgement — do not anchor on its ratings, findings or prose. Write the review as
+ordinary text: **write the file's content, not a code fence around it** — the
+closing fence would become the last line and the merge tool would reject the
+file. Do not copy the `BEGIN`/`END` marker lines either.
 
+BEGIN REVIEW EXAMPLE
 ## Fit
 
-Rating: strong|adequate|weak|fails
-<one paragraph: why this value>
+Rating: weak
+The puzzle restates the pattern's Result in its own words and never returns to the two worst-fit slices the pattern card names, so it does not yet follow from Phase 1's evidence.
 
 ## Plausibility
 
-Rating: strong|adequate|weak|fails
-<one paragraph, with the rival account and its citations>
+Rating: adequate
+The status-quo theory is named as the rival, but the card gives no citation for its prediction, so the comparison is sketched rather than shown.
 
 ## Relevance
 
-Rating: strong|adequate|weak|fails
-<one paragraph: the debate, who uses the answer>
+Rating: strong
+The puzzle enters the debate on rule formalisation for platform governance and says what a resolution would change for researchers who study documentation work.
 
 ## Data-character check
 
-Result: ok|violated
-<one paragraph, naming the sentence if violated>
+Result: ok
+Every claim stays with what the corpus documents: written rules and prescriptions, never behaviour.
 
 ## Known-result check
 
-Result: ok|blocking|not-applicable
-<one paragraph, naming the caveat and the sentence>
+Result: ok
+The pattern carries no Phase 0 caveat, so there is no known result to present as a discovery.
 
 ## Findings
 
-- [blocking|major|minor] <fit|plausibility|relevance|data-character|known-result>: <text>
+- [blocking] fit: The card never answers the two worst-fit slices its pattern card records, so the claim does not yet follow from Phase 1's evidence.
+- [major] plausibility: The rival account is named but never cited, so the comparison behind the plausibility rating cannot be checked.
+- [minor] relevance: The debate is named, but the sentence on what a resolution would change is a gesture rather than a warrant.
 
 ## Phase 3 must check
 
-- <a question Phase 3 should test>
+- Whether the pattern holds in the two worst-fit slices once documents are matched on section type.
+- Whether the status-quo theory's prediction is borne out by the rule changes the card cites.
 
-Status: DONE|DONE_WITH_CONCERNS|BLOCKED
+Status: DONE
+END REVIEW EXAMPLE
+
+The file stops at the `Status:` line — add nothing after it.
+
+The allowed values, kept outside the example so they cannot be copied into a
+review:
+
+| line | allowed values |
+|---|---|
+| `Rating:` | `strong`, `adequate`, `weak`, `fails` |
+| `Result:` for data-character | `ok`, `violated` |
+| `Result:` for known-result | `ok`, `blocking`, `not-applicable` |
+| `Status:` | `DONE`, `DONE_WITH_CONCERNS`, `BLOCKED` |
+| a finding's severity | `blocking`, `major`, `minor` |
 
 Rules that make the file parse:
 
@@ -141,9 +162,9 @@ Rules that make the file parse:
   criterion, severity and substance match; a shared problem rated differently at
   each desk becomes two weaker findings.
 
-spell paths in full in your bash commands — a review is free prose — and never
-combine `..` with a glob; do not use bash to write files — use the write tool so
-the guard sees every write. Your bash is for `deepis`, for
+The rules for bash: spell paths in full in your bash commands — a review is free
+prose — and never combine `..` with a glob; do not use bash to write files —
+use the write tool so the guard sees every write. Your bash is for `deepis`, for
 `check-citations.ts` on your own review file, and for reading: no shell writes,
 no scripts, no analysis.
 
