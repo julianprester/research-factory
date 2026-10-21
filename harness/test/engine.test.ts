@@ -22,6 +22,7 @@ import {
   loadEntrant,
   pairKey,
   promotionCandidates,
+  RoundStuckError,
   runRound,
   schedulePairs,
   type RoundOptions,
@@ -73,7 +74,13 @@ function readLog(dir: string, round: number): LogLine[] {
   return readFileSync(file, "utf8")
     .split("\n")
     .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line) as LogLine);
+    .map((line) => JSON.parse(line) as LogLine & { header?: unknown })
+    .filter((line) => line.header === undefined);
+}
+
+/** The log's raw header line: the schedule fingerprint a resumed call checks. */
+function headerLine(dir: string, round: number): string {
+  return readFileSync(path.join(dir, `round-${round}.matches.jsonl`), "utf8").split("\n")[0]!;
 }
 
 function options(overrides: Partial<RoundOptions> & { dir: string }): RoundOptions {
@@ -150,6 +157,13 @@ test("a crashed round resumes: no pair twice, the same matches and the same rank
     `the resumed run played the remaining matches: ${firstAttempt.length} then ${keys.length}`,
   );
   assert.equal(resumed.matches.length, clean.matches.length, "a resumed round plays the same number of matches");
+  assert.deepEqual(
+    keys.slice().sort(),
+    readLog(cleanDir, 0)
+      .map((line) => pairKey(line.pair[0], line.pair[1]))
+      .sort(),
+    "the resumed round plays exactly the uninterrupted run's pairs",
+  );
   assert.deepEqual(resumed.top, clean.top, "the ranking is identical to an uninterrupted run");
   assert.deepEqual(resumed.fit, clean.fit);
   assert.deepEqual(resumed.played, clean.played);
@@ -171,7 +185,7 @@ test("a log written in a different order plays the same later batches", async (t
   const otherDir = tempDir(t);
   writeFileSync(
     path.join(otherDir, "round-0.matches.jsonl"),
-    firstBatch.map((line) => JSON.stringify(line)).join("\n") + "\n",
+    [headerLine(cleanDir, 0), ...firstBatch.map((line) => JSON.stringify(line))].join("\n") + "\n",
   );
   const replayed = await runRound(options({ ...opts, dir: otherDir }));
 
@@ -208,13 +222,135 @@ test("a torn last line from a crash is dropped, not counted, and never swallows 
   assert.equal(written.matches.length, lines.length, "every logged line parses as one match");
 });
 
+test("a pool too small for minMatches throws instead of reporting a partial round", async (t) => {
+  const dir = tempDir(t);
+  const sides = makeSides(6);
+  // Six identities can give each entrant at most five opponents, so six matches
+  // each is unreachable: the round must say so rather than return a partial
+  // result a caller would retry forever.
+  await assert.rejects(runRound(options({ dir, sides })), (error: unknown) => {
+    assert.ok(error instanceof RoundStuckError, `expected RoundStuckError, got ${String(error)}`);
+    assert.match(error.message, /too small/);
+    assert.match(error.message, /minMatches 6/);
+    for (const side of sides) assert.ok(error.message.includes(side.id), `the message names ${side.id}`);
+    assert.deepEqual(error.short.slice().sort(), sides.map((side) => side.id), "every side is short");
+    return true;
+  });
+  assert.ok(!existsSync(path.join(dir, "round-0.json")), "a stuck round writes no round file");
+  assert.equal(readLog(dir, 0).length, 15, "the whole complete graph was played before giving up");
+  // The lock is released even on the error path, so the caller can fix the pool.
+  assert.ok(!existsSync(path.join(dir, "round-0.lock")));
+});
+
+test("seven identities are just enough for six matches each", async (t) => {
+  const dir = tempDir(t);
+  const sides = makeSides(7);
+  const result = await runRound(options({ dir, sides }));
+
+  assert.equal(result.complete, true);
+  for (const side of sides) assert.equal(result.played[side.id], 6);
+  assert.equal(result.matches.length, 21, "21 pairs is the complete graph on 7 identities");
+});
+
+test("a second overlapping call on the same round fails fast instead of double counting", async (t) => {
+  const dir = tempDir(t);
+  const sides = makeSides(10);
+  // budgetMs 0 keeps the first call in flight for one batch while the second runs.
+  const first = runRound(options({ dir, sides, budgetMs: 0, batchSize: 4 }));
+  await assert.rejects(runRound(options({ dir, sides, budgetMs: 0, batchSize: 4 })), /another round is already running/);
+  const result = await first;
+
+  assert.equal(result.complete, false);
+  const keys = readLog(dir, 0).map((line) => pairKey(line.pair[0], line.pair[1]));
+  assert.equal(new Set(keys).size, keys.length, "the log holds each pair once");
+  assert.equal(keys.length, 4, "only the first call's batch was played");
+  // The lock is gone once the run is over: the next call is not blocked.
+  assert.ok(!existsSync(path.join(dir, "round-0.lock")));
+});
+
+test("a log with a repeated line is replayed once per pair", async (t) => {
+  const cleanDir = tempDir(t);
+  const doubledDir = tempDir(t);
+  const sides = makeSides(8);
+  const opts = { sides, batchSize: 4, minMatches: 3 };
+  const clean = await runRound(options({ ...opts, dir: cleanDir }));
+
+  // Simulate a log two overlapping calls both appended to: every line twice.
+  const file = path.join(cleanDir, "round-0.matches.jsonl");
+  const [header, ...lines] = readFileSync(file, "utf8").split("\n").filter((line) => line.trim() !== "");
+  writeFileSync(path.join(doubledDir, "round-0.matches.jsonl"), [header, ...lines, ...lines].join("\n") + "\n");
+
+  const resumed = await runRound(options({ ...opts, dir: doubledDir }));
+  assert.equal(resumed.complete, true);
+  assert.deepEqual(resumed.played, clean.played, "a repeated line is not counted twice");
+  assert.deepEqual(resumed.top, clean.top);
+  assert.deepEqual(resumed.fit, clean.fit, "the fit sees each match once");
+  const keys = resumed.matches.map((match) => pairKey(match.a, match.b));
+  assert.equal(new Set(keys).size, keys.length, "the round result holds each pair once");
+});
+
+test("the log is fingerprinted: another seed or entrant set is refused", async (t) => {
+  const dir = tempDir(t);
+  const sides = makeSides(8);
+  const opts = { dir, sides, batchSize: 4, minMatches: 3 };
+  await runRound(options(opts));
+  assert.match(headerLine(dir, 0), /"seed":7/);
+
+  await assert.rejects(runRound(options({ ...opts, seed: 11 })), /seed 7, this call uses 11/);
+  await assert.rejects(runRound(options({ ...opts, sides: sides.slice(0, 6) })), /different entrant set/);
+
+  // The same configuration still resumes, and the header is not rewritten.
+  const header = headerLine(dir, 0);
+  const again = await runRound(options(opts));
+  assert.equal(again.complete, true);
+  assert.equal(headerLine(dir, 0), header);
+  assert.equal(readFileSync(path.join(dir, "round-0.matches.jsonl"), "utf8").split("\n").filter((line) => line.startsWith("{\"header\"")).length, 1);
+});
+
+test("a damaged line is an error unless it is the log's last line", async (t) => {
+  const cleanDir = tempDir(t);
+  const middleDir = tempDir(t);
+  const tailDir = tempDir(t);
+  const sides = makeSides(8);
+  const opts = { sides, batchSize: 4, minMatches: 3 };
+  const clean = await runRound(options({ ...opts, dir: cleanDir }));
+  const text = readFileSync(path.join(cleanDir, "round-0.matches.jsonl"), "utf8");
+  const [header, ...lines] = text.split("\n").filter((line) => line.trim() !== "");
+
+  // A damaged line in the middle would silently lose a judged match, so it stops
+  // the round and names the line instead.
+  const damaged = [header, lines[0], "{ not a match record", ...lines.slice(1)];
+  writeFileSync(path.join(middleDir, "round-0.matches.jsonl"), damaged.join("\n") + "\n");
+  await assert.rejects(runRound(options({ ...opts, dir: middleDir })), /line 3 is not a match record/);
+
+  // A damaged tail is where a crash writes, so it is cut rather than refused:
+  // leaving it would glue the next record onto the fragment.
+  const tailFile = path.join(tailDir, "round-0.matches.jsonl");
+  writeFileSync(tailFile, `${text}torn tail\n`);
+  const resumed = await runRound(options({ ...opts, dir: tailDir }));
+  assert.equal(resumed.complete, true);
+  assert.deepEqual(resumed.played, clean.played);
+  assert.ok(!readFileSync(tailFile, "utf8").includes("torn tail"), "the damaged tail is removed, not just skipped");
+});
+
 test("forced pairs are played first, as batch -1, and recorded", async (t) => {
   const dir = tempDir(t);
   const sides = makeSides(6);
   const child = sides[0]!;
   const parent = sides[1]!;
   const result = await runRound(
-    options({ dir, round: 1, sides, forced: [[child.id, parent.id]], batchSize: 3, minMatches: 3 }),
+    options({
+      dir,
+      round: 1,
+      sides,
+      // The same pair twice: a caller mapping child to parent can duplicate it.
+      forced: [
+        [child.id, parent.id],
+        [child.id, parent.id],
+      ],
+      batchSize: 3,
+      minMatches: 3,
+    }),
   );
 
   const logged = readLog(dir, 1);
@@ -222,9 +358,10 @@ test("forced pairs are played first, as batch -1, and recorded", async (t) => {
   assert.deepEqual(logged[0]?.pair, [child.id, parent.id], "orientation is child then parent");
   assert.equal(logged[0]?.match.a, child.id);
   assert.equal(logged[0]?.match.b, parent.id);
-  assert.ok(
-    result.matches.some((match) => match.a === child.id && match.b === parent.id),
-    "the forced match is in the round result",
+  assert.equal(
+    result.matches.filter((match) => pairKey(match.a, match.b) === pairKey(child.id, parent.id)).length,
+    1,
+    "a duplicated forced pair is judged once",
   );
   const written = JSON.parse(readFileSync(path.join(dir, "round-1.json"), "utf8"));
   assert.ok(written.matches.some((match: { a: string; b: string }) => match.a === child.id && match.b === parent.id));
@@ -284,6 +421,12 @@ test("loadEntrant reads the card and four pattern sections, never a review", (t)
     path.join(puzzle.dir, "workspace", "reviews", "a.md"),
     "## Fit\nREVIEW-LEAK-MARKER: this review must never reach the judge.\n",
   );
+  // The live run's merge carries both reviews' text in one file; a loader that
+  // read the reviews folder would most likely read this one.
+  writeFileSync(
+    path.join(puzzle.dir, "workspace", "reviews", "merged.json"),
+    JSON.stringify({ findings: [{ text: "MERGED-LEAK-MARKER: merged review text." }] }),
+  );
 
   const side = loadEntrant(run, puzzle.id);
   assert.equal(side.id, puzzle.id);
@@ -297,7 +440,7 @@ test("loadEntrant reads the card and four pattern sections, never a review", (t)
   assert.ok(!side.evidence.includes("DEVIATIONS-MARKER"));
   const whole = JSON.stringify(side);
   assert.ok(!whole.includes("REVIEW-LEAK-MARKER"), "review text never reaches a Side");
-  assert.ok(!whole.includes("workspace/reviews"));
+  assert.ok(!whole.includes("MERGED-LEAK-MARKER"), "the merged review never reaches a Side either");
 });
 
 test("loadEntrant refuses a node that is not a puzzle and a puzzle with no card", (t) => {
@@ -310,6 +453,26 @@ test("loadEntrant refuses a node that is not a puzzle and a puzzle with no card"
   writeFileSync(path.join(pattern.dir, "workspace", "pattern.md"), "## Measure\nx\n");
   assert.throws(() => loadEntrant(run, pattern.id), /not a puzzle/);
   assert.throws(() => loadEntrant(run, puzzle.id), /puzzle\.md/);
+});
+
+test("loadEntrant refuses to judge on empty pattern evidence", (t) => {
+  const run = tempDir(t);
+  initRun(run, "data", "interest");
+  const pattern = createChild(run, "D01", "Pattern One", "t");
+  const puzzle = createChild(run, pattern.id, "Puzzle One", "t");
+  mkdirSync(path.join(puzzle.dir, "workspace"), { recursive: true });
+  writeFileSync(path.join(puzzle.dir, "workspace", "puzzle.md"), "## Pattern\nA card about etiquette.\n");
+
+  // No pattern card at all: a wrong parent, not a puzzle with thin evidence.
+  assert.throws(() => loadEntrant(run, puzzle.id), /has no workspace\/pattern\.md/);
+
+  // A pattern card with none of the four sections the judge may see.
+  mkdirSync(path.join(pattern.dir, "workspace"), { recursive: true });
+  writeFileSync(
+    path.join(pattern.dir, "workspace", "pattern.md"),
+    "# T01 - Pattern One\n\n## Something else\nNothing the judge may read.\n",
+  );
+  assert.throws(() => loadEntrant(run, puzzle.id), /none of the sections/);
 });
 
 test("schedulePairs is deterministic and never repeats a seen pair", () => {
