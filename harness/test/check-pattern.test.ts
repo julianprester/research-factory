@@ -88,6 +88,8 @@ interface FixtureOptions {
   handoffVerdict?: string;
   /** Leave workspace/pattern.md uncommitted (the brief only orders it when it is committed). */
   commitPattern?: boolean;
+  /** The pre-registered measure.md text (default MEASURE). */
+  measure?: string;
 }
 
 /** A pattern node that is pre-registered, ordered and complete: the check must pass. */
@@ -101,7 +103,7 @@ function patternNode(t: TestContext, opts: FixtureOptions = {}): Fixture {
   const relPattern = rel("workspace/pattern.md");
   const relHandoff = rel("handoff.md");
 
-  write(path.join(nodeDir, "workspace", "measure.md"), MEASURE);
+  write(path.join(nodeDir, "workspace", "measure.md"), opts.measure ?? MEASURE);
   commitFile(run, relMeasure, "worker-T01", "[P1:preregister] T01 — measure.md");
   write(path.join(nodeDir, "workspace", "pattern.md"), card(opts.cardVerdict));
   write(path.join(nodeDir, "handoff.md"), handoff(opts.handoffVerdict));
@@ -288,6 +290,21 @@ test("a script that does not mention the hold-out is fine", (t) => {
   const { run, nodeDir } = patternNode(t);
   write(path.join(nodeDir, "workspace", "scripts", "scan.py"), "# reads exploration.txt\nprint('ok')\n");
   assert.deepEqual(checkPattern(run, nodeDir), { problems: [] });
+});
+
+test("a script that lists directories needs an Enumerates: line in measure.md", (t) => {
+  const calls = ["for r, d, f in os.walk(root):", "fs.readdirSync(dir)", "Path(p).rglob('*.md')", "glob.glob('*/*.md')"];
+  for (const call of calls) {
+    const { run, nodeDir } = patternNode(t);
+    write(path.join(nodeDir, "workspace", "scripts", "scan.py"), `${call}\n`);
+    const { problems } = checkPattern(run, nodeDir);
+    assert.equal(problems.length, 1, `${call}: ${problems.join("\n")}`);
+    assert.match(problems[0] ?? "", /workspace\/scripts\/scan\.py lists directories; say why in an "Enumerates:" line/);
+  }
+
+  const declared = patternNode(t, { measure: `${MEASURE}\nEnumerates: file names only, to resolve link targets; contents are read from the exploration list.\n` });
+  write(path.join(declared.nodeDir, "workspace", "scripts", "scan.py"), "for r, d, f in os.walk(root):\n");
+  assert.deepEqual(checkPattern(declared.run, declared.nodeDir), { problems: [] });
 });
 
 test("the CLI prints ok and exits 0 for a good node", (t) => {

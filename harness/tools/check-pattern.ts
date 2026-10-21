@@ -29,13 +29,21 @@ import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import { HOLDOUT_WORD } from "../guard.ts";
 import { findRunDir, MEASUREMENT_PATHS, nodeIdOf, preregisterCommits, type Preregistration } from "../tree.ts";
 
 const HEADINGS = ["## Measure", "## Result", "## Verdict", "## Robustness", "## Worst fits", "## Deviations"];
 const VERDICTS = ["held", "violated", "mixed", "unmeasurable"];
 /** A blind scanner may also report `open`; nobody else may. */
 const BLIND_VERDICTS = [...VERDICTS, "open"];
-const HOLDOUT = /hold[-_ ]?out/i;
+const HOLDOUT = HOLDOUT_WORD;
+/**
+ * Calls that list a directory or walk a tree. A scan reads the exploration list; a
+ * script that enumerates the dataset sees the names of hold-out files too, so it must
+ * say so in `measure.md` (an `Enumerates:` line, frozen at pre-registration).
+ */
+const ENUMERATES_CALL = /os\.walk|os\.listdir|os\.scandir|\.iterdir\(|\.r?glob\(|glob\.i?glob|globSync|readdirSync|readdir\(|opendir|scandir/;
+const ENUMERATES_DECLARATION = /^\W*Enumerates:\s*\S/im;
 
 function gitText(runDir: string, args: string[]): string {
   return execFileSync("git", [...args], { cwd: runDir, encoding: "utf8" });
@@ -202,6 +210,18 @@ export function checkPattern(
     if (!HOLDOUT.test(fs.readFileSync(file, "utf8"))) continue;
     const name = path.relative(scripts, file).split(path.sep).join("/");
     problems.push(`workspace/scripts/${name} mentions the hold-out`);
+  }
+
+  // 7. a script that lists directories must have declared it before measuring.
+  const declared = fs.existsSync(measure) && ENUMERATES_DECLARATION.test(fs.readFileSync(measure, "utf8"));
+  if (!declared) {
+    for (const file of filesUnder(scripts)) {
+      if (!ENUMERATES_CALL.test(fs.readFileSync(file, "utf8"))) continue;
+      const name = path.relative(scripts, file).split(path.sep).join("/");
+      problems.push(
+        `workspace/scripts/${name} lists directories; say why in an "Enumerates:" line of measure.md before pre-registering`,
+      );
+    }
   }
 
   return { problems };
