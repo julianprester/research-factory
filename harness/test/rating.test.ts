@@ -122,6 +122,15 @@ test("fitBradleyTerry recovers a synthetic pool's ordering with usable intervals
     assert.ok(fit.upper[id]! >= fit.scores[id]! - 1e-12, `${id} upper bound`);
   }
 
+  // An interval that is empty or absurdly wide would make the coverage check
+  // below pass for the wrong reason, so width gets checked on its own.
+  const widths = ids.map((id) => fit.upper[id]! - fit.lower[id]!);
+  assert.ok(widths.every((width) => Number.isFinite(width)), "every interval is finite");
+  const informative = widths.filter((width) => width > 0).length;
+  assert.ok(informative >= 10, `intervals have width for ${informative} of ${ids.length} entrants`);
+  const widest = Math.max(...widths);
+  assert.ok(widest < 6, `widest interval ${widest.toFixed(2)} log-units stays usable`);
+
   const scores = ids.map((id) => fit.scores[id]!);
   assert.ok(Math.abs(scores.reduce((sum, s) => sum + s, 0)) < 1e-9, "scores are centred at mean 0");
 
@@ -132,6 +141,8 @@ test("fitBradleyTerry recovers a synthetic pool's ordering with usable intervals
 
   const covered = ids.filter((id, i) => fit.lower[id]! <= centred[i]! && centred[i]! <= fit.upper[id]!);
   assert.ok(covered.length >= 8, `80% intervals cover ${covered.length} of ${ids.length} (need 8)`);
+  const meanWidth = widths.reduce((sum, width) => sum + width, 0) / widths.length;
+  assert.ok(meanWidth > 0.2 && meanWidth < 2, `mean interval width ${meanWidth.toFixed(2)} log-units`);
 });
 
 test("an all-draw schedule gives everyone the same score", () => {
@@ -155,6 +166,62 @@ test("an entrant that only wins has a finite score and leads the pool", () => {
   assert.ok(Number.isFinite(fit.scores.ace), `ace scores ${fit.scores.ace}`);
   assert.ok(Number.isFinite(fit.lower.ace) && Number.isFinite(fit.upper.ace));
   for (let i = 0; i < 4; i++) assert.ok(fit.scores.ace! > fit.scores[`p${i}`]!);
+});
+
+test("a draw counts half a win, not a full one", () => {
+  // Same two opponents for everyone, so the ordering is decided by the win
+  // total alone: X has a win and a draw, Y a win and a loss, W two wins. Half a
+  // win puts X strictly between Y and W; counting a draw as a full win would
+  // tie X with W, and counting it as nothing would tie X with Y.
+  const outcomes: Outcome[] = [
+    { a: "X", b: "P", result: "a" },
+    { a: "X", b: "Q", result: "draw" },
+    { a: "Y", b: "P", result: "a" },
+    { a: "Q", b: "Y", result: "a" },
+    { a: "W", b: "P", result: "a" },
+    { a: "W", b: "Q", result: "a" },
+  ];
+  const fit = fitBradleyTerry(outcomes, { bootstrap: 0 });
+  assert.ok(
+    fit.scores.X! > fit.scores.Y!,
+    `a draw beats a loss: X ${fit.scores.X} vs Y ${fit.scores.Y}`,
+  );
+  assert.ok(
+    fit.scores.X! < fit.scores.W!,
+    `a draw falls short of a win: X ${fit.scores.X} vs W ${fit.scores.W}`,
+  );
+});
+
+test("the ridge shrinks the fit towards a mean opponent at a pinned value", () => {
+  // 3 wins against 1: the plain MLE is ln 3, and the ridge pulls the gap in.
+  const outcomes: Outcome[] = [
+    { a: "x", b: "y", result: "a" },
+    { a: "x", b: "y", result: "a" },
+    { a: "x", b: "y", result: "a" },
+    { a: "y", b: "x", result: "a" },
+  ];
+  const plain = fitBradleyTerry(outcomes, { bootstrap: 0, ridge: 1e-12 }).scores;
+  assert.ok(
+    Math.abs(plain.x! - plain.y! - Math.log(3)) < 1e-6,
+    `without the ridge the gap is ln 3: got ${plain.x! - plain.y!}`,
+  );
+
+  // The pinned value is what the virtual games against a mean opponent produce;
+  // dropping that denominator term moves the gap to ln 2.6 and fails here.
+  const shrunk = fitBradleyTerry(outcomes, { bootstrap: 0 }).scores;
+  const gap = shrunk.x! - shrunk.y!;
+  assert.ok(Math.abs(gap - 1.017264) < 1e-6, `default ridge gap ${gap}`);
+  assert.ok(gap < Math.log(3), `the ridge shrinks the gap: ${gap} < ${Math.log(3)}`);
+});
+
+test("fitBradleyTerry rejects an impossible level or ridge", () => {
+  const outcomes: Outcome[] = [{ a: "x", b: "y", result: "a" }];
+  assert.throws(() => fitBradleyTerry(outcomes, { level: 0 }), /level/);
+  assert.throws(() => fitBradleyTerry(outcomes, { level: 1 }), /level/);
+  assert.throws(() => fitBradleyTerry(outcomes, { level: 2 }), /level/);
+  assert.throws(() => fitBradleyTerry(outcomes, { level: Number.NaN }), /level/);
+  assert.throws(() => fitBradleyTerry(outcomes, { ridge: 0 }), /ridge/);
+  assert.throws(() => fitBradleyTerry(outcomes, { ridge: -1 }), /ridge/);
 });
 
 test("the same outcomes and seed fit identically", () => {

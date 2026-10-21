@@ -149,7 +149,9 @@ function tally(outcomes: Outcome[]): Tally {
  * (log 0) opponent, which is what keeps an unbeaten entrant finite.
  *
  * Only log strengths are identifiable, so convergence is measured on the logs
- * and the answer is centred: the returned scores sum to 0.
+ * and the answer is centred: the returned scores sum to 0. The ridge is
+ * validated to be positive by the caller, so the denominator below is always
+ * positive - an unbeaten entrant gets a large finite strength, not infinity.
  */
 function fitTally(counts: Tally, ridge: number): Record<string, number> {
   const { ids, wins, games } = counts;
@@ -169,9 +171,7 @@ function fitTally(counts: Tally, ridge: number): Record<string, number> {
         denominator += played / (strength[i]! + strength[j]!);
       }
       denominator += ridge / (strength[i]! + 1);
-      // Unreachable with the default ridge; ridge 0 plus a pool that never played
-      // leaves the ratio 0/0, and a level strength is the honest fallback.
-      next[i] = denominator > 0 ? (wins[i]! + ridge / 2) / denominator : 1;
+      next[i] = (wins[i]! + ridge / 2) / denominator;
     }
     for (let i = 0; i < n; i++) {
       const move = Math.abs(Math.log(next[i]! / strength[i]!));
@@ -207,13 +207,26 @@ function quantile(sorted: number[], q: number): number {
  * Each bootstrap resample draws `outcomes.length` matches from the log with
  * replacement using the seeded generator, refits, and the intervals are the
  * `level` percentiles of those refits, widened to include the point estimate so
- * a fit's own score never sits outside its interval.
+ * a fit's own score never sits outside its interval. The widening can only
+ * lower a lower bound and raise an upper bound, so it can hide a natural break
+ * (`lower_i > upper_{i+1}`, which promotion reads) but never invent one: the
+ * fit errs towards saying less than the data does.
+ *
+ * `level` outside (0, 1) and `ridge` of zero or less are rejected rather than
+ * silently producing NaN or infinite bounds.
  */
 export function fitBradleyTerry(outcomes: Outcome[], opts: FitOptions = {}): Fit {
   const seed = opts.seed ?? DEFAULT_SEED;
   const bootstrap = opts.bootstrap ?? DEFAULT_BOOTSTRAP;
   const ridge = opts.ridge ?? DEFAULT_RIDGE;
   const level = opts.level ?? DEFAULT_LEVEL;
+
+  if (!(level > 0 && level < 1)) {
+    throw new Error(`fitBradleyTerry: level must be strictly between 0 and 1, got ${level}`);
+  }
+  if (!(ridge > 0)) {
+    throw new Error(`fitBradleyTerry: ridge must be positive, got ${ridge}`);
+  }
 
   const base = tally(outcomes);
   if (base.ids.length === 0) return { scores: {}, lower: {}, upper: {} };
