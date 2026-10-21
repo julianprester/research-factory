@@ -663,3 +663,95 @@ test("the design spec follows the Phase 2 design's §10 edits", () => {
   assert.match(tournament, /three-part stopping rule/, "§7.1 names the plateau/stopping rule");
   assert.match(tournament, /fit, plausibility and relevance/, "§7.1 uses the three criteria for puzzles");
 });
+
+test("the reviewer slot comes from the task text, not the shared brief", () => {
+  const owner = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(owner, /your task text names your slot/i, "the owner skill says the task text names the slot");
+  assert.match(owner, /the brief never names a slot/i, "the owner skill says the brief does not name it");
+
+  const role = normalise(read("harness/skills/roles/puzzle-review.md"));
+  assert.match(role, /your task text names the slot/i, "the review role says the task text names the slot");
+  assert.match(role, /the brief never names a slot/i, "the review role says the brief does not name it");
+
+  const agent = normalise(read("harness/agents/ctc-reviewer.md"));
+  assert.match(agent, /your task text names which review you write/i, "the reviewer agent says the task text names the file");
+  assert.match(agent, /does not name your output slot/i, "the reviewer agent says the brief does not name the file");
+});
+
+test("every evolution round teaches the seven-identity minimum", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /at least 7 identities in total — entrants plus children/);
+  assert.match(body, /a fresh child must play 6 matches,? and two puzzles meet only once per round/i);
+  assert.match(body, /the previous round's top 8/);
+  assert.match(body, /count `entrants \+ children` before you/);
+  assert.match(body, /The `Ruling:` records the count/);
+
+  const example = /judge_round\(\{ round: 1, entrants: \[([^\]]+)\], pairs:/.exec(body);
+  assert.ok(example, "the evolution example is a round-1 judge_round call");
+  assert.ok((example[1] as string).match(/P\d+/g)?.length === 7, "the example names seven entrants, so the round has eight identities");
+});
+
+test("the Phase 2 design requires seven identities in a later round", () => {
+  const design = normalise(read("docs/superpowers/specs/2026-10-21-ctc-phase2-puzzles-design.md"));
+  assert.match(design, /at least 7 identities in total \(children plus incumbents\)/);
+  assert.match(design, /a fresh child must play 6 matches and two puzzles meet once per round/);
+});
+
+test("an owner ruling cannot fake the STOP that promotion needs", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /records no STOP/, "the skill says a ruling records no STOP");
+  assert.match(body, /`loop truncated: no STOP recorded, nothing promotable`/);
+  assert.match(body, /park every puzzle `no STOP reached`/);
+  assert.match(body, /how many rounds fit/, "the budget ruling states how many rounds fit");
+  assert.match(body, /leave budget for at least one evolution round that can reach a code STOP/i);
+});
+
+test("the evolution child brief names the move, round, lens and both combination parents", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /\*\*Role:\*\* evolution worker for `<P\.\.>` — move `<grounding\|simplification\|out-of-the-box\|combination>`, round `<n>`, lens `<lens>`/);
+  assert.match(body, /for a \*\*combination\*\*, \*\*both parents'\*\* `workspace\/puzzle\.md` and `workspace\/reviews\/merged\.md`/);
+  assert.match(body, /meta-review-<n-1>\.md/);
+  assert.match(body, /pattern's evidence at the absolute paths/);
+});
+
+test("a failed review is re-dispatched under a stated cap and then parked", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /re-dispatch \*\*only that reviewer\*\*/);
+  assert.match(body, /up to 2 times, then once with a fresh `ctc-reviewer`/);
+  assert.match(body, /park the puzzle `review-failed: <why>`/);
+  assert.match(body, /same cap applies when `reviewBlocked` is set/);
+});
+
+test("the review and card roles forbid wrapping the deliverable in a fence", () => {
+  const review = normalise(read("harness/skills/roles/puzzle-review.md"));
+  assert.match(review, /write the file's content, not a code fence around it/);
+  assert.match(review, /the closing fence would become the last line/);
+  assert.match(review, /spell paths in full in your bash commands — a review is free prose/);
+  for (const role of ["puzzle-generate", "puzzle-evolve"]) {
+    const prose = normalise(read(`harness/skills/roles/${role}.md`));
+    assert.match(prose, /do not wrap them in a code fence/, `${role}.md warns against copying the fence`);
+  }
+});
+
+test("Phase 2 states the real puzzle status and the Phase 0 absolute paths", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /there is no `promoted` status to set/);
+  assert.match(body, /moves a submitted puzzle to phase 3 as `ready`/);
+  assert.match(body, /absolute paths `manifest\.md` names/);
+  assert.match(body, /starts with neither `DONE`\/`DONE_WITH_CONCERNS` nor `RECOMMEND_PARK`\/`BLOCKED`/);
+  assert.match(body, /still enters the round-0 pool/);
+  assert.match(body, /it names the run id from the dispatch receipt/);
+  assert.match(body, /refuses an empty `pairs` list/);
+});
+
+test("promotion and distinctness use the latest round's scores and real files", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /Every id needs a Bradley-Terry score in the latest recorded round/);
+  assert.match(body, /has files under `workspace\/scripts\/` or `workspace\/results\/` \(an empty directory passes\)/);
+});
+
+test("the design spec no longer lets Phase 2 run analyses", () => {
+  const spec = normalise(read("docs/superpowers/specs/2026-10-12-ctc-research-factory-design.md"));
+  assert.match(spec, /Phase 1 may use small analyses only; Phase 2 runs none \(its evidence is Phase 1's cards\)/);
+  assert.doesNotMatch(spec, /Phases 1–2 may use small analyses/);
+});

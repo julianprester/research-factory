@@ -58,6 +58,9 @@ Lens: status quo
 Round: 0
 ```
 
+Write those lines as plain text: do not wrap them in a code fence — a fence is
+ignored when the card is read, so the card would have no `Lens:` line.
+
 `Lens:` is the lens from your brief. `Round:` is `0` for a generated puzzle. Do
 not add `Derived from:` or `Move:` — those belong to an evolved puzzle only.
 

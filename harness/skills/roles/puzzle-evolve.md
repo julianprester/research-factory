@@ -49,7 +49,9 @@ The meta-review lists weaknesses that recur across the round's reviews (a missin
 kind of rival, an over-claim about behaviour, a thin "why it matters"). Fix those
 too where they apply to this child: they are there so the next round does not
 repeat them. Never quote the meta-review into the card and never cite it as a
-source — it is guidance, not literature.
+source — it is guidance, not literature. For a **combination**, the brief names
+both parents: read **both** parents' cards and **both** merged reviews, and argue
+the one shared frame in `## A case of`.
 
 ## 2. The child card
 
@@ -62,6 +64,9 @@ Round: <the round from the brief>
 Derived from: P01, P03
 Move: grounding
 ```
+
+Write those lines as plain text: do not wrap them in a code fence — a fence is
+ignored when the card is read, so the card would have no `Lens:` line.
 
 `Derived from:` names **exactly** the ids in the node's `derivedFrom`, in any
 order. `Move:` is exactly one of `grounding`, `simplification`,

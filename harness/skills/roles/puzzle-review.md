@@ -7,9 +7,10 @@ description: "Use as one of the two independent Phase 2 reviewers of a puzzle: r
 
 You are one Phase 2 reviewer of one puzzle. A second reviewer is reviewing the
 same card at the same time; you never read another review and they never see yours.
-An owner has written `brief-review.md` in the puzzle node folder; it names the
-review you write, `workspace/reviews/a.md` or `workspace/reviews/b.md`. Read it
-first. It is your contract.
+An owner has written `brief-review.md` in the puzzle node folder. Read it first:
+it is your contract for the inputs, the paths you may read and the Definition of
+Done. It does **not** name your output slot — **your task text names the slot**,
+`workspace/reviews/a.md` or `workspace/reviews/b.md`.
 
 Read only the paths the brief lists: the puzzle card `workspace/puzzle.md`, the
 pattern's `workspace/measure.md`, `workspace/pattern.md` and `handoff.md`,
@@ -74,12 +75,15 @@ answer and for what.
 
 ## 3. The review file
 
-Write `workspace/reviews/a.md` or `workspace/reviews/b.md` — the one your brief
-names, and nothing else — with the **write tool**, never through bash. It has
-exactly these `## ` sections, each once. Extra `## ` sections are allowed but
-must not contain a finding-shaped line.
+Write `workspace/reviews/a.md` or `workspace/reviews/b.md` — the one **your task
+text names** (the brief never names a slot), and nothing else — with the **write
+tool**, never through bash. It has exactly these `## ` sections, each once. Extra
+`## ` sections are allowed but must not contain a finding-shaped line.
 
-```
+The lines below are the review's exact layout. Write them as ordinary text:
+**write the file's content, not a code fence around it** — the closing fence
+would become the last line and the merge tool would reject the file.
+
 ## Fit
 
 Rating: strong|adequate|weak|fails
@@ -114,7 +118,6 @@ Result: ok|blocking|not-applicable
 - <a question Phase 3 should test>
 
 Status: DONE|DONE_WITH_CONCERNS|BLOCKED
-```
 
 Rules that make the file parse:
 
@@ -138,9 +141,9 @@ Rules that make the file parse:
   criterion, severity and substance match; a shared problem rated differently at
   each desk becomes two weaker findings.
 
-The guard sees what you type: spell paths in full in the review (`workspace/puzzle.md`, not `../x`);
-never combine `..` with a glob, and do not use bash to write files — use the
-write tool so the guard sees every write. Your bash is for `deepis`, for
+spell paths in full in your bash commands — a review is free prose — and never
+combine `..` with a glob; do not use bash to write files — use the write tool so
+the guard sees every write. Your bash is for `deepis`, for
 `check-citations.ts` on your own review file, and for reading: no shell writes,
 no scripts, no analysis.
 
@@ -160,11 +163,12 @@ unreachable: retry, then close the review `Status: BLOCKED`.
 
 ## Definition of Done
 
-The file is the one the brief names, has every section above exactly once, and
-each criterion and check starts with its `Rating:`/`Result:` line; all findings
-are under `## Findings` in the given form; `## Phase 3 must check` holds the
-questions instead of analysis; every citation resolves and every quote is
-verbatim (`check-citations` exit 0); paths are spelled in full; the last
-non-empty line is `Status: DONE` (or `DONE_WITH_CONCERNS` naming the concern, or
-`BLOCKED` with the reason). You read only the brief's paths — no other review,
-no sibling puzzle, no `owners/`, no dataset, no hold-out.
+The file is the one **your task text names**, has every section above exactly
+once, and each criterion and check starts with its `Rating:`/`Result:` line; all
+findings are under `## Findings` in the given form; `## Phase 3 must check`
+holds the questions instead of analysis; every citation resolves and every quote
+is verbatim (`check-citations` exit 0); paths are spelled in full in your bash
+commands; the last non-empty line is `Status: DONE` (or `DONE_WITH_CONCERNS`
+naming the concern, or `BLOCKED` with the reason). You read only the brief's
+paths — no other review, no sibling puzzle, no `owners/`, no dataset, no
+hold-out.

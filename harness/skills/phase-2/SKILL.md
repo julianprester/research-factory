@@ -23,21 +23,30 @@ Before anything else, expect hours, not minutes: a live run is 20+ generation
 workers, twice as many reviewers, and a judge that plays every match in both
 orders. Record the budget you will hold yourself to:
 
-`Ruling: Phase 2 budget — <hours, and the stop I expect (which rule of the three, or the budget)> — <cost if wrong: an unfinished loop, or a round cut short>`
+`Ruling: Phase 2 budget — <hours, and how many rounds fit: round 0 plus up to N evolution rounds> — <cost if wrong: an unfinished loop, or a round cut short>`
+
+A `Ruling:` can stop the loop, but it records no STOP: only `judge_round`
+records one, and `promote` refuses without it. Budget so that at least one
+round reaches a code STOP (the cap is round 4, so the loop is bounded), and say
+in the ruling how many rounds fit. If the budget is nearly spent mid-loop,
+record `loop truncated: no STOP recorded, nothing promotable` and park every
+puzzle `no STOP reached` — do not pretend promotion is possible.
 
 Then resume. Call `tree_list({})` — all phases, not just phase 2 — and continue
 from what exists. Never recreate work:
 
 - A puzzle node already exists under a pattern: do not create another for the
-  same lens. Re-brief it only when its `handoff.md` is missing or does not start
-  with `DONE`/`DONE_WITH_CONCERNS`.
+  same lens. Re-brief it only when its `handoff.md` is missing or starts with
+  neither `DONE`/`DONE_WITH_CONCERNS` nor `RECOMMEND_PARK`/`BLOCKED`; §3
+  handles the last two by the park and fix rules, not by a re-brief.
 - `owners/phase-2/tournament/rounds.json` exists: read it before doing anything.
   A recorded `STOP` is final — no new evolution children, no further round.
 - Otherwise resume wherever the nodes leave off.
 
-Puzzle statuses are `ready → active → submitted → promoted`, with `parked` for
-anything culled. Only `promote` reaches `promoted` (and Phase 3); a puzzle can
-also be `parked` at any point after it is created.
+Puzzle statuses are `ready → active → submitted`, with `parked` for anything
+culled. `promote` moves a submitted puzzle to phase 3 as `ready`; there is no
+`promoted` status to set. A puzzle can be `parked` at any point after it is
+created.
 
 ## 1. The job list
 
@@ -107,7 +116,8 @@ Write `brief.md` in the puzzle node folder with exactly these five sections:
 - **Skill:** `./harness/skills/roles/puzzle-generate.md`
 - **Inputs:** the pattern node's `<pattern node dir>/workspace/measure.md`,
   `<pattern node dir>/workspace/pattern.md` and `<pattern node dir>/handoff.md`;
-  `data-character.md`; `glossary.md`; the criteria file
+  `data-character.md` and `glossary.md` at the absolute paths `manifest.md`
+  names; the criteria file
   `./harness/skills/criteria/tavory-timmermans.md`;
   the lens; and the pattern's `Caveat:` line when Phase 0 left one. No hold-out
   path, and no other puzzle's or pattern's files.
@@ -118,9 +128,11 @@ Dispatch it with `ctc-worker`, as phase-owner says:
 
 `subagent({ agent: "ctc-worker", async: true, cwd: "<puzzle node dir>", task: "Read brief.md and carry it out." })`
 
-Append the ledger line for the dispatch, then move the node `active`:
-`tree_update({ nodeId: "<P..>", status: "active" })`. Write each ledger line
-immediately before the `tree_*` or tool call it records.
+Append the ledger line for the dispatch — it names the run id from the dispatch
+receipt — then immediately `tree_update` the node `active`:
+`tree_update({ nodeId: "<P..>", status: "active" })`. For every other decision,
+write each ledger line immediately before the tree/tool call it records; never
+after the last tree call.
 
 ## 3. On a generator handoff
 
@@ -145,18 +157,19 @@ When a puzzle's card passes the checker, write `brief-review.md` in the **puzzle
 node folder** (the owner may write `brief.md` and `brief-review.md` there and
 nothing else). Exactly these five sections:
 
-- **Role:** independent reviewer of puzzle `<P..>`, reviewer `<a|b>`.
+- **Role:** independent reviewer of puzzle `<P..>`; your task text names your
+  slot (`a` or `b`).
 - **Skill:** `./harness/skills/roles/puzzle-review.md`
 - **Inputs:** the puzzle's own card `workspace/puzzle.md`; the pattern node's
   `<pattern node dir>/workspace/measure.md`, `<pattern node dir>/workspace/pattern.md`
-  and `<pattern node dir>/handoff.md`; `data-character.md`; `glossary.md`; the
-  criteria file
+  and `<pattern node dir>/handoff.md`; `data-character.md` and `glossary.md` at
+  the absolute paths `manifest.md` names; the criteria file
   `./harness/skills/criteria/tavory-timmermans.md`;
   and the pattern's `Caveat:` line when there is one. **No other puzzle or
   review path** — not a sibling puzzle, not the other reviewer's file, not
   `merged.md`.
-- **Outputs:** `workspace/reviews/a.md` or `workspace/reviews/b.md` — the one
-  this brief names.
+- **Outputs:** whichever of `workspace/reviews/a.md` or `workspace/reviews/b.md`
+  your task text names; the brief never names a slot.
 - **Definition of Done:** the role file's DoD, copied in.
 
 Dispatch **both reviewers of a puzzle concurrently**: two calls in one turn, each
@@ -177,9 +190,18 @@ re-run `merge-reviews.ts` after **any** review edit, then `check-puzzle` again.
 Read `workspace/reviews/merged.md`: it carries the per-criterion ratings and the
 flags `breakdown`, `knownResultBlocking`, `dataCharacterViolated` and
 `reviewBlocked`. `reviewBlocked` means a reviewer closed `Status: BLOCKED` — an
-aborted review: re-dispatch that reviewer rather than ranking the puzzle. When
-the checks pass, set the node `submitted`:
+aborted review. When the checks pass, set the node `submitted`:
 `tree_update({ nodeId: "<P..>", status: "submitted" })`.
+
+**Review recovery.** If `merge-reviews.ts` or `check-puzzle --reviews` names a
+review file (for example `workspace/reviews/a.md: …`), re-dispatch **only that
+reviewer**, with the same `brief-review.md` and the task text naming that slot:
+up to 2 times, then once with a fresh `ctc-reviewer` (a new `subagent` run, same
+brief). If it still fails, park the puzzle `review-failed: <why>` — a puzzle
+with no usable merge cannot be ranked. The same cap applies when `reviewBlocked`
+is set: re-dispatch the blocked reviewer up to 2 times, then once fresh, then
+park `review-failed: reviewer blocked`. Never re-dispatch both reviewers for one
+failing file, and never loop past that cap.
 
 ## 5. Round 0
 
@@ -189,7 +211,11 @@ the merge — call:
 
 `judge_round({ round: 0 })`
 
-Round 0 ranks the whole pool and needs at least 7 puzzles. It can take a while.
+Round 0 ranks the whole pool and needs at least 7 puzzles. A puzzle whose
+reviews call it a breakdown or a restatement **still enters the round-0 pool**:
+a ranked loss is information, nothing is culled before round 0, and every
+puzzle not promoted is parked only after the final ranking. It can be neither
+an evolution parent nor promoted, which the gates enforce. It can take a while.
 It answers either `PARTIAL` or `COMPLETE`:
 
 - `PARTIAL` — the round hit its 8-minute stretch. Do not change anything:
@@ -222,7 +248,15 @@ is a dead branch.
 
 Record the round's plan before you create anything:
 
-`Ruling: round <n> — parents <P.., P..>; moves <move per child> — <why these parents and these moves, from the ranking and the merged reviews> — <cost if wrong: one child that cannot beat its parent>`
+`Ruling: round <n> — entrants <the previous round's top 8, or every submitted incumbent ranked in it> + children <ids> = <k> identities (≥ 7); parents <P.., P..>; moves <move per child> — <why these parents and these moves> — <cost if wrong: one child that cannot beat its parent>`
+
+**A round needs at least 7 identities in total — entrants plus children.** A
+fresh child must play 6 matches, and two puzzles meet only once per round, so
+with N−1 opponents a new child can reach at most N−1 matches: N must be at
+least 7. Make `entrants` the previous round's top 8 (or every submitted
+incumbent that was ranked in it), and **count `entrants + children` before you
+create a child**: if the count is under 7, add incumbents (or children) until it
+is. The `Ruling:` records the count.
 
 Create each child under its parent's pattern node:
 
@@ -240,17 +274,25 @@ The four moves:
 
 The original is frozen: parent and child compete.
 
-Brief a child with `brief.md` (Role / Skill / Inputs / Outputs / Definition of
-Done, as in §2), role skill
-`./harness/skills/roles/puzzle-evolve.md`,
-the pattern's evidence, and these extra inputs:
+Brief a child with `brief.md`, exactly these five sections. The move, round and
+lens are values the worker cannot infer; name them.
 
-- the parent's card `<parent node dir>/workspace/puzzle.md` and its merged review
-  `<parent node dir>/workspace/reviews/merged.md` (a generator may see critique;
-  only the judge may not);
-- the previous round's meta-review `owners/phase-2/meta-review-<n-1>.md` when
-  one exists;
-- the pattern's `Caveat:` line.
+- **Role:** evolution worker for `<P..>` — move
+  `<grounding|simplification|out-of-the-box|combination>`, round `<n>`, lens
+  `<lens>`.
+- **Skill:** `./harness/skills/roles/puzzle-evolve.md`
+- **Inputs:** the parent's card `<parent node dir>/workspace/puzzle.md` and its
+  merged review `<parent node dir>/workspace/reviews/merged.md`; for a
+  **combination**, **both parents'** `workspace/puzzle.md` and
+  `workspace/reviews/merged.md`; the pattern's evidence at the absolute paths
+  `<pattern node dir>/workspace/measure.md`, `<pattern node dir>/workspace/pattern.md`
+  and `<pattern node dir>/handoff.md`; `data-character.md` and `glossary.md` at
+  the absolute paths `manifest.md` names; the previous round's meta-review
+  `owners/phase-2/meta-review-<n-1>.md` when one exists; the criteria file
+  `./harness/skills/criteria/tavory-timmermans.md`;
+  and the pattern's `Caveat:` line.
+- **Outputs:** `workspace/puzzle.md` and `handoff.md`.
+- **Definition of Done:** the role file's DoD, copied in.
 
 Dispatch `ctc-worker`. Review each child twice, exactly as §4 (write a new
 `brief-review.md` in the child's folder; dispatch both reviewers concurrently;
@@ -258,13 +300,15 @@ merge; `check-puzzle --reviews`; `submitted`).
 
 When every child of the round is `submitted`, judge it:
 
-`judge_round({ round: <n>, entrants: ["P01", "P03", "<P..>"], pairs: [{ child: "P20", parent: "P01" }] })`
+`judge_round({ round: 1, entrants: ["P01", "P02", "P03", "P04", "P05", "P06", "P07"], pairs: [{ child: "P20", parent: "P01" }] })`
 
-- `entrants` is the incumbent puzzles this round ranks; every parent of every
-  child must be among them.
+- `entrants` is the previous round's top 8 (or every submitted incumbent that
+  was ranked in it); every parent of every child must be among them. Seven
+  entrants plus one child is 8 identities, over the minimum.
 - `pairs` is required for round 1 and later: one entry for every child and its
-  parent. A pair that has already met cannot meet again — it needs a fresh child.
-  A round with no children latches STOP.
+  parent. Every round needs **at least one child**: the stop *rule* treats a
+  childless round as a stop, but `judge_round` refuses an empty `pairs` list.
+  A pair that has already met cannot meet again — it needs a fresh child.
 - `PARTIAL` — **repeat it with the identical arguments**: same round, same
   `entrants`, same `pairs`. A different forced pair on a resume is refused.
 
@@ -287,19 +331,28 @@ in the ledger that the loop was truncated, not converged.
   `STOP recorded (<reason>): no more evolution`.
 - **never call `judge_round` again** after a STOP: the stop is a latch and the
   tool refuses further rounds.
-- You may stop **earlier** than the tool by a `Ruling:` (the budget, a plateau
-  you can name) — never later.
+- You cannot make an early `Ruling:` stop promotable: a ruling records no STOP,
+  so `promote` refuses. Leave budget for at least one evolution round that can
+  reach a code STOP (round 4 is the bounded cap). If the budget is nearly spent
+  mid-loop, record `loop truncated: no STOP recorded, nothing promotable`, park
+  every puzzle `no STOP reached`, and say the loop promoted nothing. Never stop
+  later than the tool.
 
 ## 7. Promotion
 
 Promotion is code-gated and the number is yours to rule on. There is no fixed
-number.
+number. Promotion also requires a **STOP recorded by `judge_round`**: if you
+stopped the loop early by `Ruling:`, nothing is promotable — record `loop
+truncated: no STOP recorded, nothing promotable` and park every puzzle
+`no STOP reached`; do not pretend promotion is possible.
 
 1. Check the top candidates for duplicates:
    `check_duplicates({ ids: ["P01", "P02", "<top 8>"] })`
    It judges every pair "same puzzle?" in both orders and writes
-   `owners/phase-2/tournament/distinct.json`. A confirmed duplicate keeps the
-   higher-rated puzzle and drops the other.
+   `owners/phase-2/tournament/distinct.json`. Every id needs a Bradley-Terry
+   score in the latest recorded round, so choose ids that were ranked there —
+   the top 8 is the safe set. A confirmed duplicate keeps the higher-rated
+   puzzle and drops the other.
 2. Read the final round file `owners/phase-2/tournament/round-<n>.json`:
    `fit.scores`, `fit.lower`, `fit.upper` and `played` per puzzle. The round's
    `COMPLETE` text already printed the scores with their 80% intervals, `breaks`
@@ -307,11 +360,12 @@ number.
    `underplayed` (fewer than 6 matches).
 3. Record the decision with the numbers:
    `Ruling: promote <n> — <where the break is, with the numbers> — <cost if wrong: a weak puzzle in Phase 3, or a strong one missed>`
-4. `promote({ nodeId: "<P..>" })` for each chosen puzzle, in rank order. The tool
-   refuses, naming the gate, unless: STOP is recorded; the puzzle is `submitted`;
-   it is ranked in the latest recorded round with at least 6 matches; it is in
-   `distinct.json` and is not a `drop`; its merged review has plausibility not
-   `fails` and none of `breakdown`, `knownResultBlocking`,
+4. `promote({ nodeId: "<P..>" })` for each chosen puzzle, in rank order. It
+   moves the puzzle to Phase 3 as `ready` — there is no `promoted` status to
+   set. The tool refuses, naming the gate, unless: STOP is recorded; the puzzle
+   is `submitted`; it is ranked in the latest recorded round with at least 6
+   matches; it is in `distinct.json` and is not a `drop`; its merged review has
+   plausibility not `fails` and none of `breakdown`, `knownResultBlocking`,
    `dataCharacterViolated` or `reviewBlocked`; and `check-puzzle --reviews`
    passes. That last check runs `deepis` citation checks, so it is slow.
 5. Park **every other puzzle** with a note saying why:
@@ -338,14 +392,14 @@ is.
 
 `<n>` is the number of puzzles promoted, `<m>` every puzzle parked, `<r>` the
 number of rounds recorded, `<reason>` the stop the tool printed (`no-child-beat-parent`,
-`top-stable`, `cap`, or the budget/plateau you ruled). Write each ledger line
-before its tree call, and never write a ledger line after this last call.
+`top-stable`, `cap`, or `no STOP reached` for a budget stop). Write each ledger
+line before its tree call, and never write a ledger line after this last call.
 
 ## Never
 
 - Run an analysis, a script or a count yourself, or let a worker: **No analysis**
-  in Phase 2. `check-puzzle` fails a node that has `workspace/scripts/` or
-  `workspace/results/`.
+  in Phase 2. `check-puzzle` fails a node that has files under
+  `workspace/scripts/` or `workspace/results/` (an empty directory passes).
 - Read the dataset or the hold-out. The evidence is Phase 1's cards.
 - Show a judge a review, a rating or the meta-review: the judge gets the cards
   and the pattern evidence only, and the meta-review is never shown to the judge.
