@@ -12,15 +12,13 @@
 // stronger card, which makes the ranking recoverable and every run bit-for-bit
 // reproducible.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
   rmSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,7 +32,6 @@ import {
   pairKey,
   promotionCandidates,
   RoundStuckError,
-  ROUND_LOCK_STALE_MS,
   runRound,
   schedulePairs,
   type RoundOptions,
@@ -265,7 +262,7 @@ test("seven identities are just enough for six matches each", async (t) => {
 });
 
 /** Where a round's lock lives, so a test can plant one. */
-function lockFile(dir: string, round = 0): string {
+function lockDir(dir: string, round = 0): string {
   return path.join(dir, `round-${round}.lock`);
 }
 
@@ -274,116 +271,113 @@ function deadPid(): number {
   return spawnSync(process.execPath, ["-e", ""]).pid!;
 }
 
-/** The lock copies a breaker moves aside; a clean break leaves none. */
-function asideFiles(dir: string): string[] {
-  return readdirSync(dir).filter((name) => name.includes(".lock.stale."));
+/** Plant the tree-style lock: a directory holding the holder's pid file. */
+function plantLock(dir: string, pid: number, round = 0): string {
+  const lock = lockDir(dir, round);
+  mkdirSync(lock, { recursive: true });
+  writeFileSync(path.join(lock, "pid"), String(pid));
+  return lock;
 }
 
-test("two breakers of one aged lock: exactly one proceeds and the other never deletes its lock", (t) => {
-  const dir = tempDir(t);
-  const file = lockFile(dir);
-  writeFileSync(file, JSON.stringify({ pid: deadPid(), at: Date.now() - ROUND_LOCK_STALE_MS - 60_000 }));
-
-  // The widened window between "this lock is stale" and "break it": a second
-  // breaker wins the rename, installs its own fresh lock and proceeds. With
-  // check-then-unlink the first breaker would delete that fresh lock and both
-  // would hold the round at once.
-  let winner: (() => void) | undefined;
-  const otherBreaker = (): void => {
-    winner = acquireRoundLock(file);
-  };
-
-  assert.throws(
-    () => acquireRoundLock(file, { afterStale: otherBreaker }),
-    /another round is already running/,
-    "the late breaker loses instead of deleting the winner's lock",
-  );
-  assert.ok(winner !== undefined, "the other breaker got the lock");
-  assert.match(
-    readFileSync(file, "utf8"),
-    new RegExp(`"pid":${process.pid}`),
-    "the winner's lock is still there, untouched",
-  );
-  assert.deepEqual(asideFiles(dir), [], "nothing is left aside");
-
-  winner();
-  assert.ok(!existsSync(file), "and the winner can release it");
-});
-
-test("an aged lock is broken even when its pid is alive", async (t) => {
+test("a lock whose holder is gone is broken, and the round runs", async (t) => {
   const dir = tempDir(t);
   const sides = makeSides(8);
-  // Same pid, but taken before the ageing limit: a crashed writer's pid can
-  // belong to an unrelated live process by now, so the pid alone is not proof.
-  writeFileSync(
-    lockFile(dir),
-    JSON.stringify({ pid: process.pid, at: Date.now() - ROUND_LOCK_STALE_MS - 60_000 }),
-  );
-
-  const result = await runRound(options({ dir, sides, batchSize: 4, minMatches: 3 }));
-  assert.equal(result.complete, true, "the round runs despite the aged lock");
-  assert.ok(!existsSync(lockFile(dir)), "and the aged lock is gone afterwards");
-});
-
-test("a young lock held by a live pid still fails fast", async (t) => {
-  const dir = tempDir(t);
-  const sides = makeSides(8);
-  const held = JSON.stringify({ pid: process.pid, at: Date.now() });
-  writeFileSync(lockFile(dir), held);
-
-  await assert.rejects(
-    runRound(options({ dir, sides, batchSize: 4, minMatches: 3 })),
-    /another round is already running/,
-  );
-  assert.equal(readFileSync(lockFile(dir), "utf8"), held, "a live lock is left alone");
-  assert.equal(readLog(dir, 0).length, 0, "and no match was judged");
-});
-
-test("a lock whose holder is gone is broken", async (t) => {
-  const dir = tempDir(t);
-  const sides = makeSides(8);
-  // A real, already-exited process: its pid is dead (and is unlikely to be reused
-  // within this test).
-  const dead = deadPid();
-  writeFileSync(lockFile(dir), JSON.stringify({ pid: dead, at: Date.now() }));
+  // A real, already-exited process: its pid is dead, so the lock is stale and
+  // isStaleLock/breakStaleLock from the tree module break it.
+  plantLock(dir, deadPid());
 
   const result = await runRound(options({ dir, sides, batchSize: 4, minMatches: 3 }));
   assert.equal(result.complete, true, "a dead holder's lock is broken and the round runs");
-  assert.ok(!existsSync(lockFile(dir)));
+  assert.ok(!existsSync(lockDir(dir)), "and the broken lock is gone afterwards");
 });
 
-test("a legacy pid-only lock ages out by its file's mtime", async (t) => {
+test("a young lock held by a live pid fails fast with an error naming the lock directory", async (t) => {
   const dir = tempDir(t);
   const sides = makeSides(8);
-  writeFileSync(lockFile(dir), String(process.pid)); // old format: a bare pid
-  const old = new Date(Date.now() - ROUND_LOCK_STALE_MS - 60_000);
-  utimesSync(lockFile(dir), old, old);
+  const lock = plantLock(dir, process.pid);
 
-  // The pid is this live process, so only the mtime age can justify breaking it.
-  const result = await runRound(options({ dir, sides, batchSize: 4, minMatches: 3 }));
-  assert.equal(result.complete, true);
-  assert.ok(!existsSync(lockFile(dir)));
+  await assert.rejects(
+    runRound(options({ dir, sides, batchSize: 4, minMatches: 3 })),
+    (error: unknown) => {
+      const message = (error as Error).message;
+      assert.match(message, /another round is already running/);
+      assert.ok(message.includes(lock), `the error names the lock directory: ${message}`);
+      assert.match(message, /If no judge round is running, remove the lock directory/);
+      return true;
+    },
+  );
+  assert.equal(readFileSync(path.join(lock, "pid"), "utf8"), String(process.pid), "a live lock is left alone");
+  assert.equal(readLog(dir, 0).length, 0, "and no match was judged");
 });
 
-test("a lock released in the EEXIST window is retried, not surfaced as an fs error", (t) => {
+test("a thrown round releases the lock so a retry can run", async (t) => {
   const dir = tempDir(t);
-  const file = lockFile(dir);
-  writeFileSync(file, JSON.stringify({ pid: process.pid, at: Date.now() }));
+  const sides = makeSides(8);
+  const opts = { dir, sides, batchSize: 4, minMatches: 3 };
+  const dying: Transport = async () => {
+    throw new Error("judge died on the first call");
+  };
 
-  // The first `wx` fails, the holder releases in that window, the read sees no
-  // file: the acquisition must simply try again rather than throw ENOENT.
-  let conflicts = 0;
-  const release = acquireRoundLock(file, {
-    afterConflict: () => {
-      conflicts++;
-      rmSync(file, { force: true });
-    },
-  });
+  await assert.rejects(runRound(options({ ...opts, transport: dying })), /judge died/);
+  assert.ok(!existsSync(lockDir(dir)), "the transport-error path released the lock");
 
-  assert.equal(conflicts, 1);
-  assert.match(readFileSync(file, "utf8"), new RegExp(`"pid":${process.pid}`), "the lock was taken on the retry");
-  release();
-  assert.ok(!existsSync(file), "and released cleanly");
+  const retried = await runRound(options(opts));
+  assert.equal(retried.complete, true, "the retry is not blocked by a stranded lock");
+  assert.ok(!existsSync(lockDir(dir)));
+});
+
+test("concurrent processes breaking one dead lock: exactly one holds it", async (t) => {
+  const dir = tempDir(t);
+  plantLock(dir, deadPid());
+  // Three-plus callers hit the same stale lock at the same instant, all in real
+  // processes: breakStaleLock's breaker directory must let exactly one of them
+  // win, and the rest must fail fast against the winner's fresh lock - never
+  // both run. This is the four-round bug (a breaker restoring a fresh lock into
+  // an aside file) as a test.
+  const engineUrl = new URL("../tournament/engine.ts", import.meta.url).href;
+  const script = `
+    const { acquireRoundLock } = await import(${JSON.stringify(engineUrl)});
+    const fs = await import("node:fs");
+    const [lock, ready, go] = process.argv.slice(1);
+    fs.writeFileSync(ready, "ready");
+    while (!fs.existsSync(go)) await new Promise((resolve) => setTimeout(resolve, 2));
+    try {
+      const release = acquireRoundLock(lock);
+      console.log(JSON.stringify({ won: true }));
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      release();
+    } catch (error) {
+      console.log(JSON.stringify({ won: false, message: String(error?.message ?? error) }));
+    }
+  `;
+  const count = 4;
+  const children = Array.from({ length: count }, (_, index) =>
+    spawn(process.execPath, ["--input-type=module", "-e", script, lockDir(dir), path.join(dir, `ready-${index}`), path.join(dir, "go")]),
+  );
+  const exits = children.map(
+    (child) =>
+      new Promise<string>((resolve, reject) => {
+        let out = "";
+        child.stdout.on("data", (chunk: Buffer) => (out += chunk.toString()));
+        child.on("error", reject);
+        child.on("close", () => resolve(out));
+      }),
+  );
+
+  // Wait until every process is parked on the go file, then release them together.
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && !Array.from({ length: count }, (_, i) => path.join(dir, `ready-${i}`)).every((file) => existsSync(file))) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  writeFileSync(path.join(dir, "go"), "go");
+
+  const reports = (await Promise.all(exits)).flatMap((out) => out.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { won: boolean; message?: string }));
+  const winners = reports.filter((report) => report.won);
+  assert.equal(winners.length, 1, `exactly one process holds the lock, got ${winners.length}: ${JSON.stringify(reports)}`);
+  for (const loser of reports.filter((report) => !report.won)) {
+    assert.match(loser.message ?? "", /another round is already running/, `a loser fails fast: ${loser.message}`);
+  }
+  assert.ok(!existsSync(lockDir(dir)), "the winner released the lock");
 });
 
 test("a second overlapping call on the same round fails fast instead of double counting", async (t) => {

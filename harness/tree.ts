@@ -140,8 +140,13 @@ export function isStaleLock(lockDir: string): boolean {
   }
 }
 
-/** Take the lock: the atomic `mkdir`, then the holder's pid. A failed pid write drops the fresh dir. */
-function createLock(lockDir: string): void {
+/**
+ * Take the lock: the atomic `mkdir`, then the holder's pid. A failed pid write drops the fresh dir.
+ *
+ * Exported for the round runner (`tournament/engine.ts`), which takes one of these
+ * per round directory; the rest of the tree module treats it as internal.
+ */
+export function createLock(lockDir: string): void {
   fs.mkdirSync(lockDir);
   try {
     fs.writeFileSync(path.join(lockDir, PID_FILE), String(process.pid));

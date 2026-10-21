@@ -22,13 +22,15 @@
 // damaged log heals on the next replay; and it tolerates a damaged line only at
 // the tail, where a crash can produce one - a damaged line in the middle is an
 // error naming the line, because silently dropping a match would change the
-// ranking. `runRound` also holds an O_EXCL `round-<n>.lock` for its round, so two
-// overlapping calls cannot both append batch 0 and double-count it. The lock
-// records its pid and when it was taken, and ages out after `ROUND_LOCK_STALE_MS`
-// even if the pid is alive: pids are reused, so a crashed writer's pid can belong
-// to an unrelated process by the time the next call arrives. A stale lock is
-// broken by renaming it aside and checking the file that was actually taken, so a
-// slow breaker cannot delete a fresh lock another breaker just installed.
+// ranking. `runRound` also holds a `round-<n>.lock` directory for its round - the
+// same atomic-mkdir-plus-pid lock the tree uses, with the same tested staleness and
+// breaking rules (see `harness/tree.ts`) - so two overlapping calls cannot both
+// append batch 0 and double-count it. A lock whose holder is gone is broken through
+// `breakStaleLock`, whose breaker directory makes breaking race-free; a live lock
+// makes the second call fail fast, because the alternative is judging the same batch
+// twice. A stale lock whose pid was reused by an unrelated live process is not
+// broken automatically (the same limitation as every lock in tree.ts): the error
+// names the lock directory so it can be removed by hand.
 //
 // **Isolation (Review Focus 3).** `loadEntrant` reads exactly two files: the
 // puzzle's `workspace/puzzle.md` and the parent pattern's `workspace/pattern.md`,
@@ -42,17 +44,15 @@
 import {
   appendFileSync,
   existsSync,
-  linkSync,
   mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
 
-import { findNode } from "../tree.ts";
+import { breakStaleLock, createLock, findNode, isStaleLock } from "../tree.ts";
 import { judgeMatch, type MatchRecord, type Side, type Transport } from "./judge.ts";
 import {
   ELO_START,
@@ -359,6 +359,15 @@ function replay(prior: Outcome[], entries: LogLine[], belowBatch: number): State
   return state;
 }
 
+/** JSON.parse, or undefined when the text is not JSON (a torn log or lock file, say). */
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Drop a torn or damaged **tail** before anything is appended.
  *
@@ -506,189 +515,71 @@ function ensureLogHeader(file: string, seed: number, ids: string[], header: LogH
   }
 }
 
-/** Whether a lock's recorded pid is still alive (EPERM means it exists, we may not signal it). */
-function holderAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 /**
- * How long a round lock may live before it counts as abandoned, whatever pid it
- * names. A round's worst case is its 8-minute budget plus one in-flight batch, so
- * 40 minutes is several times the legitimate maximum. The age rule exists because
- * pids are reused: a crashed writer's pid can belong to a long-lived process by
- * the time the next call arrives, and a pid-only rule would then wedge the round
- * directory until somebody deleted the file by hand.
+ * The clear error for a live round lock: it names the lock directory (a caller
+ * can remove it by hand) and says to check that no judge round is running first.
  */
-export const ROUND_LOCK_STALE_MS = 40 * 60 * 1000;
-
-/** What a lock file says: who held it, when, how old the file is, and its exact text. */
-interface LockRecord {
-  /** The holder's pid, when the file names one. */
-  pid: number | undefined;
-  /** When the lock was taken, in ms; undefined for a legacy pid-only lock. */
-  at: number | undefined;
-  /** The lock file's own age, which covers a legacy or unreadable lock. */
-  ageMs: number;
-  /** The file's exact content, so a breaker can tell this lock from a fresh one. */
-  raw: string;
-}
-
-/** JSON.parse, or undefined when the text is not JSON (a torn lock file, say). */
-function parseJson(text: string): unknown {
+function heldError(lockDir: string): Error {
+  let pid: string;
   try {
-    return JSON.parse(text);
+    pid = readFileSync(path.join(lockDir, "pid"), "utf8").trim() || "unknown";
   } catch {
-    return undefined;
+    pid = "unknown";
   }
+  return new Error(
+    `runRound: ${lockDir} is held by pid ${pid}: another round is already running on this directory. ` +
+      `If no judge round is running, remove the lock directory ${lockDir}.`,
+  );
 }
 
 /**
- * The lock file's record, or undefined when the file has gone: a holder can
- * release it between our failed `wx` and this read, and that is not an error.
- */
-function readLock(file: string): LockRecord | undefined {
-  let text: string;
-  let ageMs: number;
-  try {
-    text = readFileSync(file, "utf8");
-    ageMs = Date.now() - statSync(file).mtimeMs;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-
-  const trimmed = text.trim();
-  const parsed = parseJson(trimmed);
-  if (typeof parsed === "object" && parsed !== null) {
-    const { pid, at } = parsed as { pid?: unknown; at?: unknown };
-    return {
-      pid: typeof pid === "number" && Number.isInteger(pid) && pid > 0 ? pid : undefined,
-      at: typeof at === "number" && Number.isFinite(at) ? at : undefined,
-      ageMs,
-      raw: trimmed,
-    };
-  }
-  // A legacy lock is a bare pid, so its age is the file's mtime.
-  const legacy = Number.parseInt(trimmed, 10);
-  return { pid: Number.isInteger(legacy) && legacy > 0 ? legacy : undefined, at: undefined, ageMs, raw: trimmed };
-}
-
-/** A lock's age: its recorded acquisition time, else the file's mtime (clock skew counts as 0). */
-function lockAgeMs(record: LockRecord): number {
-  return record.at === undefined ? Math.max(0, record.ageMs) : Math.max(0, Date.now() - record.at);
-}
-
-/**
- * Why a lock is stale, or undefined when it must be honoured: an hour-old lock is
- * abandoned (a live pid is not proof - pids are reused), and so is one whose
- * holder is gone. A young lock with an unreadable holder is honoured, so a
- * half-written lock file fails safe instead of letting two calls in.
- */
-function staleBecause(record: LockRecord): string | undefined {
-  const ageMs = lockAgeMs(record);
-  if (ageMs > ROUND_LOCK_STALE_MS) return `it is ${Math.round(ageMs / 60_000)} minutes old`;
-  if (record.pid === undefined) return undefined;
-  if (holderAlive(record.pid)) return undefined;
-  return `pid ${record.pid} is gone`;
-}
-
-/**
- * A unique name to move a broken lock to, so two breakers cannot collide on it.
- */
-function asideName(file: string): string {
-  return `${file}.stale.${process.pid}.${Date.now().toString(36)}.${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/**
- * Break a stale lock without ever deleting a fresh one.
+ * Take `lockDir` as a round lock and return the release.
  *
- * Reading the lock and then unlinking it is check-then-act: a breaker that pauses
- * between the two deletes whatever is at the path by then - including a fresh lock
- * another breaker installed after breaking the same stale lock - and both then
- * proceed, which is the double count the lock exists to stop. `rename` is atomic,
- * so exactly one breaker can take the file aside; it reads the file it actually
- * took and deletes it only if it is still the record it judged stale. If a fresh
- * lock landed in that window, the fresh lock is put back (`link` creates only
- * when the path is free) and the caller simply retries the acquisition. If the
- * path has been taken again meanwhile, the fresh lock is left aside, never
- * deleted: a live lock is not ours to remove.
- */
-function breakStaleLock(file: string, stale: LockRecord): void {
-  const aside = asideName(file);
-  try {
-    renameSync(file, aside);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return; // another breaker got there first
-    throw error;
-  }
-
-  const moved = readLock(aside);
-  if (moved !== undefined && moved.raw === stale.raw) {
-    rmSync(aside, { force: true });
-    return;
-  }
-  try {
-    linkSync(aside, file);
-    rmSync(aside, { force: true });
-  } catch {
-    /* the path is taken again (or cannot be linked): leave the aside file alone */
-  }
-}
-
-/** Seams for the lock tests; production passes none. */
-export interface LockSeams {
-  /** After a failed `wx` and before the lock is read: the holder may release here. */
-  afterConflict?: () => void;
-  /** After the lock is judged stale and before it is broken: another breaker may win here. */
-  afterStale?: () => void;
-}
-
-/**
- * Take `file` as an O_EXCL lockfile holding this process's pid and the time, and
- * return the release.
+ * The lock is the tree's own directory lock - an atomic `mkdir` plus the holder's
+ * pid file - so the round runner reuses `createLock`, `isStaleLock` and
+ * `breakStaleLock` from `harness/tree.ts` instead of carrying its own format.
+ * A lock whose holder is gone is stale and is broken through `breakStaleLock`,
+ * whose breaker directory makes breaking race-free: the breaker only removes a
+ * lock it immediately takes itself, so it can never delete the fresh lock another
+ * breaker just installed. A live (or young, unreadable) lock fails fast: two
+ * calls judging the same batch would double-count it.
  *
- * A stale lock (see `staleBecause`) is broken atomically (see `breakStaleLock`)
- * and the acquisition retried, so a crashed run's lock heals itself; a live, young
- * lock fails fast, because the alternative is two calls judging and appending the
- * same batch. If the lock vanishes between our failed `wx` and the read (the
- * holder released it in that window), the acquisition is simply retried rather
- * than surfacing an ENOENT.
- *
- * The two seams exist so those windows can be tested without racing a real
- * process.
+ * A stale lock whose pid was reused by an unrelated live process is **not** broken
+ * automatically - pids are not proof of a round, exactly as for every lock in
+ * tree.ts. Such a directory must be removed by hand; the error says so and names
+ * the lock directory.
  */
-export function acquireRoundLock(file: string, seams: LockSeams = {}): () => void {
+export function acquireRoundLock(lockDir: string): () => void {
+  const release = (): void => {
+    try {
+      rmSync(lockDir, { recursive: true, force: true });
+    } catch {
+      /* the lock is already gone */
+    }
+  };
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
-      writeFileSync(file, JSON.stringify({ pid: process.pid, at: Date.now() }), { flag: "wx" });
-      return () => {
-        try {
-          rmSync(file, { force: true });
-        } catch {
-          /* the lock is already gone */
-        }
-      };
+      createLock(lockDir);
+      return release;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
-    seams.afterConflict?.();
-    const record = readLock(file);
-    if (record === undefined) continue; // released in the window: take it now
-    if (staleBecause(record) === undefined) {
-      throw new Error(
-        `runRound: ${file} is held by pid ${record.pid ?? "unknown"} ` +
-          `(${Math.round(lockAgeMs(record) / 1000)} s old): another round is already running on this directory`,
-      );
+    // The holder can release between our failed mkdir and this check, and an
+    // absent lock is not stale (there is nothing to break), so an absent lock
+    // means "retry the mkdir", never "report a holder that is gone".
+    if (!isStaleLock(lockDir)) {
+      if (existsSync(lockDir)) throw heldError(lockDir);
+      continue;
     }
-    seams.afterStale?.();
-    breakStaleLock(file, record); // one attempt per lost race; the next `wx` picks the winner
+    // Breaking takes the lock itself when it wins; a false return means another
+    // breaker is busy or its fresh lock won the race, so try the mkdir again and
+    // then report that live holder instead of looping.
+    if (breakStaleLock(lockDir)) return release;
   }
-  throw new Error(`runRound: could not take ${file}`);
+  // Lost every break race to other breakers: the directory holds a lock we must
+  // not touch, so report it the same way as any live holder.
+  if (existsSync(lockDir)) throw heldError(lockDir);
+  throw new Error(`runRound: could not take ${lockDir}`);
 }
 
 function sortedRecord(values: Record<string, number>): Record<string, number> {
