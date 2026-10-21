@@ -20,9 +20,9 @@
 //   verdicts) is refused on `read` and `bash`.
 // - The hold-out stays locked for every Phase 2 session.
 //
-// None of this is a sandbox. A shell command is only scanned for names and
-// globs, and a script that walks the tree is not seen; the guard closes the
-// direct, accidental spellings a model reaches for.
+// None of this is a sandbox. A shell command is tokenised into words and
+// checked for path segments and globs, and a script that walks the tree is not
+// seen; the guard closes the direct, accidental spellings a model reaches for.
 import * as path from "node:path";
 
 import { holdoutRefusal, isPuzzleNode, ownersRefusal, reviewsRefusal, reviewerMayWrite, siblingRefusal } from "./guard.ts";

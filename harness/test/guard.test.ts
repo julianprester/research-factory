@@ -604,6 +604,33 @@ test("reviewsRefusal refuses any read under reviews/ and bash naming it except c
   assert.equal(reviewsRefusal("bash", { command: "ls workspace/previews" }), undefined, "previews is not reviews");
   assert.equal(reviewsRefusal("bash", { command: "cat reviews-notes.md" }), undefined, "a file name is not the folder");
   assert.equal(reviewsRefusal("bash", { command: "cat xreviews/foo" }), undefined, "xreviews is not reviews");
+  for (const command of [
+    "cat reviews/b.md",
+    "cd workspace && cat reviews/b.md",
+    "cd reviews",
+    "grep -r . workspace/reviews",
+    "cat ./reviews/b.md",
+    'cat "reviews/b.md"',
+    "ls reviews;",
+    "cat <reviews/b.md",
+    "cat >reviews/b.md",
+  ]) {
+    assert.equal(reviewsRefusal("bash", { command }) !== undefined, true, `refused: ${command}`);
+  }
+  for (const command of [
+    'deepis search "owners of firms" -n 5',
+    'deepis search "peer reviews of owners" -n 5 --no-rerank -f json | jq \'.results[0]\'',
+    "timeout 60 deepis context 123 -f json",
+    'deepis search "reviewers judging owners"',
+    "deepis search owners -n 5",
+  ]) {
+    assert.equal(reviewsRefusal("bash", { command }), undefined, `a literature search is not a path: ${command}`);
+  }
+  assert.equal(
+    reviewsRefusal("bash", { command: 'grep -n "peer reviews of owners" workspace/puzzle.md' }),
+    undefined,
+    "a quoted phrase is text, not a path",
+  );
   assert.equal(
     reviewsRefusal("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md" }),
     undefined,
@@ -662,6 +689,33 @@ test("ownersRefusal refuses the owners' folder, not a similar-looking name", () 
   );
   assert.equal(ownersRefusal("bash", { command: "cat workspace/owners-notes.md" }), undefined);
   assert.equal(ownersRefusal("bash", { command: "grep -r founders workspace/puzzle.md" }), undefined, "founders contains owners but is not a segment");
+  for (const command of [
+    "cat owners/ledger.md",
+    "cd .. && cat owners/x",
+    "cd owners",
+    "cat ./owners/ledger.md",
+    'cat "owners/ledger.md"',
+    "ls owners;",
+    "cat 2>owners/ledger.md",
+    "cat 2>>owners/ledger.md",
+    "cat >>owners/ledger.md",
+    "cat &>owners/ledger.md",
+  ]) {
+    assert.equal(ownersRefusal("bash", { command }) !== undefined, true, `refused: ${command}`);
+  }
+  for (const command of [
+    'deepis search "owners of firms" -n 5',
+    'deepis search "peer reviews of owners" -n 5 --no-rerank -f json | jq \'.results[0]\'',
+    "timeout 60 deepis context 123 -f json",
+    "deepis search owners -n 5",
+  ]) {
+    assert.equal(ownersRefusal("bash", { command }), undefined, `a literature search is not a path: ${command}`);
+  }
+  assert.equal(
+    ownersRefusal("bash", { command: 'grep -n "owners of firms" workspace/puzzle.md' }),
+    undefined,
+    "a quoted phrase is text, not a path",
+  );
 });
 
 test("the reviewer extension refuses reviews, siblings and writes outside its own review", (t) => {
@@ -705,6 +759,45 @@ test("the reviewer extension refuses reviews, siblings and writes outside its ow
   assert.equal(call("bash", { command: "ls workspace/previews" }), undefined, "previews is not reviews");
   assert.equal(call("bash", { command: "cat reviews-notes.md" }), undefined, "a file name is not the folder");
   assert.equal(call("bash", { command: "cat xreviews/foo" }), undefined, "xreviews is not reviews");
+  assert.equal(call("bash", { command: "cat my_owners.txt" }), undefined, "my_owners is not owners");
+  for (const command of [
+    "cat reviews/b.md",
+    "cd workspace && cat reviews/b.md",
+    "cd reviews",
+    "grep -r . workspace/reviews",
+    "cat ./reviews/b.md",
+    'cat "reviews/b.md"',
+    "ls reviews;",
+    "cat owners/ledger.md",
+    "cd .. && cat owners/x",
+    "cat <reviews/b.md",
+    "cat >reviews/b.md",
+    "cat 2>owners/ledger.md",
+    "cat 2>>owners/ledger.md",
+    "cat >>owners/ledger.md",
+    "cat &>owners/ledger.md",
+  ]) {
+    assert.equal(call("bash", { command })?.block, true, `refused for the reviewer: ${command}`);
+  }
+  for (const command of [
+    'deepis search "owners of firms" -n 5',
+    'deepis search "peer reviews of owners" -n 5 --no-rerank -f json | jq \'.results[0]\'',
+    "timeout 60 deepis context 123 -f json",
+    'deepis search "reviewers judging owners"',
+    "deepis search owners -n 5",
+  ]) {
+    assert.equal(call("bash", { command }), undefined, `the literature search is allowed: ${command}`);
+  }
+  assert.equal(
+    call("bash", { command: 'grep -n "owners of firms" workspace/puzzle.md' }),
+    undefined,
+    "a quoted phrase is text, not a path",
+  );
+  assert.equal(
+    call("bash", { command: 'grep -n "peer reviews of owners" workspace/puzzle.md' }),
+    undefined,
+    "a quoted phrase naming both is still text",
+  );
   assert.equal(
     call("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md 2>&1" }),
     undefined,

@@ -232,11 +232,127 @@ export function siblingRefusal(
   return undefined;
 }
 
-/** A `reviews` path segment named inside a shell command (not `previews/`, `xreviews/` or `reviews-notes.md`). */
-const REVIEWS_IN_COMMAND = /(^|[^A-Za-z0-9._-])reviews([\\/\s'";&|]|$)/;
+/** The path segments a reviewer may never name in a file argument: the other review slot and the owners' records. */
+const RESTRICTED_SEGMENTS = new Set(["reviews", "owners"]);
 
-/** An `owners` path segment named inside a shell command (judge verdicts and rulings live there). */
-const OWNERS_IN_COMMAND = /(^|[^A-Za-z0-9._-])owners([\\/\s'";&|]|$)/;
+/**
+ * Split a shell command into simple commands on `;`, `&&`, `||`, `|` and
+ * newlines, respecting single and double quotes, so a separator inside a quoted
+ * query does not split. `2>&1` stays inside its command.
+ */
+function splitSimpleCommands(command: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command[i] ?? "";
+    if (quote !== undefined) {
+      current += char;
+      if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === ";" || char === "\n") {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    if (char === "&" && command[i + 1] === "&") {
+      parts.push(current);
+      current = "";
+      i += 1;
+      continue;
+    }
+    if (char === "|") {
+      parts.push(current);
+      current = "";
+      if (command[i + 1] === "|") i += 1;
+      continue;
+    }
+    current += char;
+  }
+  parts.push(current);
+  return parts.filter((part) => part.trim().length > 0);
+}
+
+/**
+ * The shell words of one simple command. Quotes are removed, and a quoted span
+ * stays one word, so `"owners of firms"` is a phrase rather than three words.
+ */
+function shellWords(simple: string): string[] {
+  const words: string[] = [];
+  let current = "";
+  let started = false;
+  let quote: "'" | '"' | undefined;
+  for (const char of simple) {
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+      else {
+        current += char;
+        started = true;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (started) {
+        words.push(current);
+        current = "";
+        started = false;
+      }
+      continue;
+    }
+    current += char;
+    started = true;
+  }
+  if (started) words.push(current);
+  return words;
+}
+
+/**
+ * True when a simple command runs `deepis`, directly or after an optional
+ * `timeout <n>`: a literature search reads no local file, so its query text is
+ * never treated as a path.
+ */
+function runsDeepis(words: string[]): boolean {
+  const program = words[0];
+  if (program === "deepis") return true;
+  return program === "timeout" && words[2] === "deepis";
+}
+
+/**
+ * The `reviews`/`owners` path segments a bash command names. The command is split
+ * into simple commands (quote-aware) and tokenised; a `deepis` command is skipped
+ * whole (its query text is not a path); a token containing whitespace is a
+ * quoted phrase, not a path; a leading redirection operator is stripped; every
+ * remaining token is split on `/` and a segment must equal `reviews` or `owners`
+ * exactly, so `previews/`, `reviews-notes.md`, `xreviews/foo` and
+ * `my_owners.txt` pass. Residual: an unquoted single-word argument to a
+ * non-deepis command (`grep owners file`) is refused — accepted.
+ */
+function restrictedSegments(command: string): Set<string> {
+  const found = new Set<string>();
+  for (const simple of splitSimpleCommands(command)) {
+    const words = shellWords(simple);
+    if (runsDeepis(words)) continue;
+    for (const word of words) {
+      if (/\s/.test(word)) continue; // a quoted phrase is text, not a path
+      const pathWord = word.replace(/^(?:\d*(?:>>|>)|&>>?|<)/, "");
+      for (const segment of pathWord.split("/")) {
+        if (RESTRICTED_SEGMENTS.has(segment)) found.add(segment);
+      }
+    }
+  }
+  return found;
+}
 
 /** Shell operators that chain or nest a command: after one of these the guard no longer knows what runs. */
 const SHELL_OPERATOR = /;|&&|\|\||\||`|\$\(/;
@@ -260,10 +376,12 @@ function runsCheckCitations(command: string): boolean {
  * Why a reviewer may not run this tool call, or undefined when it may. A
  * reviewer's inputs are the card and the pattern files its brief names, never a
  * review: any `read` of a path with a `reviews` segment — including the
- * reviewer's own `a.md` — is refused, and so is any `bash` command naming the
- * segment (`grep -r . workspace/reviews`, `cd workspace/reviews && …`), except a
- * single `check-citations.ts` run on its own file. A script that walks the
- * folder is not caught; this is a guard against accidental reads, not a sandbox.
+ * reviewer's own `a.md` — is refused, and so is any `bash` command whose file
+ * arguments name the segment (`grep -r . workspace/reviews`, `cd reviews && …`),
+ * except a single `check-citations.ts` run on its own file. The command is
+ * tokenised, not regex-matched, so a `deepis` query that says "reviews of firms"
+ * is literature, not a path. A script that walks the folder is not caught; this
+ * is a guard against accidental reads, not a sandbox.
  */
 export function reviewsRefusal(
   toolName: string,
@@ -275,7 +393,7 @@ export function reviewsRefusal(
     }
   }
   if (toolName === "bash" && typeof input?.command === "string") {
-    if (REVIEWS_IN_COMMAND.test(input.command) && !runsCheckCitations(input.command)) {
+    if (restrictedSegments(input.command).has("reviews") && !runsCheckCitations(input.command)) {
       return "This command names reviews/: reviewers read no review, except a single check-citations.ts run on their own file";
     }
   }
@@ -286,7 +404,9 @@ export function reviewsRefusal(
  * Why a reviewer may not read the owners' folder, or undefined when it may. The
  * phase-2 owner's ledger, rulings and `owners/phase-2/tournament/round-*.json`
  * hold judge verdicts and ratings, and §5.3 says a reviewer sees no judge
- * output. A script that reads the folder indirectly is not caught.
+ * output. The command is tokenised like `reviewsRefusal`'s, so a literature
+ * query about "owners of firms" is not a path. A script that reads the folder
+ * indirectly is not caught.
  */
 export function ownersRefusal(
   toolName: string,
@@ -298,7 +418,7 @@ export function ownersRefusal(
     }
   }
   if (toolName === "bash" && typeof input?.command === "string") {
-    if (OWNERS_IN_COMMAND.test(input.command)) {
+    if (restrictedSegments(input.command).has("owners")) {
       return "This command names owners/: reviewers never read the owners' folder (rulings and judge verdicts)";
     }
   }
