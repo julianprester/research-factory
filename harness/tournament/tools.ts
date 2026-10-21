@@ -2,7 +2,7 @@
 //
 // `owner-extension.ts` only registers these; everything here takes the run
 // directory and its dependencies, so the rules below can be tested against a
-// real temp run and a fake judge without a pi session. Two tools live here:
+// real temp run and a fake judge without a pi session. Three tools live here:
 //
 // **`judgeRound`** is the pool barrier plus the round runner. Round 0 refuses
 // until every Phase 2 puzzle is `submitted` with its card and its merged review
@@ -23,6 +23,14 @@
 // is idempotent; the write is temp-file-and-rename so a crash cannot shred a
 // record `promote` will read.
 //
+// **`promote`** is the code gate on leaving Phase 2 (design §9; design spec §5.2:
+// promotion is never self-declared). It refuses, naming the failed gate, unless a
+// STOP is recorded, the puzzle is a submitted Phase 2 puzzle ranked in the final
+// round with at least six matches, it survived the distinctness check, its merged
+// review has no plausibility `fails` and no blocking flag, and `check-puzzle`
+// passes. A gate that cannot be read refuses too (fail closed). The owner still
+// decides how many to promote; the tool only decides which are eligible.
+//
 // The judge transport is injected. `owner-extension` calls with no transport and
 // gets `piTransport(judgeModel)` from the run's config; tests either pass one in
 // `ToolDeps` or install the module-level `setTransportForTests` hook (which the
@@ -32,7 +40,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import path from "node:path";
 
 import { readConfig } from "../launch.ts";
-import { findNode, listNodes, type NodeRef } from "../tree.ts";
+import { findNode, listNodes, updateNode, type NodeRef } from "../tree.ts";
+import { checkPuzzle } from "../tools/check-puzzle.ts";
 import { loadEntrant, promotionCandidates, RoundStuckError, runRound, type RoundResult } from "./engine.ts";
 import { judgeSame, piTransport, type MatchRecord, type Transport } from "./judge.ts";
 import type { Fit } from "./rating.ts";
@@ -67,6 +76,14 @@ export interface JudgeRoundInput {
 export interface CheckDuplicatesInput {
   ids: string[];
 }
+
+export interface PromoteInput {
+  nodeId: string;
+  note?: string;
+}
+
+/** `promote` reads the card and its reviews; tests inject the citation runner. */
+export type PromoteDeps = ToolDeps & { citations?: (file: string) => string[] };
 
 /**
  * The injected seams. `transport` is the judge; tests pass a fake. `budgetMs` and
@@ -554,27 +571,27 @@ interface DistinctRecord {
   duplicates: { keep: string; drop: string }[];
 }
 
-function readDistinct(file: string): DistinctRecord {
+function readDistinct(file: string, tool = "check_duplicates"): DistinctRecord {
   if (!existsSync(file)) return { checked: [], duplicates: [] };
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(file, "utf8"));
   } catch {
-    throw new Error(`check_duplicates: ${file} is not valid JSON, so the existing record cannot be extended`);
+    throw new Error(`${tool}: ${file} is not valid JSON, so the existing record cannot be read`);
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`check_duplicates: ${file} is not a { checked, duplicates } object`);
+    throw new Error(`${tool}: ${file} is not a { checked, duplicates } object`);
   }
   const { checked, duplicates } = parsed as Partial<DistinctRecord>;
   if (!Array.isArray(checked) || !checked.every((id) => typeof id === "string")) {
-    throw new Error(`check_duplicates: ${file} needs a "checked" array of ids`);
+    throw new Error(`${tool}: ${file} needs a "checked" array of ids`);
   }
-  if (!Array.isArray(duplicates)) throw new Error(`check_duplicates: ${file} needs a "duplicates" array`);
+  if (!Array.isArray(duplicates)) throw new Error(`${tool}: ${file} needs a "duplicates" array`);
   const pairs: { keep: string; drop: string }[] = [];
   for (const entry of duplicates) {
     const { keep, drop } = (entry ?? {}) as { keep?: unknown; drop?: unknown };
     if (typeof keep !== "string" || typeof drop !== "string") {
-      throw new Error(`check_duplicates: ${file} has a duplicate entry without string keep/drop ids`);
+      throw new Error(`${tool}: ${file} has a duplicate entry without string keep/drop ids`);
     }
     pairs.push({ keep, drop });
   }
@@ -684,4 +701,162 @@ export async function checkDuplicates(
   const found =
     duplicates.length > 0 ? duplicates.map((entry) => `keep ${entry.keep}, drop ${entry.drop}`).join("; ") : "none";
   return `check_duplicates: checked ${ids.length} ids (${ids.join(", ")}); duplicates: ${found}`;
+}
+
+/** The merged review's blocking flags: each must be present and false to promote. */
+const MERGED_FLAGS = ["breakdown", "knownResultBlocking", "dataCharacterViolated", "reviewBlocked"] as const;
+
+/**
+ * The merged review's problems for promotion in a fixed order, or [] when it is
+ * clean. A field that is missing is a problem, not a silence: a review the gate
+ * cannot read completely must not open the gate.
+ */
+function mergedReviewProblems(id: string, nodeDir: string): string[] {
+  const file = path.join(nodeDir, "workspace", "reviews", "merged.json");
+  if (!existsSync(file)) return [`${id} has no workspace/reviews/merged.json`];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return [`${id}'s merged.json is not valid JSON`];
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return [`${id}'s merged.json is not an object`];
+  }
+  const problems: string[] = [];
+  const { criteria, flags } = parsed as { criteria?: unknown; flags?: unknown };
+  const plausibility =
+    criteria !== null && typeof criteria === "object"
+      ? ((criteria as { plausibility?: unknown }).plausibility as { rating?: unknown } | undefined)?.rating
+      : undefined;
+  if (typeof plausibility !== "string") {
+    problems.push(`${id}'s merged review has no plausibility rating (fail closed)`);
+  } else if (plausibility === "fails") {
+    problems.push(`${id}'s merged review rates plausibility fails; a failed puzzle cannot be promoted`);
+  }
+  if (flags === null || typeof flags !== "object" || Array.isArray(flags)) {
+    problems.push(`${id}'s merged review has no flags object (fail closed)`);
+    return problems;
+  }
+  for (const flag of MERGED_FLAGS) {
+    const value = (flags as Record<string, unknown>)[flag];
+    if (value === undefined) {
+      problems.push(`${id}'s merged review has no ${flag} flag (fail closed)`);
+    } else if (value !== false) {
+      problems.push(`${id}'s merged review sets ${flag} to ${JSON.stringify(value)}; promotion needs it false`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * Promote one puzzle to Phase 3, through every gate or not at all.
+ *
+ * The gates are design §9's list, checked in the order that costs least and fails
+ * most plainly: the recorded STOP, the node (a submitted Phase 2 puzzle that is
+ * not already promoted), the final round's candidate list and match count, the
+ * distinctness record, the merged review, and `check-puzzle --reviews`. Each
+ * refusal names the gate and the fact that failed it, so the owner can fix the
+ * tree or the round rather than guess. Every gate is read fail-closed: an
+ * unreadable STOP record, round file or distinct.json is a refusal, never a pass.
+ *
+ * Promotion is a tree commit by `owner-p2` with the owner's note, because the
+ * note is the record of why this one and not another. The tool does not read the
+ * owner's promotion `Ruling:`: the owner decides how many to promote, and the
+ * return text reminds it to record that ruling and park the rest.
+ */
+export async function promote(runDir: string, input: PromoteInput, deps: PromoteDeps = {}): Promise<string> {
+  const dir = tournamentDir(runDir);
+  const id = input?.nodeId;
+  if (typeof id !== "string" || id === "") throw new Error("promote: needs a nodeId");
+
+  let node: NodeRef;
+  try {
+    node = findNode(runDir, id);
+  } catch {
+    throw new Error(`promote: ${id} is not a node in this run`);
+  }
+  if (node.type !== "puzzle") throw new Error(`promote: ${id} is a ${node.type} node, not a puzzle`);
+  if (node.phase === 3) {
+    throw new Error(`promote: ${id} is already in phase 3 (${node.status}); a puzzle is promoted once`);
+  }
+
+  // Gate 1: the loop must have stopped, and the record must say so readably.
+  const roundsFile = path.join(dir, "rounds.json");
+  let stop: Decision;
+  try {
+    stop = readStop(roundsFile);
+  } catch (error) {
+    throw new Error(`promote: STOP record unreadable: ${message(error)}`);
+  }
+  if (!stop.stop) {
+    throw new Error(
+      `promote: no STOP recorded in ${roundsFile}: promotion waits for the final round's STOP decision`,
+    );
+  }
+
+  // Gate 2: the pool barrier's successor state.
+  if (node.phase !== 2) throw new Error(`promote: ${id} is in phase ${node.phase}, not phase 2`);
+  if (node.status !== "submitted") throw new Error(`promote: ${id} is ${node.status}, not submitted`);
+
+  // Gate 3: the final round's candidate list, with enough matches to mean it.
+  const latest = roundFiles(dir).sort((left, right) => left.round - right.round).at(-1);
+  if (latest === undefined) {
+    throw new Error(`promote: no completed round (round-<n>.json) in ${dir}, so there is no final ranking`);
+  }
+  const stored = readStoredRound(latest.file, "promote");
+  const candidates = promotionCandidates(stored.fit, stored.played, MIN_MATCHES);
+  const rank = candidates.ranked.findIndex((candidate) => candidate.id === id);
+  if (rank < 0) throw new Error(`promote: ${id} is not ranked in the final round (round ${latest.round})`);
+  const candidate = candidates.ranked[rank]!;
+  if (candidate.matches < MIN_MATCHES) {
+    throw new Error(
+      `promote: ${id} played ${candidate.matches} matches in the final round, fewer than the ${MIN_MATCHES} promotion needs`,
+    );
+  }
+
+  // Gate 4: the distinctness check saw it and did not drop it.
+  const distinctFile = path.join(dir, "distinct.json");
+  if (!existsSync(distinctFile)) {
+    throw new Error(`promote: ${id} is not distinct-checked: ${distinctFile} does not exist, run check_duplicates first`);
+  }
+  const distinct = readDistinct(distinctFile, "promote");
+  if (!distinct.checked.includes(id)) {
+    throw new Error(`promote: ${id} is not in ${distinctFile}'s checked list; run check_duplicates on it`);
+  }
+  const dropped = distinct.duplicates.find((entry) => entry.drop === id);
+  if (dropped !== undefined) {
+    throw new Error(
+      `promote: ${id} is the drop of a confirmed duplicate of ${dropped.keep}; promote the keeper instead`,
+    );
+  }
+
+  // Gate 5: the merged review has no blocking finding.
+  const reviewProblems = mergedReviewProblems(id, node.dir);
+  if (reviewProblems.length > 0) throw new Error(`promote: ${reviewProblems.join("; ")}`);
+
+  // Gate 6: the deterministic card/review check, with its real citation runner
+  // unless a caller injected one.
+  let problems: string[];
+  try {
+    problems = checkPuzzle(runDir, node.dir, {
+      reviews: true,
+      ...(deps.citations !== undefined ? { citations: deps.citations } : {}),
+    }).problems;
+  } catch (error) {
+    throw prefixedError("promote", error);
+  }
+  if (problems.length > 0) throw new Error(`promote: ${id} fails check-puzzle: ${problems.join("; ")}`);
+
+  try {
+    updateNode(runDir, id, { phase: 3, status: "ready" }, "owner-p2", input.note);
+  } catch (error) {
+    throw prefixedError("promote", error);
+  }
+
+  return [
+    `promoted ${id} to phase 3 (rank ${rank + 1} of ${candidates.ranked.length}, score ${candidate.score.toFixed(3)}, ` +
+      `80% interval [${candidate.lower.toFixed(3)}, ${candidate.upper.toFixed(3)}])`,
+    "Record the promotion Ruling in your ledger (the code gates each puzzle; you decide how many), and park every puzzle you did not promote.",
+  ].join("\n");
 }

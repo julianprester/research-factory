@@ -11,8 +11,17 @@ import * as path from "node:path";
 import { Type } from "typebox";
 
 import { ownerMayWrite } from "./guard.ts";
-import { checkDuplicates, judgeRound, type CheckDuplicatesInput, type JudgeRoundInput } from "./tournament/tools.ts";
-import { createChild, findNode, listNodes, updateNode, type NodeRef } from "./tree.ts";
+import {
+  checkDuplicates,
+  judgeRound,
+  promote,
+  tournamentDir,
+  type CheckDuplicatesInput,
+  type JudgeRoundInput,
+  type PromoteInput,
+} from "./tournament/tools.ts";
+import { readStop, type Decision } from "./tournament/stop.ts";
+import { CHILD_TYPE, createChild, findNode, listNodes, updateNode, type NodeRef } from "./tree.ts";
 
 interface ToolCallEventLike {
   toolName: string;
@@ -67,6 +76,11 @@ const CheckDuplicatesParams = Type.Object({
   }),
 });
 
+const PromoteParams = Type.Object({
+  nodeId: Type.String({ description: "The submitted Phase 2 puzzle to promote, e.g. P03" }),
+  note: Type.Optional(Type.String({ description: "Why this one: recorded in the commit message, not on the node" })),
+});
+
 interface TreeListInput {
   phase?: number;
   status?: string;
@@ -118,6 +132,24 @@ function refuseNotYourPhase(nodePhase: number, phase: number): Error {
 }
 
 /**
+ * The evolution gate (design §6): while the tournament's recorded decision is
+ * STOP, no puzzle with a parent may be created. The gate is read from the file
+ * for every create, so a stop recorded after the session started still bites. A
+ * record that cannot be read is a refusal too: a STOP that cannot be read is not
+ * a stop that did not happen.
+ */
+function refuseEvolvedAfterStop(dir: string): void {
+  let decision: Decision;
+  try {
+    decision = readStop(path.join(tournamentDir(dir), "rounds.json"));
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    throw new Error(`STOP record unreadable: ${text}`);
+  }
+  if (decision.stop) throw new Error(`STOP recorded (${decision.reason}): no more evolution`);
+}
+
+/**
  * The phase a create under `parent` belongs to. The dataset's children are the
  * exception: a prep node is Phase 0 work, a pattern is Phase 1 work. Every
  * other parent's children stay in its own phase.
@@ -163,7 +195,12 @@ export default function ownerExtension(pi: PiLike): void {
       const parent = findNode(dir, params.parentId);
       const nodePhase = createPhase(parent, params.type);
       if (nodePhase !== phase) throw refuseNotYourPhase(nodePhase, phase);
-      const node = createChild(dir, params.parentId, params.title, actor(phase), params.derivedFrom ?? [], params.type);
+      // The child's resolved type decides whether this is evolution; only a
+      // puzzle with a derivedFrom is a child of the tournament.
+      const childType = params.type ?? CHILD_TYPE[parent.type];
+      const derivedFrom = params.derivedFrom ?? [];
+      if (childType === "puzzle" && derivedFrom.length > 0) refuseEvolvedAfterStop(dir);
+      const node = createChild(dir, params.parentId, params.title, actor(phase), derivedFrom, params.type);
       return result(`created ${line(node)}`);
     },
   });
@@ -179,6 +216,15 @@ export default function ownerExtension(pi: PiLike): void {
       const phase = ownerPhase();
       const found = findNode(dir, params.nodeId);
       if (found.phase !== phase) throw refuseNotYourPhase(found.phase, phase);
+      // Promotion is never self-declared (design spec §5.2): a puzzle reaches
+      // Phase 3 only through `promote`, which runs the gates first. A puzzle's
+      // phase is otherwise fixed; its status still moves within Phase 2.
+      if (
+        found.type === "puzzle" &&
+        (params.status === "promoted" || (params.phase !== undefined && params.phase !== found.phase))
+      ) {
+        throw new Error("use promote: puzzles reach Phase 3 only through the gated promote tool");
+      }
       const node = updateNode(dir, params.nodeId, { status: params.status, phase: params.phase }, actor(phase), params.note);
       return result(`updated ${line(node)}`);
     },
@@ -205,6 +251,18 @@ export default function ownerExtension(pi: PiLike): void {
     async execute(_toolCallId: string, params: CheckDuplicatesInput) {
       requirePhase2("check_duplicates");
       return result(await checkDuplicates(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "promote",
+    label: "Promote a puzzle",
+    description:
+      "Promote one submitted Phase 2 puzzle to Phase 3 after the final round's STOP. The tool refuses, naming the gate, unless: a STOP is recorded; the puzzle is ranked in the final round with at least 6 matches; the distinctness check lists it and did not drop it; its merged review has no plausibility fails and none of the breakdown, knownResultBlocking, dataCharacterViolated or reviewBlocked flags; and check-puzzle passes. You decide how many to promote; park the rest.",
+    parameters: PromoteParams,
+    async execute(_toolCallId: string, params: PromoteInput) {
+      requirePhase2("promote");
+      return result(await promote(runDir(), params));
     },
   });
 
