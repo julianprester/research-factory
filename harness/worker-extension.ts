@@ -5,17 +5,18 @@
 // extension finds the nearest ancestor of cwd holding a `node.json` and blocks
 // anything outside `<nodeDir>/workspace/**`, `<nodeDir>/rounds.md` and
 // `<nodeDir>/handoff.md`. A worker that is not inside a node at all fails
-// closed: it has no folder to be trusted with.
+// closed: it has no folder to be trusted with. Workers of Phase 1 and 2 nodes
+// also cannot `read` a hold-out path or run a `bash` command that names it.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
 
-import { workerMayWrite } from "./guard.ts";
+import { holdoutLocked, holdoutRefusal, workerMayWrite } from "./guard.ts";
 import { commitFile, findRunDir, measurementFiles, nodeIdOf, preregisterCommits } from "./tree.ts";
 
 interface ToolCallEventLike {
   toolName: string;
-  input?: { path?: unknown } | undefined;
+  input?: { path?: unknown; command?: unknown } | undefined;
 }
 
 interface PiLike {
@@ -37,6 +38,15 @@ export function findNodeDir(start: string): string | undefined {
     const parent = path.dirname(dir);
     if (parent === dir) return undefined;
     dir = parent;
+  }
+}
+
+/** The phase stored in a node's `node.json`; a node whose file can't be read is not locked. */
+function nodePhase(nodeDir: string): number {
+  try {
+    return Number(JSON.parse(fs.readFileSync(path.join(nodeDir, "node.json"), "utf8")).phase);
+  } catch {
+    return Number.NaN;
   }
 }
 
@@ -89,6 +99,12 @@ export default function workerExtension(pi: PiLike): void {
   });
 
   pi.on("tool_call", (event) => {
+    if (event.toolName === "read" || event.toolName === "bash") {
+      const nodeDir = findNodeDir(process.cwd());
+      if (nodeDir === undefined || !holdoutLocked(nodePhase(nodeDir))) return undefined;
+      const reason = holdoutRefusal(event.toolName, event.input);
+      return reason === undefined ? undefined : { block: true, reason };
+    }
     if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
     const filePath = event.input?.path;
     if (typeof filePath !== "string" || filePath.length === 0) {

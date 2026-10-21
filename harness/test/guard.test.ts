@@ -23,7 +23,7 @@ type ToolCallHandler = (event: {
   type: string;
   toolCallId: string;
   toolName: string;
-  input?: { path?: unknown };
+  input?: { path?: unknown; command?: unknown };
 }) => { block?: boolean; reason?: string } | undefined;
 
 interface FakePi {
@@ -378,4 +378,42 @@ test("owner tool_call guard blocks writes outside its phase and allows node brie
     })?.block,
     true,
   );
+});
+
+test("a Phase 1 worker cannot read the hold-out or run a command that names it; a Phase 0 worker can", (t) => {
+  const run = makeTempDir(t);
+  initRun(run, "data", "work on all-remote platforms");
+  createChild(run, "D01", "profile", "owner-p0", [], "prep");
+  createChild(run, "D01", "E01 Self Presentation", "owner-p1");
+  const prepDir = findNode(run, "Z01").dir;
+  const patternDir = findNode(run, "T01").dir;
+
+  const handlers = new Map<string, ToolCallHandler>();
+  workerExtension({
+    registerTool() {},
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+  });
+  const guard = handlers.get("tool_call");
+  assert.ok(guard);
+  const call = (toolName: string, input: { path?: unknown; command?: unknown }) =>
+    guard({ type: "tool_call", toolCallId: "c", toolName, input });
+
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+
+  process.chdir(patternDir);
+  for (const spelling of ["holdout.txt", "hold-out.txt", "Hold_Out.txt", "hold out.txt"]) {
+    assert.equal(call("read", { path: `/x/prep/Z01/workspace/split/${spelling}` })?.block, true, `read ${spelling}`);
+  }
+  assert.equal(call("read", { path: "/x/prep/Z01/workspace/split/exploration.txt" }), undefined, "the exploration list is readable");
+  assert.equal(call("read", { path: "/x/prep/Z01/workspace/profile.md" }), undefined, "profile.md is readable");
+  assert.equal(call("bash", { command: "wc -l /x/split/holdout.txt" })?.block, true, "bash naming the hold-out is refused");
+  assert.equal(call("bash", { command: "node workspace/scripts/01-measure.mjs" }), undefined, "an ordinary command is allowed");
+  assert.match(call("read", { path: "/x/holdout.txt" })?.reason ?? "", /never read the hold-out/);
+
+  process.chdir(prepDir);
+  assert.equal(call("read", { path: "/x/prep/Z01/workspace/split/holdout.txt" }), undefined, "the profile worker (Phase 0) is exempt");
+  assert.equal(call("bash", { command: "node holdout.ts data workspace/split" }), undefined, "and may run the split tool");
 });

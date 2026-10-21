@@ -42,3 +42,31 @@ export function ownerMayWrite(runDir: string, phase: number, absPath: string): b
     parts.length >= 3 && parts[parts.length - 1] === "brief.md" && NODE_DIRS.has(parts[parts.length - 3] ?? "")
   );
 }
+
+/** The hold-out in any spelling: `holdout`, `hold-out`, `hold_out`, `hold out`, any case. */
+export const HOLDOUT_WORD = /hold[-_ ]?out/i;
+
+/** Phases whose workers never see the hold-out; later phases unlock it per node. */
+const HOLDOUT_LOCKED_PHASES = new Set([1, 2]);
+
+/** True when workers of a node in `phase` must stay away from the hold-out. */
+export function holdoutLocked(phase: number): boolean {
+  return HOLDOUT_LOCKED_PHASES.has(phase);
+}
+
+/**
+ * Why a locked worker may not run this tool call, or undefined when it may. A
+ * `read` of any path with a hold-out spelling in it (the `holdout.txt` list, a
+ * folder named after it) and a `bash` command that names the hold-out are refused.
+ * This closes the direct routes; a script that walks the dataset is checked
+ * separately by check-pattern.
+ */
+export function holdoutRefusal(toolName: string, input: { path?: unknown; command?: unknown } | undefined): string | undefined {
+  if (toolName === "read" && typeof input?.path === "string" && HOLDOUT_WORD.test(input.path)) {
+    return `Reading ${input.path} is not allowed: Phase 1 and 2 workers never read the hold-out`;
+  }
+  if (toolName === "bash" && typeof input?.command === "string" && HOLDOUT_WORD.test(input.command)) {
+    return "This command names the hold-out, which Phase 1 and 2 workers never read";
+  }
+  return undefined;
+}
