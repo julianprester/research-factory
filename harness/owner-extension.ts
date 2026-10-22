@@ -11,7 +11,17 @@ import * as path from "node:path";
 import { Type } from "typebox";
 
 import { ownerMayWrite } from "./guard.ts";
-import { createChild, findNode, listNodes, updateNode, type NodeRef } from "./tree.ts";
+import {
+  checkDuplicates,
+  judgeRound,
+  promote,
+  tournamentDir,
+  type CheckDuplicatesInput,
+  type JudgeRoundInput,
+  type PromoteInput,
+} from "./tournament/tools.ts";
+import { readStop, type Decision } from "./tournament/stop.ts";
+import { CHILD_TYPE, createChild, findNode, listNodes, updateNode, type NodeRef } from "./tree.ts";
 
 interface ToolCallEventLike {
   toolName: string;
@@ -44,6 +54,31 @@ const TreeUpdateParams = Type.Object({
     Type.Number({ description: "New phase; moving a node to the next phase hands it on" }),
   ),
   note: Type.Optional(Type.String({ description: "Why: recorded in the commit message, not on the node" })),
+});
+
+const JudgeRoundParams = Type.Object({
+  round: Type.Number({ description: "The round to judge: 0 for the first ranking, then 1, 2, …" }),
+  entrants: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Round 1+: the incumbent puzzle ids this round ranks (round 0 takes every submitted puzzle)",
+    }),
+  ),
+  pairs: Type.Optional(
+    Type.Array(Type.Object({ child: Type.String(), parent: Type.String() }), {
+      description: "Round 1+: each evolution child and the incumbent parent it must be judged against",
+    }),
+  ),
+});
+
+const CheckDuplicatesParams = Type.Object({
+  ids: Type.Array(Type.String(), {
+    description: "The candidate puzzle ids to compare pairwise, e.g. the top 8 of the latest round",
+  }),
+});
+
+const PromoteParams = Type.Object({
+  nodeId: Type.String({ description: "The submitted Phase 2 puzzle to promote, e.g. P03" }),
+  note: Type.Optional(Type.String({ description: "Why this one: recorded in the commit message, not on the node" })),
 });
 
 interface TreeListInput {
@@ -86,8 +121,32 @@ function actor(phase: number): string {
   return `owner-p${phase}`;
 }
 
+/** The tournament tools are Phase 2's alone, whatever tree the session can see. */
+function requirePhase2(tool: string): void {
+  const phase = ownerPhase();
+  if (phase !== 2) throw new Error(`Not your phase: ${tool} is a phase-2 tool and you own P${phase}`);
+}
+
 function refuseNotYourPhase(nodePhase: number, phase: number): Error {
   return new Error(`Not your phase (node in P${nodePhase}, you own P${phase})`);
+}
+
+/**
+ * The evolution gate (design §6): while the tournament's recorded decision is
+ * STOP, no puzzle with a parent may be created. The gate is read from the file
+ * for every create, so a stop recorded after the session started still bites. A
+ * record that cannot be read is a refusal too: a STOP that cannot be read is not
+ * a stop that did not happen.
+ */
+function refuseEvolvedAfterStop(dir: string): void {
+  let decision: Decision;
+  try {
+    decision = readStop(path.join(tournamentDir(dir), "rounds.json"));
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    throw new Error(`STOP record unreadable: ${text}`);
+  }
+  if (decision.stop) throw new Error(`STOP recorded (${decision.reason}): no more evolution`);
 }
 
 /**
@@ -136,7 +195,12 @@ export default function ownerExtension(pi: PiLike): void {
       const parent = findNode(dir, params.parentId);
       const nodePhase = createPhase(parent, params.type);
       if (nodePhase !== phase) throw refuseNotYourPhase(nodePhase, phase);
-      const node = createChild(dir, params.parentId, params.title, actor(phase), params.derivedFrom ?? [], params.type);
+      // The child's resolved type decides whether this is evolution; only a
+      // puzzle with a derivedFrom is a child of the tournament.
+      const childType = params.type ?? CHILD_TYPE[parent.type];
+      const derivedFrom = params.derivedFrom ?? [];
+      if (childType === "puzzle" && derivedFrom.length > 0) refuseEvolvedAfterStop(dir);
+      const node = createChild(dir, params.parentId, params.title, actor(phase), derivedFrom, params.type);
       return result(`created ${line(node)}`);
     },
   });
@@ -152,8 +216,53 @@ export default function ownerExtension(pi: PiLike): void {
       const phase = ownerPhase();
       const found = findNode(dir, params.nodeId);
       if (found.phase !== phase) throw refuseNotYourPhase(found.phase, phase);
+      // Promotion is never self-declared (design spec §5.2): a puzzle reaches
+      // Phase 3 only through `promote`, which runs the gates first. A puzzle's
+      // phase is otherwise fixed; its status still moves within Phase 2.
+      if (
+        found.type === "puzzle" &&
+        (params.status === "promoted" || (params.phase !== undefined && params.phase !== found.phase))
+      ) {
+        throw new Error("use promote: puzzles reach Phase 3 only through the gated promote tool");
+      }
       const node = updateNode(dir, params.nodeId, { status: params.status, phase: params.phase }, actor(phase), params.note);
       return result(`updated ${line(node)}`);
+    },
+  });
+
+  pi.registerTool({
+    name: "judge_round",
+    label: "Judge a tournament round",
+    description:
+      "Judge one Phase 2 ranking round. Round 0 takes every submitted puzzle with its card and merged review and refuses until the pool is closed; later rounds take `entrants` plus `pairs` (child, parent) and play each child against its parent first. A PARTIAL answer means call again with the same arguments to resume. A COMPLETE answer appends the round's stop decision; STOP means no more evolution children may be created.",
+    parameters: JudgeRoundParams,
+    async execute(_toolCallId: string, params: JudgeRoundInput) {
+      requirePhase2("judge_round");
+      return result(await judgeRound(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "check_duplicates",
+    label: "Check duplicates",
+    description:
+      "Judge every pair among `ids` for being the same puzzle in both orders. A confirmed duplicate keeps the higher Bradley-Terry score from the latest round and drops the other; the record in owners/phase-2/tournament/distinct.json is unioned with earlier checks and is idempotent.",
+    parameters: CheckDuplicatesParams,
+    async execute(_toolCallId: string, params: CheckDuplicatesInput) {
+      requirePhase2("check_duplicates");
+      return result(await checkDuplicates(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "promote",
+    label: "Promote a puzzle",
+    description:
+      "Promote one submitted Phase 2 puzzle to Phase 3 after the final round's STOP. The tool refuses, naming the gate, unless: a STOP is recorded; the puzzle is ranked in the final round with at least 6 matches; the distinctness check lists it and did not drop it; its merged review has no plausibility fails and none of the breakdown, knownResultBlocking, dataCharacterViolated or reviewBlocked flags; and check-puzzle passes. You decide how many to promote; park the rest.",
+    parameters: PromoteParams,
+    async execute(_toolCallId: string, params: PromoteInput) {
+      requirePhase2("promote");
+      return result(await promote(runDir(), params));
     },
   });
 

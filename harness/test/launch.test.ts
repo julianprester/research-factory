@@ -421,14 +421,36 @@ test("readConfig accepts canonical non-negative integer phase keys", (t) => {
     "12": "harness/skills/demo-phase12",
   };
   writeFileSync(path.join(dir, "config.json"), JSON.stringify({ model: "m1", phases }));
-  assert.deepEqual(readConfig(dir), { model: "m1", phases });
+  assert.deepEqual(readConfig(dir), { model: "m1", judgeModel: "m1", phases });
 });
 
 test("readConfig reads the model and the phases", (t) => {
   const dir = configDir(t);
   const cfg = { model: "m1", phases: { "1": "harness/skills/demo-phase1" } };
   writeFileSync(path.join(dir, "config.json"), JSON.stringify(cfg));
+  assert.deepEqual(readConfig(dir), { ...cfg, judgeModel: "m1" });
+});
+
+test("readConfig reads judgeModel when the run names a different judge model", (t) => {
+  const dir = configDir(t);
+  const cfg = { model: "worker/model", judgeModel: "judge/model", phases: { "2": "harness/skills/phase-2" } };
+  writeFileSync(path.join(dir, "config.json"), JSON.stringify(cfg));
   assert.deepEqual(readConfig(dir), cfg);
+});
+
+test("readConfig defaults judgeModel to model", (t) => {
+  const dir = configDir(t);
+  writeFileSync(path.join(dir, "config.json"), JSON.stringify({ model: "m1", phases: {} }));
+  assert.equal(readConfig(dir).judgeModel, "m1");
+});
+
+test("readConfig rejects a non-string judgeModel, naming the key", (t) => {
+  const dir = configDir(t);
+  writeFileSync(
+    path.join(dir, "config.json"),
+    JSON.stringify({ model: "m1", judgeModel: 7, phases: {} }),
+  );
+  assert.throws(() => readConfig(dir), /config\.json: "judgeModel" must be a string/);
 });
 
 test("readConfig throws a clear error for a missing file", (t) => {

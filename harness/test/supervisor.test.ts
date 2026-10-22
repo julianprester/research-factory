@@ -5,7 +5,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { STALL_RETRY_MS, decide, phasesWithNodes, viewPhase, type Memory, type PhaseView } from "../supervisor.ts";
-import { createChild, initRun, updateNode } from "../tree.ts";
+import { createChild, findNode, initRun, updateNode } from "../tree.ts";
 
 function makeRun(t: TestContext): string {
   const runDir = mkdtempSync(path.join(tmpdir(), "ctc-supervisor-"));
@@ -384,4 +384,67 @@ test("closing the input node leaves no work: two quiet ticks finish the run", ()
   assert.deepEqual(second.actions, []);
   const third = decide([closed], "head-1", second.memory);
   assert.deepEqual(third.actions, [{ kind: "done", waitingForUnconfiguredPhases: {} }]);
+});
+
+test("a phase-2 tree with an open input node is never done, and closes to done after two quiet ticks", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  // A Phase 1 pattern handed on as the Phase 2 owner's input, with two puzzles:
+  // one running, one already submitted.
+  createChild(run, "D01", "E03 Etiquette", "owner-p1");
+  updateNode(run, "T01", { phase: 2, status: "input" }, "owner-p1");
+  const running = createChild(run, "T01", "status quo: crowd", "owner-p2");
+  const submitted = createChild(run, "T01", "different level: rooms", "owner-p2");
+  updateNode(run, running.id, { status: "active" }, "owner-p2");
+  updateNode(run, submitted.id, { status: "submitted" }, "owner-p2");
+  assert.equal(findNode(run, submitted.id).phase, 2, "a puzzle child stays in its pattern's phase");
+
+  const view = (owner: "idle" | "gone" | "working", started = true): PhaseView =>
+    viewPhase(run, 2, owner, { configured: true, started, entry: false });
+
+  // The pattern node is the open input; the active puzzle (no handoff) is running.
+  assert.deepEqual(view("idle").inputs, ["T01"]);
+  assert.deepEqual(view("idle").running, [running.id]);
+  assert.deepEqual(view("idle").ready, []);
+
+  // An idle owner is left alone while a worker runs, and a gone owner is started.
+  assert.deepEqual(decide([view("idle")], "head-1", memory()).actions, [], "running puzzles suppress the nudge");
+  assert.deepEqual(decide([view("gone", false)], "head-1", memory()).actions, [
+    { kind: "start", phase: 2, reason: "never-started" },
+  ]);
+
+  // The puzzle is submitted: only the open input is left, so an idle owner is
+  // nudged to finish the phase and close it - and the run is never done.
+  updateNode(run, running.id, { status: "submitted" }, "owner-p2");
+  const quiet = view("idle");
+  assert.deepEqual(quiet.inputs, ["T01"]);
+  assert.deepEqual(quiet.running, []);
+
+  let state = memory();
+  let result = decide([quiet], "head-1", state);
+  assert.equal(result.actions[0]?.kind, "nudge");
+  const nudge = result.actions[0];
+  assert.equal(
+    nudge?.kind === "nudge" ? nudge.message : "",
+    "Phase 2 has an open input node (T01) and no work in flight. If the phase is complete, close the input node; otherwise create and dispatch the next nodes. Your phase skill's limits still apply.",
+  );
+  state = result.memory;
+  for (let tick = 0; tick < 5; tick++) {
+    result = decide([quiet], "head-1", state);
+    assert.ok(
+      result.actions.every((action) => action.kind !== "done"),
+      `the open input node keeps the run alive: ${JSON.stringify(result.actions)}`,
+    );
+    state = result.memory;
+  }
+
+  // Closing the pattern node leaves nothing running or queued: two quiet ticks
+  // finish the run.
+  updateNode(run, "T01", { status: "closed" }, "owner-p2");
+  const closed = view("idle");
+  assert.deepEqual(closed.inputs, []);
+  const firstQuiet = decide([closed], "head-2", memory());
+  assert.deepEqual(firstQuiet.actions, []);
+  const secondQuiet = decide([closed], "head-2", firstQuiet.memory);
+  assert.deepEqual(secondQuiet.actions, [{ kind: "done", waitingForUnconfiguredPhases: {} }]);
 });

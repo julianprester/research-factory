@@ -1,7 +1,7 @@
 ---
 name: ctc-worker
 description: Carries out one research node: reads brief.md, works inside workspace/, and finishes with handoff.md.
-model: opencode-go/deepseek-v4.1-flash
+model: opencode-go/minimax-m3.1-flash-free
 tools: read, write, edit, bash, preregister
 extensions:
   - ./harness/worker-extension.ts

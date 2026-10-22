@@ -21,6 +21,8 @@ export const HARNESS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.
 
 export interface RunConfig {
   model: string;
+  /** The judge model; defaults to `model` (see `readConfig`). */
+  judgeModel?: string;
   phases: Record<string, string>;
 }
 
@@ -379,8 +381,14 @@ export function readConfig(runDir: string): RunConfig {
     throw new Error(`${file}: expected a JSON object`);
   }
 
-  const { model, phases } = parsed as { model?: unknown; phases?: unknown };
+  const { model, phases, judgeModel } = parsed as { model?: unknown; phases?: unknown; judgeModel?: unknown };
   if (typeof model !== "string" || model === "") throw new Error(`${file}: missing "model" (a string)`);
+  // The design puts the judge behind its own key (design §8) so swapping model
+  // families is a config change only. An absent key means "same as the workers"
+  // and is filled in here, so every caller reads one field instead of two.
+  if (judgeModel !== undefined && (typeof judgeModel !== "string" || judgeModel === "")) {
+    throw new Error(`${file}: "judgeModel" must be a string when present`);
+  }
   if (phases === null || typeof phases !== "object" || Array.isArray(phases)) {
     throw new Error(`${file}: missing "phases" (an object of phase number to skill path)`);
   }
@@ -393,5 +401,5 @@ export function readConfig(runDir: string): RunConfig {
     if (typeof skill !== "string" || skill === "") throw new Error(`${file}: phase ${phase} needs a skill path (a string)`);
     skills[phase] = skill;
   }
-  return { model, phases: skills };
+  return { model, judgeModel: judgeModel ?? model, phases: skills };
 }

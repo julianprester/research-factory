@@ -6,12 +6,15 @@
 // anything outside `<nodeDir>/workspace/**`, `<nodeDir>/rounds.md` and
 // `<nodeDir>/handoff.md`. A worker that is not inside a node at all fails
 // closed: it has no folder to be trusted with. Workers of Phase 1 and 2 nodes
-// also cannot `read` a hold-out path or run a `bash` command that names it.
+// also cannot `read` a hold-out path or run a `bash` command that names it, and
+// a Phase 2 puzzle worker can neither read a sibling puzzle's folder nor run a
+// command naming one (its `derivedFrom` parents stay readable, so an evolution
+// worker can read the cards and merged reviews it derives from).
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
 
-import { holdoutLocked, holdoutRefusal, workerMayWrite } from "./guard.ts";
+import { holdoutLocked, holdoutRefusal, siblingRefusal, workerMayWrite } from "./guard.ts";
 import { commitFile, findRunDir, measurementFiles, nodeIdOf, preregisterCommits } from "./tree.ts";
 
 interface ToolCallEventLike {
@@ -101,8 +104,11 @@ export default function workerExtension(pi: PiLike): void {
   pi.on("tool_call", (event) => {
     if (event.toolName === "read" || event.toolName === "bash") {
       const nodeDir = findNodeDir(process.cwd());
-      if (nodeDir === undefined || !holdoutLocked(nodePhase(nodeDir))) return undefined;
-      const reason = holdoutRefusal(event.toolName, event.input);
+      if (nodeDir === undefined) return undefined;
+      const phase = nodePhase(nodeDir);
+      const reason =
+        (holdoutLocked(phase) ? holdoutRefusal(event.toolName, event.input) : undefined) ??
+        (phase === 2 ? siblingRefusal(nodeDir, event.toolName, event.input) : undefined);
       return reason === undefined ? undefined : { block: true, reason };
     }
     if (event.toolName !== "write" && event.toolName !== "edit") return undefined;

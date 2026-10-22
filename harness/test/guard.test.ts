@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { ownerMayWrite, workerMayWrite } from "../guard.ts";
+import { ownerMayWrite, ownersRefusal, reviewsRefusal, siblingRefusal, workerMayWrite } from "../guard.ts";
 import ownerExtension from "../owner-extension.ts";
+import reviewerExtension from "../reviewer-extension.ts";
 import workerExtension from "../worker-extension.ts";
-import { createChild, findNode, initRun } from "../tree.ts";
+import { createChild, findNode, initRun, updateNode } from "../tree.ts";
+
+type ToolCall = (toolName: string, input: { path?: unknown; command?: unknown }) =>
+  | { block?: boolean; reason?: string }
+  | undefined;
 
 interface CapturedTool {
   name: string;
@@ -67,6 +72,79 @@ function withOwnerEnv(t: TestContext, runDir: string, phase: number, fn: () => v
     else process.env.CTC_PHASE = savedPhase;
   });
   fn();
+}
+
+interface PuzzleRun {
+  run: string;
+  patternDir: string;
+  otherPatternDir: string;
+  phase1PatternDir: string;
+  p1: string;
+  p2: string;
+  p3: string;
+  evolved: string;
+}
+
+/**
+ * A run with pattern T01 in phase 2 holding three puzzles (P01, P02, P03) and
+ * an evolved P04 derived from P01, plus a phase-2 pattern T02 and a phase-1
+ * pattern T03 for the nodes that must stay unaffected.
+ */
+function puzzleRun(t: TestContext): PuzzleRun {
+  const run = makeTempDir(t);
+  initRun(run, "data", "interest");
+  createChild(run, "D01", "Self Presentation", "owner-p1");
+  createChild(run, "D01", "Second Pattern", "owner-p1");
+  createChild(run, "D01", "Third Pattern", "owner-p1");
+  updateNode(run, "T01", { phase: 2, status: "active" }, "owner-p1");
+  updateNode(run, "T02", { phase: 2, status: "active" }, "owner-p1");
+  createChild(run, "T01", "status quo: crowd", "owner-p2");
+  createChild(run, "T01", "different level: rooms", "owner-p2");
+  createChild(run, "T01", "different theory: front", "owner-p2");
+  createChild(run, "T01", "grounding: crowd", "owner-p2", ["P01"]);
+  return {
+    run,
+    patternDir: findNode(run, "T01").dir,
+    otherPatternDir: findNode(run, "T02").dir,
+    phase1PatternDir: findNode(run, "T03").dir,
+    p1: findNode(run, "P01").dir,
+    p2: findNode(run, "P02").dir,
+    p3: findNode(run, "P03").dir,
+    evolved: findNode(run, "P04").dir,
+  };
+}
+
+/** Register a worker extension, chdir into `cwd` and return its tool_call guard. */
+function workerGuard(t: TestContext, cwd: string): ToolCall {
+  const handlers = new Map<string, ToolCallHandler>();
+  workerExtension({
+    registerTool() {},
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+  });
+  const guard = handlers.get("tool_call");
+  assert.ok(guard, "the worker registers a tool_call handler");
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+  process.chdir(cwd);
+  return (toolName, input) => guard({ type: "tool_call", toolCallId: "c", toolName, input });
+}
+
+/** Register the reviewer extension, chdir into `cwd` and return its tool_call guard. */
+function reviewerGuard(t: TestContext, cwd: string): ToolCall {
+  const handlers = new Map<string, ToolCallHandler>();
+  reviewerExtension({
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+  });
+  const guard = handlers.get("tool_call");
+  assert.ok(guard, "the reviewer registers a tool_call handler");
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+  process.chdir(cwd);
+  return (toolName, input) => guard({ type: "tool_call", toolCallId: "c", toolName, input });
 }
 
 function commitCount(runDir: string): number {
@@ -166,6 +244,82 @@ test("ownerMayWrite allows its own phase dir and any node brief", (t) => {
   assert.equal(ownerMayWrite(run, 1, path.join(run, "owners", "phase-1", "..", "phase-2", "ledger.md")), false);
   assert.equal(ownerMayWrite(run, 0, path.join(run, "prep", "Z01-profile", "brief.md")), true, "prep briefs are node briefs");
   assert.equal(ownerMayWrite(run, 0, path.join(run, "prep", "Z01-profile", "node.json")), false);
+  assert.equal(
+    ownerMayWrite(run, 1, path.join(run, "patterns", "T03-x", "puzzles", "P01-y", "brief-review.md")),
+    true,
+    "the reviewer brief of a puzzle node is an owner write",
+  );
+  assert.equal(
+    ownerMayWrite(run, 1, path.join(run, "patterns", "T03-x", "brief-review.md")),
+    false,
+    "brief-review.md belongs to puzzle nodes only",
+  );
+  assert.equal(
+    ownerMayWrite(run, 1, path.join(run, "patterns", "T03-x", "puzzles", "P01-y", "brief.md")),
+    true,
+    "the ordinary brief of a puzzle node is still allowed",
+  );
+});
+
+test("ownerMayWrite refuses the tournament records, keeping the rest of the phase folder", (t) => {
+  const run = makeTempDir(t);
+  for (const file of ["rounds.json", "round-1.json", "distinct.json", "round-0.matches.jsonl"]) {
+    assert.equal(
+      ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "tournament", file)),
+      false,
+      `${file} belongs to the tournament tools, not the owner's write tool`,
+    );
+  }
+  assert.equal(
+    ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "tournament", "round-9.json")),
+    false,
+    "a round file the tools have not written yet is still refused",
+  );
+  assert.equal(ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "ledger.md")), true);
+  assert.equal(ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "meta-review-1.md")), true);
+  assert.equal(
+    ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "tournament-notes.md")),
+    true,
+    "only the tournament folder is refused; a different name is an ordinary owner file",
+  );
+  assert.equal(ownerMayWrite(run, 1, path.join(run, "owners", "phase-1", "ledger.md")), true);
+  assert.equal(ownerMayWrite(run, 1, path.join(run, "owners", "phase-1", "tournament", "rounds.json")), false);
+  assert.equal(
+    ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "tournament", "..", "ledger.md")),
+    true,
+    ".. collapses to the phase folder before the tournament check",
+  );
+  assert.equal(ownerMayWrite(run, 2, path.join(run, "owners", "phase-2", "tournament")), false);
+});
+
+test("the owner tool_call guard blocks writes to the tournament records", (t) => {
+  const run = makeTempDir(t);
+  initRun(run, "data", "interest");
+  createChild(run, "D01", "E03 Etiquette", "owner-p1");
+
+  const { pi, handlers } = fakePi();
+  withOwnerEnv(t, run, 2, () => ownerExtension(pi));
+  const guard = handlers.get("tool_call");
+  assert.ok(guard, "the owner extension registers a tool_call handler");
+
+  const blocked = guard({
+    type: "tool_call",
+    toolCallId: "call-1",
+    toolName: "write",
+    input: { path: path.join(run, "owners", "phase-2", "tournament", "rounds.json") },
+  });
+  assert.equal(blocked?.block, true, "the forged-STOP route is closed at the guard");
+  assert.match(blocked?.reason ?? "", /tournament/);
+  assert.equal(
+    guard({
+      type: "tool_call",
+      toolCallId: "call-2",
+      toolName: "write",
+      input: { path: path.join(run, "owners", "phase-2", "ledger.md") },
+    }),
+    undefined,
+    "the ledger stays an owner write",
+  );
 });
 
 test("tree_create makes a phase-0 prep node for the phase-0 owner only", async (t) => {
@@ -416,4 +570,467 @@ test("a Phase 1 worker cannot read the hold-out or run a command that names it; 
   process.chdir(prepDir);
   assert.equal(call("read", { path: "/x/prep/Z01/workspace/split/holdout.txt" }), undefined, "the profile worker (Phase 0) is exempt");
   assert.equal(call("bash", { command: "node holdout.ts data workspace/split" }), undefined, "and may run the split tool");
+});
+
+test("a puzzle worker reads its own folder and the pattern's files but not a sibling puzzle", (t) => {
+  const { patternDir, p1, p2 } = puzzleRun(t);
+  const call = workerGuard(t, p1);
+
+  assert.equal(call("read", { path: "workspace/puzzle.md" }), undefined, "its own card is readable");
+  assert.equal(
+    call("read", { path: path.join(patternDir, "workspace", "pattern.md") }),
+    undefined,
+    "the parent pattern's card is readable",
+  );
+  // The three spellings a model may use: relative, with .., and absolute.
+  assert.equal(call("read", { path: `../${path.basename(p2)}/workspace/puzzle.md` })?.block, true, "relative sibling");
+  assert.equal(
+    call("read", { path: `../../puzzles/${path.basename(p2)}/workspace/puzzle.md` })?.block,
+    true,
+    "a .. path into the sibling",
+  );
+  assert.equal(call("read", { path: path.join(p2, "workspace", "puzzle.md") })?.block, true, "absolute sibling");
+  assert.match(call("read", { path: path.join(p2, "workspace", "puzzle.md") })?.reason ?? "", /sibling puzzles/);
+});
+
+test("a puzzle worker's bash may name its own folder but not a sibling's", (t) => {
+  const { p1, p2 } = puzzleRun(t);
+  const call = workerGuard(t, p1);
+
+  assert.equal(call("bash", { command: "wc -l workspace/puzzle.md" }), undefined, "an ordinary command is allowed");
+  assert.equal(
+    call("bash", { command: `cat ${path.join(p1, "workspace", "puzzle.md")}` }),
+    undefined,
+    "naming its own folder is allowed",
+  );
+  assert.equal(
+    call("bash", { command: `cat ../${path.basename(p2)}/workspace/puzzle.md` })?.block,
+    true,
+    "naming a sibling folder is refused",
+  );
+  assert.equal(call("bash", { command: `ls ${path.basename(p2)}` })?.block, true, "a bare sibling folder name is refused");
+});
+
+test("an evolved puzzle may read its derivedFrom parent, not its other siblings", (t) => {
+  const { p1, p3, evolved } = puzzleRun(t);
+  const call = workerGuard(t, evolved);
+
+  assert.equal(call("read", { path: path.join(p1, "workspace", "puzzle.md") }), undefined, "the parent card is readable");
+  assert.equal(
+    call("read", { path: path.join(p1, "workspace", "reviews", "merged.md") }),
+    undefined,
+    "the parent's merged review is readable by an evolution worker (only the judge is kept from reviews)",
+  );
+  assert.equal(call("bash", { command: `cat ${path.join(p1, "workspace", "puzzle.md")}` }), undefined, "bash naming the parent");
+  assert.equal(call("read", { path: path.join(p3, "workspace", "puzzle.md") })?.block, true, "an unrelated sibling");
+  assert.equal(call("bash", { command: `cat ${path.join(p3, "workspace", "puzzle.md")}` })?.block, true, "bash naming it");
+  assert.equal(call("bash", { command: "cat workspace/puzzle.md" }), undefined, "its own workspace stays readable");
+});
+
+test("the sibling rule leaves non-puzzle nodes and Phase 1 workers alone", (t) => {
+  const { p1, otherPatternDir, phase1PatternDir } = puzzleRun(t);
+  const sibling = path.join(p1, "workspace", "puzzle.md");
+
+  assert.equal(siblingRefusal(otherPatternDir, "read", { path: sibling }), undefined, "a phase-2 pattern node is unaffected");
+  assert.equal(
+    siblingRefusal(otherPatternDir, "bash", { command: `cat ${sibling}` }),
+    undefined,
+    "nor is its bash",
+  );
+
+  const call = workerGuard(t, phase1PatternDir);
+  assert.equal(call("read", { path: sibling }), undefined, "a Phase 1 worker is not under the sibling rule");
+});
+
+test("reviewsRefusal refuses any read under reviews/ and bash naming it except check-citations", () => {
+  assert.match(reviewsRefusal("read", { path: "workspace/reviews/b.md" }) ?? "", /never read a review/);
+  assert.match(reviewsRefusal("read", { path: "/x/patterns/T01-a/puzzles/P01-b/workspace/reviews/merged.md" }) ?? "", /never read a review/);
+  assert.equal(reviewsRefusal("read", { path: "workspace/puzzle.md" }), undefined);
+  assert.equal(reviewsRefusal("bash", { command: "cat workspace/reviews/b.md" }) !== undefined, true);
+  assert.equal(reviewsRefusal("bash", { command: "grep -r . workspace/reviews" }) !== undefined, true, "the bare folder");
+  assert.equal(reviewsRefusal("bash", { command: "cd workspace/reviews && cat b.md" }) !== undefined, true, "cd then read");
+  assert.equal(reviewsRefusal("bash", { command: "ls workspace/reviews;" }) !== undefined, true, "trailing semicolon");
+  assert.equal(reviewsRefusal("bash", { command: "cat workspace/previews/x.md" }), undefined, "previews/ is not reviews/");
+  assert.equal(reviewsRefusal("bash", { command: "cat workspace/reviews-notes.md" }), undefined, "reviews-notes.md is not the folder");
+  assert.equal(
+    reviewsRefusal("bash", { command: "cd workspace && cat reviews/b.md" }) !== undefined,
+    true,
+    "a bare relative reviews/ segment after cd",
+  );
+  assert.equal(
+    reviewsRefusal("bash", { command: "cat reviews/merged.md" }) !== undefined,
+    true,
+    "a bare relative reviews/ segment",
+  );
+  assert.equal(reviewsRefusal("bash", { command: "ls workspace/previews" }), undefined, "previews is not reviews");
+  assert.equal(reviewsRefusal("bash", { command: "cat reviews-notes.md" }), undefined, "a file name is not the folder");
+  assert.equal(reviewsRefusal("bash", { command: "cat xreviews/foo" }), undefined, "xreviews is not reviews");
+  for (const command of [
+    "cat reviews/b.md",
+    "cd workspace && cat reviews/b.md",
+    "cd reviews",
+    "grep -r . workspace/reviews",
+    "cat ./reviews/b.md",
+    'cat "reviews/b.md"',
+    "ls reviews;",
+    "cat <reviews/b.md",
+    "cat >reviews/b.md",
+  ]) {
+    assert.equal(reviewsRefusal("bash", { command }) !== undefined, true, `refused: ${command}`);
+  }
+  for (const command of [
+    'deepis search "owners of firms" -n 5',
+    'deepis search "peer reviews of owners" -n 5 --no-rerank -f json | jq \'.results[0]\'',
+    "timeout 60 deepis context 123 -f json",
+    'deepis search "reviewers judging owners"',
+    "deepis search owners -n 5",
+  ]) {
+    assert.equal(reviewsRefusal("bash", { command }), undefined, `a literature search is not a path: ${command}`);
+  }
+  assert.equal(
+    reviewsRefusal("bash", { command: 'grep -n "peer reviews of owners" workspace/puzzle.md' }),
+    undefined,
+    "a quoted phrase is text, not a path",
+  );
+  assert.equal(
+    reviewsRefusal("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md" }),
+    undefined,
+    "check-citations may read the review it is checking",
+  );
+  assert.equal(
+    reviewsRefusal("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md 2>&1" }),
+    undefined,
+    "a trailing 2>&1 is not a pipe",
+  );
+  assert.equal(
+    reviewsRefusal("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md 2>&1 | tail -20" }) !==
+      undefined,
+    true,
+    "a pipe after the redirect is not allowed",
+  );
+  assert.equal(
+    reviewsRefusal("bash", { command: "cat workspace/reviews/b.md && echo check-citations.ts" }) !== undefined,
+    true,
+    "the escape needs a plain node command, not the word anywhere",
+  );
+  assert.equal(
+    reviewsRefusal("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md; cat b.md" }) !==
+      undefined,
+    true,
+    "a chained command is not a plain check-citations run",
+  );
+  assert.equal(
+    reviewsRefusal("bash", { command: "echo x && node harness/tools/check-citations.ts workspace/reviews/a.md" }) !==
+      undefined,
+    true,
+    "the command must start with node",
+  );
+  assert.equal(reviewsRefusal("bash", { command: "wc -l workspace/puzzle.md" }), undefined);
+  assert.equal(reviewsRefusal("write", { path: "workspace/reviews/a.md" }), undefined, "write is not this guard's business");
+});
+
+test("ownersRefusal refuses the owners' folder, not a similar-looking name", () => {
+  assert.match(ownersRefusal("read", { path: "/x/owners/phase-2/tournament/round-0.json" }) ?? "", /owners' folder/);
+  assert.equal(ownersRefusal("read", { path: "workspace/puzzle.md" }), undefined);
+  assert.equal(ownersRefusal("read", { path: "workspace/owners-notes.md" }), undefined, "a file name is not the folder");
+  assert.equal(
+    ownersRefusal("bash", { command: "cat ../owners/phase-2/tournament/round-0.json" }) !== undefined,
+    true,
+    "bash is refused too",
+  );
+  assert.equal(
+    ownersRefusal("bash", { command: "cat owners/ledger.md" }) !== undefined,
+    true,
+    "a bare relative owners/ segment",
+  );
+  assert.equal(
+    ownersRefusal("bash", { command: "cd .. && cat owners/phase-2/tournament/round-0.json" }) !== undefined,
+    true,
+    "a bare owners/ segment after cd ..",
+  );
+  assert.equal(ownersRefusal("bash", { command: "cat workspace/owners-notes.md" }), undefined);
+  assert.equal(ownersRefusal("bash", { command: "grep -r founders workspace/puzzle.md" }), undefined, "founders contains owners but is not a segment");
+  for (const command of [
+    "cat owners/ledger.md",
+    "cd .. && cat owners/x",
+    "cd owners",
+    "cat ./owners/ledger.md",
+    'cat "owners/ledger.md"',
+    "ls owners;",
+    "cat 2>owners/ledger.md",
+    "cat 2>>owners/ledger.md",
+    "cat >>owners/ledger.md",
+    "cat &>owners/ledger.md",
+  ]) {
+    assert.equal(ownersRefusal("bash", { command }) !== undefined, true, `refused: ${command}`);
+  }
+  for (const command of [
+    'deepis search "owners of firms" -n 5',
+    'deepis search "peer reviews of owners" -n 5 --no-rerank -f json | jq \'.results[0]\'',
+    "timeout 60 deepis context 123 -f json",
+    "deepis search owners -n 5",
+  ]) {
+    assert.equal(ownersRefusal("bash", { command }), undefined, `a literature search is not a path: ${command}`);
+  }
+  assert.equal(
+    ownersRefusal("bash", { command: 'grep -n "owners of firms" workspace/puzzle.md' }),
+    undefined,
+    "a quoted phrase is text, not a path",
+  );
+});
+
+test("the reviewer extension refuses reviews, siblings and writes outside its own review", (t) => {
+  const { patternDir, p1, p2 } = puzzleRun(t);
+  const call = reviewerGuard(t, p1);
+
+  assert.equal(call("read", { path: "workspace/puzzle.md" }), undefined, "the card is readable");
+  assert.equal(
+    call("read", { path: path.join(patternDir, "workspace", "pattern.md") }),
+    undefined,
+    "the pattern's evidence is readable",
+  );
+  assert.equal(call("read", { path: "workspace/reviews/b.md" })?.block, true, "the other review is refused");
+  assert.equal(
+    call("read", { path: path.join(p1, "workspace", "reviews", "a.md") })?.block,
+    true,
+    "the reviewer's own draft is refused too",
+  );
+  assert.equal(
+    call("read", { path: path.join(p2, "workspace", "reviews", "merged.md") })?.block,
+    true,
+    "a sibling's merged review is refused",
+  );
+  assert.equal(call("read", { path: path.join(p2, "workspace", "puzzle.md") })?.block, true, "a sibling card is refused");
+  assert.equal(call("read", { path: "/x/holdout.txt" })?.block, true, "the hold-out is refused");
+
+  assert.equal(
+    call("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md" }),
+    undefined,
+    "check-citations on its own review is allowed",
+  );
+  assert.equal(call("bash", { command: "cat workspace/reviews/b.md" })?.block, true, "reading a review by bash is refused");
+  assert.equal(call("bash", { command: "cd workspace && cat reviews/b.md" })?.block, true, "a bare reviews/ segment after cd");
+  assert.equal(call("bash", { command: "cat reviews/merged.md" })?.block, true, "a bare relative reviews/ segment");
+  assert.equal(call("bash", { command: "cat owners/ledger.md" })?.block, true, "a bare relative owners/ segment");
+  assert.equal(
+    call("bash", { command: "cd .. && cat owners/phase-2/ledger.md" })?.block,
+    true,
+    "owners/ behind a cd ..",
+  );
+  assert.equal(call("bash", { command: "ls workspace/previews" }), undefined, "previews is not reviews");
+  assert.equal(call("bash", { command: "cat reviews-notes.md" }), undefined, "a file name is not the folder");
+  assert.equal(call("bash", { command: "cat xreviews/foo" }), undefined, "xreviews is not reviews");
+  assert.equal(call("bash", { command: "cat my_owners.txt" }), undefined, "my_owners is not owners");
+  for (const command of [
+    "cat reviews/b.md",
+    "cd workspace && cat reviews/b.md",
+    "cd reviews",
+    "grep -r . workspace/reviews",
+    "cat ./reviews/b.md",
+    'cat "reviews/b.md"',
+    "ls reviews;",
+    "cat owners/ledger.md",
+    "cd .. && cat owners/x",
+    "cat <reviews/b.md",
+    "cat >reviews/b.md",
+    "cat 2>owners/ledger.md",
+    "cat 2>>owners/ledger.md",
+    "cat >>owners/ledger.md",
+    "cat &>owners/ledger.md",
+  ]) {
+    assert.equal(call("bash", { command })?.block, true, `refused for the reviewer: ${command}`);
+  }
+  for (const command of [
+    'deepis search "owners of firms" -n 5',
+    'deepis search "peer reviews of owners" -n 5 --no-rerank -f json | jq \'.results[0]\'',
+    "timeout 60 deepis context 123 -f json",
+    'deepis search "reviewers judging owners"',
+    "deepis search owners -n 5",
+  ]) {
+    assert.equal(call("bash", { command }), undefined, `the literature search is allowed: ${command}`);
+  }
+  assert.equal(
+    call("bash", { command: 'grep -n "owners of firms" workspace/puzzle.md' }),
+    undefined,
+    "a quoted phrase is text, not a path",
+  );
+  assert.equal(
+    call("bash", { command: 'grep -n "peer reviews of owners" workspace/puzzle.md' }),
+    undefined,
+    "a quoted phrase naming both is still text",
+  );
+  assert.equal(
+    call("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md 2>&1" }),
+    undefined,
+    "a trailing 2>&1 is fine",
+  );
+  assert.equal(
+    call("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md 2>&1 | tail -20" })?.block,
+    true,
+    "a pipe after the redirect is not",
+  );
+  assert.equal(call("bash", { command: "cat " + path.join(p2, "workspace", "puzzle.md") })?.block, true, "a sibling by bash");
+  assert.equal(
+    call("bash", {
+      command: "node harness/tools/check-citations.ts " + path.join(p2, "workspace", "reviews", "a.md"),
+    })?.block,
+    true,
+    "even check-citations may not be pointed at another puzzle's review",
+  );
+
+  assert.equal(call("write", { path: "workspace/reviews/a.md" }), undefined, "writing its own review is allowed");
+  assert.equal(call("write", { path: "workspace/reviews/b.md" }), undefined, "the b slot is allowed too (the brief names one)");
+  assert.equal(call("write", { path: "workspace/reviews/merged.md" })?.block, true, "the merge is the owner's, not a reviewer's");
+  assert.equal(call("write", { path: "handoff.md" })?.block, true, "a reviewer writes no handoff.md");
+  assert.equal(call("write", { path: "workspace/puzzle.md" })?.block, true, "a reviewer never edits the card");
+  assert.equal(call("write", {})?.block, true, "a write without a path is refused");
+  assert.equal(call("edit", { path: "workspace/reviews/a.md" }), undefined, "editing its own review is allowed");
+  assert.equal(call("write", { path: "../" + path.basename(p2) + "/workspace/reviews/a.md" })?.block, true, "a sibling's review slot");
+  assert.equal(call("read", { path: "/x/owners/phase-2/ledger.md" })?.block, true, "the owner's ledger is judge-side material");
+  assert.equal(
+    call("bash", { command: "cat ../owners/phase-2/tournament/round-0.json" })?.block,
+    true,
+    "and so are the round files, by bash",
+  );
+});
+
+test("a backslash-escaped quote is an escaped character, not a quote", (t) => {
+  const { p1 } = puzzleRun(t);
+  const call = reviewerGuard(t, p1);
+
+  // The round-4 bug: an escaped quote opened a phantom quoted span that swallowed
+  // the rest of the command, so a plain `cat reviews/b.md` behind it was allowed.
+  for (const command of [
+    "echo don\\'t; cat reviews/b.md",
+    "echo it\\'s fine && cat reviews/b.md",
+    'echo \\"x; cat reviews/b.md',
+  ]) {
+    assert.equal(reviewsRefusal("bash", { command }) !== undefined, true, `an escaped quote opens no span: ${command}`);
+    assert.equal(call("bash", { command })?.block, true, `refused for the reviewer: ${command}`);
+  }
+  // The splitter alone: a phantom span would fold the tail into a `deepis`
+  // command, which is skipped whole, and the refusal would disappear.
+  for (const command of ["deepis search don\\'t; cat reviews/b.md", 'deepis search \\"x; cat reviews/b.md']) {
+    assert.equal(reviewsRefusal("bash", { command }) !== undefined, true, `the tail is its own command: ${command}`);
+    assert.equal(call("bash", { command })?.block, true, `refused for the reviewer: ${command}`);
+  }
+  // shellWords alone: a phantom span would fold the words into a "quoted phrase".
+  for (const command of ["grep -n don\\'t reviews/b.md", 'grep -n "a\\"b" reviews/b.md']) {
+    assert.equal(reviewsRefusal("bash", { command }) !== undefined, true, `the words stay separate: ${command}`);
+    assert.equal(call("bash", { command })?.block, true, `refused for the reviewer: ${command}`);
+  }
+  // Inside single quotes a backslash is literal, so the next quote closes the span.
+  assert.equal(
+    reviewsRefusal("bash", { command: "echo 'a\\'; cat reviews/b.md" }) !== undefined,
+    true,
+    "a backslash inside single quotes escapes nothing",
+  );
+
+  // Still allowed: quotes and escapes as the shell reads them.
+  for (const command of [
+    'deepis search "it\'s about owners" -n 5',
+    `deepis search 'a "quoted" word' -n 5`,
+    `deepis search "he said \\"owners\\" twice"`,
+    `echo "a \\" b" ; ls workspace`,
+    "cat reviews-notes.md",
+  ]) {
+    assert.equal(reviewsRefusal("bash", { command }), undefined, `allowed: ${command}`);
+    assert.equal(call("bash", { command }), undefined, `allowed for the reviewer: ${command}`);
+  }
+  // A separator inside a quoted query does not split the command: were it split,
+  // the tail would be a non-deepis command naming `owners` and be refused.
+  for (const command of [
+    'deepis search "a | b"',
+    'deepis search "reviews | owners" -n 5',
+    'deepis search "x\\" ; cat reviews/b.md"',
+  ]) {
+    assert.equal(reviewsRefusal("bash", { command }), undefined, `one simple command: ${command}`);
+    assert.equal(call("bash", { command }), undefined, `one simple command for the reviewer: ${command}`);
+  }
+  // An unbalanced trailing quote neither crashes nor frees the guard: the unclosed
+  // word is still a path token, so it is refused; a lone deepis query is allowed.
+  assert.equal(
+    reviewsRefusal("bash", { command: 'cat "reviews/b.md' }) !== undefined,
+    true,
+    "an unclosed quoted word is still a path token",
+  );
+  assert.equal(reviewsRefusal("bash", { command: 'deepis search "unbalanced' }), undefined, "harmless");
+});
+
+test("a reviewer of an evolved puzzle may not read its parent's reviews or folder", (t) => {
+  const { p1, evolved } = puzzleRun(t);
+  const call = reviewerGuard(t, evolved);
+
+  assert.equal(call("read", { path: "workspace/puzzle.md" }), undefined, "its own card is readable");
+  assert.equal(call("read", { path: path.join(p1, "workspace", "puzzle.md") })?.block, true, "the parent's card is refused");
+  assert.equal(
+    call("read", { path: path.join(p1, "workspace", "reviews", "merged.md") })?.block,
+    true,
+    "the parent's merged review is refused for a reviewer",
+  );
+});
+
+test("an evolved worker's bash cannot hide a sibling behind a glob or a .. plus glob", (t) => {
+  const { p1, evolved } = puzzleRun(t);
+  const call = workerGuard(t, evolved);
+
+  assert.equal(call("bash", { command: "cat ../P03*/workspace/puzzle.md" })?.block, true, "P03* names a sibling");
+  assert.equal(call("bash", { command: "cat ../*/workspace/puzzle.md" })?.block, true, "a wildcard sibling");
+  assert.equal(call("bash", { command: "cd ../* && cat workspace/puzzle.md" })?.block, true, "cd into a wildcard sibling");
+  assert.equal(
+    call("bash", { command: "cat ../../workspace/*.md" })?.block,
+    true,
+    ".. plus a glob is refused even when no puzzle name is in the command",
+  );
+  assert.equal(call("bash", { command: "ls workspace/*.md" }), undefined, "a glob without .. is still allowed");
+  assert.equal(
+    call("bash", { command: `cat ../${path.basename(p1)}/workspace/puzzle.md` }),
+    undefined,
+    "the parent spelled out explicitly",
+  );
+});
+
+test("a reviewer's bash cannot hide a sibling behind a glob or a .. plus glob", (t) => {
+  const { patternDir, p1 } = puzzleRun(t);
+  const call = reviewerGuard(t, p1);
+
+  assert.equal(call("bash", { command: "cat ../P02*/workspace/puzzle.md" })?.block, true, "P02* names a sibling");
+  assert.equal(call("bash", { command: "cat ../*/workspace/puzzle.md" })?.block, true, "a wildcard sibling");
+  assert.equal(call("bash", { command: "cd ../* && cat workspace/puzzle.md" })?.block, true);
+  assert.equal(call("bash", { command: "cat ../../patterns/*/workspace/pattern.md" })?.block, true, ".. plus a glob");
+  assert.equal(
+    call("bash", { command: `cat ${path.join(patternDir, "puzzles")}/P02*/workspace/puzzle.md` })?.block,
+    true,
+    "an absolute glob naming a sibling, with no .. in the command",
+  );
+  assert.equal(call("bash", { command: "ls workspace/*.md" }), undefined, "a glob without .. is allowed");
+});
+
+test("a reviewer must sit inside a puzzle node folder, or every tool call is refused", (t) => {
+  const { patternDir, run } = puzzleRun(t);
+  const call = reviewerGuard(t, patternDir);
+
+  assert.equal(call("read", { path: "workspace/puzzle.md" })?.block, true, "a pattern node is no home for a reviewer");
+  assert.equal(call("write", { path: "workspace/reviews/a.md" })?.block, true, "not even the review slot");
+  assert.match(call("read", { path: "workspace/puzzle.md" })?.reason ?? "", /must run inside a puzzle node folder/);
+
+  process.chdir(run);
+  assert.equal(call("read", { path: "workspace/puzzle.md" })?.block, true, "the run root is no home either");
+  assert.equal(call("write", { path: "workspace/reviews/a.md" })?.block, true);
+
+  process.chdir(makeTempDir(t));
+  assert.equal(call("read", { path: "workspace/puzzle.md" })?.block, true, "a folder with no node.json is no home");
+  assert.equal(call("write", { path: "workspace/reviews/a.md" })?.block, true);
+});
+
+test("a symlink in the reviewer's own folder cannot reach a sibling", (t) => {
+  const { p1, p2 } = puzzleRun(t);
+  mkdirSync(path.join(p2, "workspace"), { recursive: true });
+  writeFileSync(path.join(p2, "workspace", "puzzle.md"), "# card\n");
+  mkdirSync(path.join(p1, "workspace"), { recursive: true });
+  symlinkSync(path.join(p2, "workspace"), path.join(p1, "workspace", "link"), "dir");
+
+  const call = reviewerGuard(t, p1);
+  assert.equal(call("read", { path: "workspace/link/puzzle.md" })?.block, true, "the real path is a sibling's");
+  assert.match(call("read", { path: "workspace/link/puzzle.md" })?.reason ?? "", /sibling puzzles/);
 });
