@@ -238,6 +238,8 @@ function ensurePairsNew(
 /** One stored `round-<n>.json`, validated enough that the tools can read it. */
 interface StoredRound {
   round: number;
+  /** The round's participants. Older round files have none: then every fit id played. */
+  sides?: string[];
   matches: MatchRecord[];
   fit: Fit;
   top: string[];
@@ -254,17 +256,59 @@ function readStoredRound(file: string, tool: string): StoredRound {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`${tool}: ${file} is not a round object`);
   }
-  const { round, matches, fit, top, played } = parsed as Partial<StoredRound>;
+  const { round, sides, matches, fit, top, played } = parsed as Partial<StoredRound>;
   if (typeof round !== "number" || !Array.isArray(matches)) {
     throw new Error(`${tool}: ${file} is not a round object with a round number and matches`);
   }
   return {
     round,
+    ...(Array.isArray(sides) && sides.every((id) => typeof id === "string") ? { sides: sides as string[] } : {}),
     matches,
     fit: (fit ?? { scores: {}, lower: {}, upper: {} }) as Fit,
     top: Array.isArray(top) ? top : [],
     played: (played ?? {}) as Record<string, number>,
   };
+}
+
+/**
+ * The round's own participants as a fit/played view. A round file written before
+ * `sides` existed has no participant list; then every id in the fit counts, which
+ * is exactly what those files claimed. The fit carries prior rounds' outcomes, so
+ * without this filter a puzzle eliminated earlier would still look "ranked" in
+ * every later round (the review's I1).
+ */
+function participantView(stored: StoredRound): { fit: Fit; played: Record<string, number> } {
+  if (stored.sides === undefined) return { fit: stored.fit, played: stored.played };
+  const keep = new Set(stored.sides);
+  const pick = (values: Record<string, number>): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const [id, value] of Object.entries(values)) if (keep.has(id)) out[id] = value;
+    return out;
+  };
+  return {
+    fit: { scores: pick(stored.fit.scores), lower: pick(stored.fit.lower), upper: pick(stored.fit.upper) },
+    played: pick(stored.played),
+  };
+}
+
+/**
+ * The final round: the highest `round-<n>.json` on disk whose number `rounds.json`
+ * records. The engine writes the round file before `appendRound` records it, so a
+ * crash in that window leaves an orphan that is not a round anyone decided on; it
+ * must not become the ranking `promote` or the distinctness check reads.
+ */
+function finalRound(dir: string, tool: string, none: string): { round: number; stored: StoredRound } {
+  const roundsFile = path.join(dir, "rounds.json");
+  const latest = roundFiles(dir).sort((left, right) => left.round - right.round).at(-1);
+  if (latest === undefined) throw new Error(`${tool}: ${none}`);
+  if (!recordedRounds(roundsFile).includes(latest.round)) {
+    throw new Error(
+      `${tool}: round ${latest.round} is on disk (${latest.file}) but not recorded in ${roundsFile}: ` +
+        `an orphan round file is a crash between the round file and its record, not a final round; ` +
+        `judge or remove it before relying on it`,
+    );
+  }
+  return { round: latest.round, stored: readStoredRound(latest.file, tool) };
 }
 
 /** Every earlier round's outcomes, in round order: the fit's and ratings' prior. */
@@ -453,7 +497,10 @@ function laterRoundInput(
 
 /** The text for a completed round: decision, top eight with intervals, promotion breaks. */
 function completeText(round: number, result: RoundResult, decision: Decision): string {
-  const candidates = promotionCandidates(result.fit, result.played, MIN_MATCHES);
+  // Only this round's participants are candidates: the fit also carries prior
+  // rounds' outcomes, and a puzzle eliminated earlier is not in this ranking.
+  const view = participantView({ fit: result.fit, played: result.played, ...(result.sides.length > 0 ? { sides: result.sides } : {}) });
+  const candidates = promotionCandidates(view.fit, view.played, MIN_MATCHES);
   const top = candidates.ranked
     .slice(0, 8)
     .map(
@@ -516,14 +563,20 @@ export async function judgeRound(runDir: string, input: JudgeRoundInput, deps: T
 
   let sides;
   let forced: [string, string][];
-  if (round === 0) {
-    const pool = roundZeroPool(runDir);
-    sides = pool.map((puzzle) => loadEntrant(runDir, puzzle.id));
-    forced = [];
-  } else {
-    const later = laterRoundInput(runDir, round, input);
-    sides = later.ids.map((id) => loadEntrant(runDir, id));
-    forced = later.forced;
+  // A missing card or a pattern with no evidence is an owner-facing refusal like
+  // every other: `loadEntrant`'s error must carry the tool prefix too.
+  try {
+    if (round === 0) {
+      const pool = roundZeroPool(runDir);
+      sides = pool.map((puzzle) => loadEntrant(runDir, puzzle.id));
+      forced = [];
+    } else {
+      const later = laterRoundInput(runDir, round, input);
+      sides = later.ids.map((id) => loadEntrant(runDir, id));
+      forced = later.forced;
+    }
+  } catch (error) {
+    throw prefixedError("judge_round", error);
   }
 
   const prior = priorOutcomes(dir, round);
@@ -617,18 +670,16 @@ function writeDistinct(file: string, record: DistinctRecord): void {
   renameSync(temp, file);
 }
 
-/** The latest round's Bradley-Terry scores, refusing an id the round does not rank. */
+/** The latest recorded round's Bradley-Terry scores, refusing an id it did not rank. */
 function latestScores(dir: string, ids: string[], tool: string): Record<string, number> {
-  const files = roundFiles(dir);
-  const latest = files.sort((x, y) => x.round - y.round).at(-1);
-  if (latest === undefined) {
-    throw new Error(`${tool}: no completed round (round-<n>.json) in ${dir}; judge a round before checking duplicates`);
-  }
-  const stored = readStoredRound(latest.file, tool);
-  const scores = stored.fit.scores ?? {};
+  const { round, stored } = finalRound(dir, tool, `no completed round (round-<n>.json) in ${dir}; judge a round before checking duplicates`);
+  const scores = participantView(stored).fit.scores ?? {};
   for (const id of ids) {
     if (typeof scores[id] !== "number") {
-      throw new Error(`${tool}: ${id} has no Bradley-Terry score in ${latest.file}; judge a round that includes it first`);
+      throw new Error(
+        `${tool}: ${id} is not ranked in the final round (round ${round}); only that round's participants are, ` +
+          `judge a round that includes it first`,
+      );
     }
   }
   return scores;
@@ -811,24 +862,13 @@ export async function promote(runDir: string, input: PromoteInput, deps: Promote
   if (node.status !== "submitted") throw new Error(`promote: ${id} is ${node.status}, not submitted`);
 
   // Gate 3: the final round's candidate list, with enough matches to mean it.
-  // The final round is the highest round FILE whose number the record holds: the
-  // engine writes `round-<n>.json` before `appendRound` records it, so a crash in
-  // that window leaves an orphan file that is not a round anyone decided on.
-  const latest = roundFiles(dir).sort((left, right) => left.round - right.round).at(-1);
-  if (latest === undefined) {
-    throw new Error(`promote: no completed round (round-<n>.json) in ${dir}, so there is no final ranking`);
-  }
-  if (!recordedRounds(roundsFile).includes(latest.round)) {
-    throw new Error(
-      `promote: round ${latest.round} is on disk (${latest.file}) but not recorded in ${roundsFile}: ` +
-        `an orphan round file is a crash between the round file and its record, not a final round; ` +
-        `judge or remove it before promoting`,
-    );
-  }
-  const stored = readStoredRound(latest.file, "promote");
-  const candidates = promotionCandidates(stored.fit, stored.played, MIN_MATCHES);
+  // The final round is the highest round FILE whose number the record holds; its
+  // candidates are its participants only, because the fit also carries prior rounds.
+  const final = finalRound(dir, "promote", `no completed round (round-<n>.json) in ${dir}, so there is no final ranking`);
+  const view = participantView(final.stored);
+  const candidates = promotionCandidates(view.fit, view.played, MIN_MATCHES);
   const rank = candidates.ranked.findIndex((candidate) => candidate.id === id);
-  if (rank < 0) throw new Error(`promote: ${id} is not ranked in the final round (round ${latest.round})`);
+  if (rank < 0) throw new Error(`promote: ${id} is not ranked in the final round (round ${final.round})`);
   const candidate = candidates.ranked[rank]!;
   if (candidate.matches < MIN_MATCHES) {
     throw new Error(

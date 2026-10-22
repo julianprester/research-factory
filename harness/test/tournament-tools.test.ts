@@ -205,6 +205,14 @@ test("round 0 refuses a pool of six puzzles, naming the minimum", async (t) => {
   assert.match(message, /6/, "the pool size is stated");
 });
 
+test("a loadEntrant failure carries the judge_round prefix", async (t) => {
+  const fixture = phase2Run(t, 7);
+  rmSync(path.join(findNode(fixture.run, "T01").dir, "workspace", "pattern.md"));
+
+  const message = await rejectMessage(judgeRound(fixture.run, { round: 0 }, { transport: strengthJudge() }));
+  assert.match(message, /^judge_round: loadEntrant: /);
+});
+
 test("round 0 completes, writes round-0.json and appends a continue decision", async (t) => {
   const fixture = phase2Run(t, 9);
   const text = await judgeRound(fixture.run, { round: 0 }, { transport: strengthJudge(), bootstrap: 20 });
@@ -358,6 +366,7 @@ test("round 1 validates that every child derives from its parent", async (t) => 
 
 test("check_duplicates keeps the higher-rated of a same-puzzle pair and is idempotent", async (t) => {
   const fixture = phase2Run(t, 4);
+  appendRound(path.join(fixture.tournament, "rounds.json"), { round: 0, top: fixture.ids, children: [] });
   write(
     path.join(fixture.tournament, "round-0.json"),
     JSON.stringify({
@@ -394,6 +403,7 @@ test("check_duplicates keeps the higher-rated of a same-puzzle pair and is idemp
 
 test("check_duplicates needs two ids and a round that ranked them", async (t) => {
   const fixture = phase2Run(t, 4);
+  appendRound(path.join(fixture.tournament, "rounds.json"), { round: 0, top: fixture.ids, children: [] });
   write(
     path.join(fixture.tournament, "round-0.json"),
     JSON.stringify({
@@ -408,8 +418,68 @@ test("check_duplicates needs two ids and a round that ranked them", async (t) =>
   assert.match(await rejectMessage(checkDuplicates(fixture.run, { ids: ["P01"] }, { transport: sameJudge() })), /at least 2/);
   assert.match(
     await rejectMessage(checkDuplicates(fixture.run, { ids: ["P01", "P03"] }, { transport: sameJudge() })),
-    /P03.*no Bradley-Terry score|no Bradley-Terry score.*P03/,
+    /P03 is not ranked in the final round \(round 0\)/,
   );
+});
+
+test("check_duplicates refuses an orphan round file (not recorded in rounds.json)", async (t) => {
+  const fixture = phase2Run(t, 4);
+  appendRound(path.join(fixture.tournament, "rounds.json"), { round: 0, top: fixture.ids, children: [] });
+  write(
+    path.join(fixture.tournament, "round-1.json"),
+    JSON.stringify({
+      round: 1,
+      matches: [],
+      fit: { scores: { P01: 1, P02: 0 }, lower: {}, upper: {} },
+      top: ["P01", "P02"],
+      played: {},
+    }),
+  );
+
+  const message = await rejectMessage(checkDuplicates(fixture.run, { ids: ["P01", "P02"] }, { transport: sameJudge() }));
+  assert.match(message, /round 1 is on disk .* but not recorded in .*rounds\.json/);
+  assert.ok(!existsSync(path.join(fixture.tournament, "distinct.json")), "no record was written from an orphan round");
+});
+
+test("check_duplicates ranks only the final round's participants", async (t) => {
+  const fixture = phase2Run(t, 4);
+  appendRound(path.join(fixture.tournament, "rounds.json"), { round: 0, top: fixture.ids, children: [] });
+  appendRound(path.join(fixture.tournament, "rounds.json"), { round: 1, top: fixture.ids, children: [] });
+  write(
+    path.join(fixture.tournament, "round-1.json"),
+    JSON.stringify({
+      round: 1,
+      sides: ["P02", "P03"],
+      matches: [],
+      // The fit carries the prior rounds too, so P01 has a score even though it
+      // did not play round 1; only its absence from `sides` makes it a non-candidate.
+      fit: { scores: { P01: 9, P02: 1, P03: 0 }, lower: {}, upper: {} },
+      top: ["P01", "P02", "P03"],
+      played: { P01: 6, P02: 6, P03: 6 },
+    }),
+  );
+
+  const message = await rejectMessage(checkDuplicates(fixture.run, { ids: ["P01", "P02"] }, { transport: sameJudge() }));
+  assert.match(message, /P01 is not ranked in the final round \(round 1\)/);
+});
+
+test("the COMPLETE text's top list contains only the round's participants", async (t) => {
+  const fixture = phase2Run(t, 9);
+  await judgeRound(fixture.run, { round: 0 }, { transport: strengthJudge(), bootstrap: 20 });
+  // P09 is the strongest of round 0 but is not an entrant of round 1: the fit
+  // still ranks it (prior outcomes), the round's participant list does not.
+  const child = createChild(fixture.run, "T01", "grounding: crowd", "owner-p2", ["P01"]);
+  addDraft(fixture.run, child.id, 99);
+  updateNode(fixture.run, child.id, { status: "submitted" }, "owner-p2");
+
+  const text = await judgeRound(
+    fixture.run,
+    { round: 1, entrants: fixture.ids.slice(0, 6), pairs: [{ child: child.id, parent: "P01" }] },
+    { transport: strengthJudge(), bootstrap: 20 },
+  );
+  assert.match(text, /^COMPLETE/);
+  assert.ok(!text.includes("P09"), `an eliminated puzzle is not in the round's top list: ${text}`);
+  assert.ok(text.includes("P01"), "a participant is in the top list");
 });
 
 test("round 1 resumes with the same forced pairs and records the started head-to-head", async (t) => {
@@ -515,6 +585,7 @@ test("an engine failure (a held round lock) carries the judge_round prefix", asy
 
 test("check_duplicates orients a re-checked pair by the latest scores, keeping one entry", async (t) => {
   const fixture = phase2Run(t, 4);
+  appendRound(path.join(fixture.tournament, "rounds.json"), { round: 0, top: fixture.ids, children: [] });
   const roundFile = path.join(fixture.tournament, "round-0.json");
   const stored = (scores: Record<string, number>): string =>
     JSON.stringify({ round: 0, matches: [], fit: { scores, lower: {}, upper: {} }, top: fixture.ids, played: {} });

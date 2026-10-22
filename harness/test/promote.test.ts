@@ -20,7 +20,7 @@
 // citation runner is injected so no test spawns `deepis`.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -149,7 +149,12 @@ function writeMerged(nodeDir: string, merged: unknown): void {
 function writeRound(
   tournament: string,
   ids: string[],
-  patch: { round?: number; scores?: Record<string, number>; played?: Record<string, number> } = {},
+  patch: {
+    round?: number;
+    sides?: string[];
+    scores?: Record<string, number>;
+    played?: Record<string, number>;
+  } = {},
 ): void {
   const round = patch.round ?? 1;
   const scores = patch.scores ?? Object.fromEntries(ids.map((id, index) => [id, ids.length - index]));
@@ -159,7 +164,14 @@ function writeRound(
   write(
     path.join(tournament, `round-${round}.json`),
     `${JSON.stringify(
-      { round, matches: [], fit: { scores, lower: interval(-0.1), upper: interval(0.1) }, top: ids, played },
+      {
+        round,
+        ...(patch.sides !== undefined ? { sides: patch.sides } : {}),
+        matches: [],
+        fit: { scores, lower: interval(-0.1), upper: interval(0.1) },
+        top: ids,
+        played,
+      },
       null,
       2,
     )}\n`,
@@ -367,6 +379,28 @@ test("a plain puzzle created after STOP is never promotable: the final round doe
     await rejectMessage(promote(fixture.run, { nodeId: plain.id }, NO_CITATIONS)),
     new RegExp(`${plain.id} is not ranked in the final round \\(round 1\\)`),
   );
+});
+
+test("promote refuses a puzzle eliminated before the final round (not a participant)", async (t) => {
+  const fixture = promoteRun(t);
+  writeRoundsRecord(fixture.tournament, [0, 1, 2]);
+  // The fit still scores P01 (prior outcomes), but round 2's participants do not
+  // include it, so it is not on the final round's candidate list.
+  writeRound(fixture.tournament, fixture.ids, { round: 2, sides: fixture.ids.slice(1) });
+
+  assert.match(
+    await rejectMessage(promote(fixture.run, { nodeId: "P01" }, NO_CITATIONS)),
+    /P01 is not ranked in the final round \(round 2\)/,
+  );
+  assert.equal(findNode(fixture.run, "P01").phase, 2, "nothing moved");
+});
+
+test("promote accepts an old-format round file without a participant list", async (t) => {
+  const fixture = promoteRun(t);
+  // The base fixture's round-1.json has no `sides`: every id in fit is a participant.
+  assert.ok(!("sides" in JSON.parse(readFileSync(path.join(fixture.tournament, "round-1.json"), "utf8"))));
+  const text = await promote(fixture.run, { nodeId: "P01" }, NO_CITATIONS);
+  assert.match(text, /^promoted P01 to phase 3/);
 });
 
 test("promote refuses a puzzle with fewer than six matches", async (t) => {

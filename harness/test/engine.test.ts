@@ -123,10 +123,12 @@ test("a round on ten sides completes and writes the log and the round file", asy
 
   const written = JSON.parse(readFileSync(path.join(dir, "round-0.json"), "utf8"));
   assert.equal(written.round, 0);
+  assert.deepEqual(written.sides, sides.map((side) => side.id).sort(), "the round file records its participants, sorted");
   assert.deepEqual(written.fit, result.fit, "the round file carries the fit the caller got");
   assert.deepEqual(written.top, result.top);
   assert.deepEqual(written.played, result.played);
   assert.equal(written.matches.length, result.matches.length);
+  assert.deepEqual(result.sides, written.sides, "the caller gets the same participant list");
 
   assert.equal(result.top.length, sides.length, "every entrant is ranked");
   assert.ok(

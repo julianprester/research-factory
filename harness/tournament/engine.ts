@@ -290,6 +290,8 @@ export interface RoundResult {
   fit: Fit;
   top: string[];
   played: Record<string, number>;
+  /** The ids that played this round, sorted: the round's participants. */
+  sides: string[];
 }
 
 export interface Candidate {
@@ -759,9 +761,11 @@ async function runRoundLocked(o: RoundOptions): Promise<RoundResult> {
   });
   const played = sortedRecord(replay(o.prior, entries, Number.POSITIVE_INFINITY).played);
 
-  const result: RoundResult = { complete, matches, fit, top, played };
+  const result: RoundResult = { complete, matches, fit, top, played, sides: ids.slice().sort() };
   if (complete) {
-    const stored = { round: o.round, matches, fit, top, played };
+    // `sides` is what makes "the final round's candidates" mean its participants
+    // rather than every id the fit has ever seen (the fit carries prior rounds).
+    const stored = { round: o.round, sides: ids.slice().sort(), matches, fit, top, played };
     // Rename, not in-place write: a crash must not leave half a JSON file for the
     // next round's `prior` reader to choke on.
     const tempFile = `${roundFile}.${process.pid}.tmp`;
