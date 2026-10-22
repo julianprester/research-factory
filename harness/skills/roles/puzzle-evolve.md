@@ -45,6 +45,11 @@ treatment:
   not two cards stapled together: state the shared frame and what each parent
   contributes.
 
+The judge sees a child behind the pattern it sits under and nothing else, so for
+a `combination` the second parent's claims and evidence must appear in this card
+itself: the judge will never see the second pattern's Measure, Result, Verdict
+or Worst fits.
+
 The meta-review lists weaknesses that recur across the round's reviews (a missing
 kind of rival, an over-claim about behaviour, a thin "why it matters"). Fix those
 too where they apply to this child: they are there so the next round does not

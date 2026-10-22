@@ -47,6 +47,13 @@ from what exists. Never recreate work:
   handles the last two by the park and fix rules, not by a re-brief.
 - `owners/phase-2/tournament/rounds.json` exists: read it before doing anything.
   A recorded `STOP` is final — no new evolution children, no further round.
+- `owners/phase-2/tournament/round-<n>.matches.jsonl` exists without
+  `round-<n>.json`: that round is **PARTIAL**. Read the log's first line (the
+  header names the seed and every entrant id) and its `"batch":-1` lines (the
+  forced child/parent pairs), and call `judge_round` with exactly those
+  arguments — the `entrants` from the header and the `pairs` from the batch -1
+  lines (round 0 is just `{ round: 0 }`). Never move the log aside unless
+  `judge_round` refuses with a clear header mismatch.
 - Otherwise resume wherever the nodes leave off.
 
 Puzzle statuses are `ready → active → submitted`, with `parked` for anything
@@ -73,12 +80,12 @@ For each pattern, read its evidence before you brief anything:
   `workspace/pattern.md` (Result, Verdict, Robustness, **Worst fits**, Deviations);
 - its `handoff.md`;
 - `data-character.md` and `glossary.md` from the Phase 0 input node's manifest;
-- the Phase 0 caveats. Read the Phase 0 input node's `handoff.md`, its
-  `workspace/summary.md`, and the hand-off note on the commit that moved it to
-  Phase 2 (`git -C <run dir> log -1 --format=%b -- <input node dir>/node.json`).
-  The Phase 0 input node is the assembler under `prep/` (e.g.
-  `prep/Z06-assemble`); in `runs/gl1` the pattern nodes' routing notes do not
-  carry its caveats, so read those files.
+- the Phase 0 caveats, in order of reliability: the Phase 0 input node's (the
+  assembler under `prep/`, e.g. `prep/Z06-assemble`) `handoff.md` and its
+  `workspace/summary.md` first; the hand-off note on the commit that moved it to
+  Phase 2 (`git -C <run dir> log -1 --format=%b -- <input node dir>/node.json`)
+  is only a pointer — in `runs/gl1` it says "Phase 1 complete…" and carries no
+  caveat. The pattern nodes' routing notes do not carry the caveats either.
 
 You read these files; you never read the dataset. Record each warning Phase 0
 left as a ledger line `Caveat: E<n> — <what Phase 0 said>`, and put a `Caveat:`
@@ -156,6 +163,13 @@ Read the node's `handoff.md` and act on its status line first.
   back through phase-owner's fix loop (resume the worker with the problem lines).
   Exit 2 is a usage error — fix the command, not the node.
 - `BLOCKED` — phase-owner's fix loop.
+
+**A dispatch that never writes its handoff.** An async subagent can be killed by
+a provider error (429/503) and then never writes `handoff.md`; the supervisor
+reads that node as "running" and never nudges. When an expected handoff or
+review file has not appeared after about 15 minutes, check the dispatched run id
+with `subagent({ action: "status", id })` and, if it is dead, `resume` it (the
+same session) or re-dispatch it; record the outcome in the ledger.
 
 ## 4. Reflection: two reviewers, then the merge
 
@@ -360,13 +374,18 @@ truncated: no STOP recorded, nothing promotable` and park every puzzle
    score in the latest recorded round, so choose ids that were ranked there —
    the top 8 is the safe set. A confirmed duplicate keeps the higher-rated
    puzzle and drops the other.
-2. Read the final round file `owners/phase-2/tournament/round-<n>.json`:
-   `fit.scores`, `fit.lower`, `fit.upper` and `played` per puzzle. The round's
-   `COMPLETE` text already printed the scores with their 80% intervals, `breaks`
-   (an n such that promoting the top n leaves an interval gap) and
-   `underplayed` (fewer than 6 matches).
+2. Do **not** `read` the whole round file
+   `owners/phase-2/tournament/round-<n>.json`: a real round 0 is 150–260 KB and
+   `read` truncates it, so you would see invalid JSON and waste context. The
+   round's `COMPLETE` text already printed the scores with their 80% intervals,
+   `breaks` (an n such that promoting the top n leaves an interval gap) and
+   `underplayed` (fewer than 6 matches). If you need the numbers per puzzle, use
+   `jq -c '.fit.scores, .fit.lower, .fit.upper, .played' owners/phase-2/tournament/round-<n>.json`.
 3. Record the decision with the numbers:
    `Ruling: promote <n> — <where the break is, with the numbers> — <cost if wrong: a weak puzzle in Phase 3, or a strong one missed>`
+   If `breaks` is empty, either promote nothing or promote the top k by score,
+   and say in the ruling that the intervals overlap (the ranking cannot separate
+   them).
 4. `promote({ nodeId: "<P..>" })` for each chosen puzzle, in rank order. It
    moves the puzzle to Phase 3 as `ready` — there is no `promoted` status to
    set. The tool refuses, naming the gate, unless: STOP is recorded; the puzzle
@@ -375,8 +394,9 @@ truncated: no STOP recorded, nothing promotable` and park every puzzle
    plausibility not `fails` and none of `breakdown`, `knownResultBlocking`,
    `dataCharacterViolated` or `reviewBlocked`; and `check-puzzle --reviews`
    passes. That last check runs `deepis` citation checks, so it is slow.
-5. Park **every other puzzle** with a note saying why:
-   `breakdown: <why>`, `duplicate of <id>`, or `ranked below the break`.
+5. Park **every other puzzle** — including one created but never submitted —
+   with a note saying why: `breakdown: <why>`, `duplicate of <id>`,
+   `ranked below the break`, or `created but never submitted`.
 6. For any new pattern angle a review or an evolution move called for, append a
    ledger line `Pattern request: <angle>`. Nothing acts on it in this version;
    the line is the record.
@@ -390,6 +410,12 @@ Never write or edit anything under `owners/phase-2/tournament/`: only the tools
 under `owners/phase-2/` and are yours to write.
 
 ## 8. Close
+
+Before the close call, park — as part of this same last step — **every Phase 2
+puzzle that is not promoted**, including one you created but never submitted
+(note `created but never submitted`). The run cannot finish while any puzzle is
+`ready`: a stray ready puzzle makes the supervisor nudge and then stall forever,
+so the sweep is what lets the run report `done`.
 
 As the **last** tree call, close every pattern node you took that is still open
 (`ready`/`input`); a pattern node already closed `no puzzle: <why>` stays as it

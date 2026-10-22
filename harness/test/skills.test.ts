@@ -817,3 +817,57 @@ test("the reviewer agent attaches the free-prose rule to bash paths", () => {
   const role = normalise(read("harness/skills/roles/puzzle-review.md"));
   assert.match(role, /The rules for bash: spell paths in full in your bash commands/);
 });
+
+test("the close step parks every non-promoted puzzle, including never-submitted ones", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /park — as part of this same last step — \*\*every Phase 2 puzzle that is not promoted\*\*/);
+  assert.match(body, /including one you created but never submitted/);
+  assert.match(body, /The run cannot finish while any puzzle is `ready`/);
+  assert.match(body, /`created but never submitted`/);
+});
+
+test("the skill does not send the owner to read a whole round file", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /Do \*\*not\*\* `read` the whole round file/);
+  assert.match(body, /150–260 KB and `read` truncates it/);
+  assert.match(body, /jq -c '\.fit\.scores, \.fit\.lower, \.fit\.upper, \.played'/);
+  assert.doesNotMatch(body, /2\. Read the final round file/);
+});
+
+test("a restarted owner rebuilds a partial round's arguments from the match log", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /round-<n>\.matches\.jsonl` exists without `round-<n>\.json`/);
+  assert.match(body, /first line \(the header names the seed and every entrant id\)/);
+  assert.match(body, /`"batch":-1` lines \(the forced child\/parent pairs\)/);
+  assert.match(body, /call `judge_round` with exactly those arguments/);
+  assert.match(body, /Never move the log aside unless `judge_round` refuses with a clear header mismatch/);
+});
+
+test("an empty break list still has a taught ruling", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /If `breaks` is empty, either promote nothing or promote the top k by score/);
+  assert.match(body, /say in the ruling that the intervals overlap/);
+});
+
+test("the Phase 0 caveat sources are ordered, with the git note only a pointer", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /caveats, in order of reliability: the Phase 0 input node's/);
+  assert.match(body, /`handoff\.md` and its `workspace\/summary\.md` first/);
+  assert.match(body, /is only a pointer — in `runs\/gl1` it says "Phase 1 complete…" and carries no caveat/);
+});
+
+test("the owner is told to check and revive a dead async subagent", () => {
+  const body = normalise(read("harness/skills/phase-2/SKILL.md"));
+  assert.match(body, /killed by a provider error \(429\/503\)/);
+  assert.match(body, /after about 15 minutes, check the dispatched run id/);
+  assert.match(body, /subagent\(\{ action: "status", id \}\)/);
+  assert.match(body, /`resume` it \(the same session\) or re-dispatch it/);
+  assert.match(body, /record the outcome in the ledger/);
+});
+
+test("a combination child's card carries the second parent's evidence itself", () => {
+  const evolve = normalise(read("harness/skills/roles/puzzle-evolve.md"));
+  assert.match(evolve, /The judge sees a child behind the pattern it sits under and nothing else/);
+  assert.match(evolve, /the second parent's claims and evidence must appear in this card itself/);
+  assert.match(evolve, /never see the second pattern's Measure, Result, Verdict or Worst fits/);
+});
