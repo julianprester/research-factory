@@ -5,6 +5,7 @@
 // control: the container has no network, sees only the exploration split
 // read-only, and writes only the node's output folder.
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -21,6 +22,8 @@ const TIMED_OUT_CODE = 124;
 /** The exit status when docker cannot be started at all (the shell's "not found"). */
 const NOT_FOUND_CODE = 127;
 const MAX_BUFFER = 64 * 1024 * 1024;
+/** How long `docker kill` may take on a timed-out container. */
+const KILL_TIMEOUT_MS = 30_000;
 const OUTPUT_DIRS = ["numbers", "tables", "figures", "logs", "assets"];
 /** `B_01.R`-style task scripts and the shared `assets` script, in R or Python. */
 const SCRIPT_NAME = /^(?:[A-Z]_\d\d|assets)\.(?:R|py)$/;
@@ -79,10 +82,10 @@ export function dockerArgs(o: DockerOptions): string[] {
   return args;
 }
 
-/** The real Exec: `docker` with `args`, killed at `timeoutMs`. It always resolves, so a missing docker is a failed run, not a throw. */
-export const realExec: Exec = (args, opts) =>
-  new Promise((resolve) => {
-    execFile("docker", args, { timeout: opts.timeoutMs, maxBuffer: MAX_BUFFER, encoding: "utf8" }, (error, stdout, stderr) => {
+/** One `docker` call, resolved (never rejected) with its outcome. */
+function dockerCall(args: string[], timeoutMs: number): ReturnType<Exec> {
+  return new Promise((resolve) => {
+    execFile("docker", args, { timeout: timeoutMs, maxBuffer: MAX_BUFFER, encoding: "utf8" }, (error, stdout, stderr) => {
       if (error === null) {
         resolve({ code: 0, stdout, stderr, timedOut: false });
         return;
@@ -95,6 +98,22 @@ export const realExec: Exec = (args, opts) =>
       resolve({ code, stdout, stderr: stderr === "" ? error.message : stderr, timedOut: false });
     });
   });
+}
+
+/**
+ * The real Exec. For a `docker run` it adds `--name ctc-<random>` and `--init`
+ * after `run`, so a timed-out container can be found and killed by name: the
+ * timeout only stops the docker client, and the script (PID 1) would otherwise
+ * keep writing to output/. It always resolves, so a missing docker is a failed
+ * run, not a throw.
+ */
+export const realExec: Exec = async (args, opts) => {
+  const name = args[0] === "run" ? `ctc-${randomBytes(6).toString("hex")}` : undefined;
+  const argv = name === undefined ? args : ["run", "--name", name, "--init", ...args.slice(1)];
+  const outcome = await dockerCall(argv, opts.timeoutMs);
+  if (outcome.timedOut && name !== undefined) await dockerCall(["kill", name], KILL_TIMEOUT_MS);
+  return outcome;
+};
 
 /** A node's workspace folder, where its scripts, output and log live. */
 export function workspaceOf(nodeDir: string): string {
@@ -140,30 +159,86 @@ function ignoreScratch(runDir: string): void {
   commitFile(runDir, ".gitignore", "ctc", "chore: ignore analysis data in the run");
 }
 
+/** True when `child` (a real path) is strictly inside `root` (a real path). */
+function isInside(root: string, child: string): boolean {
+  const relative = path.relative(root, child);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+/** The real path of `file`, or undefined when it does not exist. */
+function realPathOrUndefined(file: string): string | undefined {
+  try {
+    return fs.realpathSync(file);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A source file to copy, as its real path: it must exist, stay inside the real
+ * dataset and be a regular file. A link can point anywhere, so the check is on
+ * the resolved target, not the listed name.
+ */
+function resolveSource(datasetReal: string, dataset: string, rel: string): string {
+  const from = realPathOrUndefined(path.join(dataset, rel));
+  if (from === undefined) throw new Error(`${rel} does not exist in the dataset`);
+  if (!isInside(datasetReal, from)) throw new Error(`${rel} resolves outside the dataset`);
+  if (!fs.statSync(from).isFile()) throw new Error(`${rel} is not a regular file`);
+  return from;
+}
+
+/**
+ * Copy `from` to `to` unless `to` exists. The bytes go to a temp file beside
+ * `to` that is renamed into place only once complete, so an interrupted copy
+ * never leaves a partial file under the final name.
+ */
+function copyIntoPlace(from: string, to: string): void {
+  if (fs.existsSync(to)) return;
+  fs.mkdirSync(path.dirname(to), { recursive: true });
+  const partial = `${to}.tmp-${process.pid}`;
+  try {
+    fs.copyFileSync(from, partial);
+    fs.renameSync(partial, to);
+  } catch (error) {
+    fs.rmSync(partial, { force: true });
+    throw error;
+  }
+}
+
 /**
  * Copy the exploration split into `<runDir>/analysis-data/exploration` and
  * return that folder. Only the files the exploration list names are copied, and
  * a file already present is left as it is. It refuses a run whose split lists
- * are missing, and any list that names a hold-out file; it refuses before
- * copying anything.
+ * are missing, and any listed path that is a hold-out file (by name or by the
+ * file a link resolves to), that is not a regular file, or that resolves
+ * outside the dataset. Every entry is checked before the first copy, so a
+ * refusal copies nothing.
  */
 export function prepareExploration(runDir: string): string {
   const dir = path.resolve(runDir);
   const split = path.join(dir, "prep", "Z01-profile", "workspace", "split");
   const exploration = readList(path.join(split, "exploration.txt"));
-  const holdout = new Set(readList(path.join(split, "holdout.txt")));
+  const holdoutList = readList(path.join(split, "holdout.txt"));
+  const holdout = new Set(holdoutList);
   for (const rel of exploration) {
     if (holdout.has(rel)) throw new Error(`${rel} is in the hold-out list: analyses may not read it`);
   }
 
   const dataset = readRun(dir).dataset;
+  const datasetReal = fs.realpathSync(dataset);
+  const holdoutReal = new Set(
+    holdoutList
+      .map((rel) => realPathOrUndefined(path.join(dataset, rel)))
+      .filter((real): real is string => real !== undefined),
+  );
+  const sources = exploration.map((rel) => {
+    const from = resolveSource(datasetReal, dataset, rel);
+    if (holdoutReal.has(from)) throw new Error(`${rel} is the same file as a hold-out file: analyses may not read it`);
+    return { rel, from };
+  });
+
   const target = path.join(dir, "analysis-data", "exploration");
-  for (const rel of exploration) {
-    const to = path.join(target, rel);
-    if (fs.existsSync(to)) continue;
-    fs.mkdirSync(path.dirname(to), { recursive: true });
-    fs.copyFileSync(path.join(dataset, rel), to);
-  }
+  for (const { rel, from } of sources) copyIntoPlace(from, path.join(target, rel));
   ignoreScratch(dir);
   return target;
 }
@@ -181,10 +256,30 @@ function block(text: string): string {
 }
 
 /**
+ * Throw unless `dir` is a real folder inside `nodeReal`, not a link. A worker
+ * can plant a link where the harness expects a folder, and both the `-v` mounts
+ * and the log write would follow it. A folder that does not exist yet is fine:
+ * it is created next, and checked then.
+ */
+function assertRealFolder(dir: string, nodeReal: string): void {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(dir);
+  } catch {
+    return;
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory() || !isInside(nodeReal, fs.realpathSync(dir))) {
+    throw new Error(`${dir} must be a real folder inside the node, not a link`);
+  }
+}
+
+/**
  * Run `workspace/scripts/<script>` in the analysis container and write its log
  * to `workspace/output/logs/<stem>.txt`. The script name must be an analysis
- * name (`X_nn.R|py` or `assets.R|py`) and must exist. The output folders are
- * created first, and the exploration split is prepared before docker runs.
+ * name (`X_nn.R|py` or `assets.R|py`) and must exist. The scripts and output
+ * folders must be real folders inside the node, checked before anything is
+ * created. The output folders are then created, and the exploration split is
+ * prepared before docker runs.
  */
 export async function runScript(o: {
   runDir: string;
@@ -197,12 +292,18 @@ export async function runScript(o: {
   if (!SCRIPT_NAME.test(o.script)) {
     throw new Error(`"${o.script}" is not an analysis script name (X_nn.R|py, or assets.R|py)`);
   }
-  const workspace = workspaceOf(path.resolve(o.nodeDir));
-  const scriptFile = path.join(workspace, "scripts", o.script);
+  const node = path.resolve(o.nodeDir);
+  const nodeReal = fs.realpathSync(node);
+  const workspace = workspaceOf(node);
+  const scripts = path.join(workspace, "scripts");
+  const output = path.join(workspace, "output");
+  assertRealFolder(scripts, nodeReal);
+  assertRealFolder(output, nodeReal);
+  const scriptFile = path.join(scripts, o.script);
   if (!fs.existsSync(scriptFile)) throw new Error(`${scriptFile} does not exist`);
 
-  const output = path.join(workspace, "output");
   for (const dir of OUTPUT_DIRS) fs.mkdirSync(path.join(output, dir), { recursive: true });
+  for (const dir of OUTPUT_DIRS) assertRealFolder(path.join(output, dir), nodeReal);
   const exploration = prepareExploration(o.runDir);
 
   const result = await (o.exec ?? realExec)(
@@ -222,6 +323,10 @@ export async function runScript(o: {
   if (result.timedOut) header.push(`TIMED OUT after ${o.timeoutMs} ms`);
   const log = `${header.join("\n")}\n--- stdout ---\n${block(result.stdout)}--- stderr ---\n${block(result.stderr)}`;
   const stem = path.basename(o.script, path.extname(o.script));
-  fs.writeFileSync(path.join(output, "logs", `${stem}.txt`), log);
+  // The script could have left a link at this name: remove the link itself, then
+  // create the file exclusively, so the write never follows a link.
+  const logFile = path.join(output, "logs", `${stem}.txt`);
+  fs.rmSync(logFile, { force: true });
+  fs.writeFileSync(logFile, log, { flag: "wx" });
   return { code: result.code, log, timedOut: result.timedOut };
 }
