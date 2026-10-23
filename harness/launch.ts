@@ -212,8 +212,12 @@ function closePane(herdr: Herdr, pane: string): void {
   }
 }
 
-function kickOff(runDir: string, phase: number): string {
-  return `You own phase ${phase} of the run in ${runDir}. Follow phase-owner and your phase skill. Start now.`;
+/**
+ * The owner's first prompt. It carries the run's models: the owner passes the
+ * worker model on every subagent call, so no agent file names a model.
+ */
+export function kickOff(runDir: string, phase: number, cfg: RunConfig): string {
+  return `You own phase ${phase} of the run in ${runDir}. Follow phase-owner and your phase skill. Start now. Worker model: ${cfg.model}. Pass it as model: "${cfg.model}" on every subagent call you make (workers and reviewers). Judge model: ${cfg.judgeModel ?? cfg.model}.`;
 }
 
 /**
@@ -273,7 +277,7 @@ export function startOwner(
       return "failed";
     }
 
-    if (!herdr(["agent", "prompt", `owner-p${phase}`, kickOff(dir, phase)]).ok) {
+    if (!herdr(["agent", "prompt", `owner-p${phase}`, kickOff(dir, phase, cfg)]).ok) {
       closePane(herdr, pane);
       return "failed";
     }

@@ -139,7 +139,7 @@ Write `brief.md` in the puzzle node folder with exactly these five sections:
 
 Dispatch it with `ctc-worker`, as phase-owner says:
 
-`subagent({ agent: "ctc-worker", async: true, cwd: "<puzzle node dir>", task: "Read brief.md and carry it out." })`
+`subagent({ agent: "ctc-worker", model: "<worker model from your kickoff>", async: true, cwd: "<puzzle node dir>", task: "Read brief.md and carry it out." })`
 
 Append the ledger line for the dispatch — it names the run id from the dispatch
 receipt — then immediately `tree_update` the node `active`:
@@ -195,8 +195,8 @@ nothing else). Exactly these five sections:
 Dispatch **both reviewers of a puzzle concurrently**: two calls in one turn, each
 with its own task text naming `a` or `b`:
 
-`subagent({ agent: "ctc-reviewer", async: true, cwd: "<puzzle node dir>", task: "Read brief-review.md and write workspace/reviews/a.md" })`
-`subagent({ agent: "ctc-reviewer", async: true, cwd: "<puzzle node dir>", task: "Read brief-review.md and write workspace/reviews/b.md" })`
+`subagent({ agent: "ctc-reviewer", model: "<worker model from your kickoff>", async: true, cwd: "<puzzle node dir>", task: "Read brief-review.md and write workspace/reviews/a.md" })`
+`subagent({ agent: "ctc-reviewer", model: "<worker model from your kickoff>", async: true, cwd: "<puzzle node dir>", task: "Read brief-review.md and write workspace/reviews/b.md" })`
 
 Reviewers are `ctc-reviewer`, never `ctc-worker`: the reviewer extension refuses
 every call outside a puzzle node and lets the reviewer write only its own review.

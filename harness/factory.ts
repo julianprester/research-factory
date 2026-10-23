@@ -27,7 +27,7 @@ import { initRun, listNodes } from "./tree.ts";
  * is optional: a run without it judges on `model` (readConfig fills it in).
  */
 export const DEFAULT_CONFIG: RunConfig = {
-  model: "opencode-go/deepseek-v4.1-flash",
+  model: "claude-bridge/claude-haiku-5-5",
   phases: { "0": "harness/skills/phase-0", "1": "harness/skills/phase-1", "2": "harness/skills/phase-2" },
 };
 

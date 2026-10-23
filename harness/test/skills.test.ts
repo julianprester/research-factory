@@ -3,7 +3,7 @@
 // on, and the paths the prose sends workers to (a role that names a tool that
 // does not exist, or a role file nobody briefs, is a broken dispatch).
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -870,4 +870,24 @@ test("a combination child's card carries the second parent's evidence itself", (
   assert.match(evolve, /The judge sees a child behind the pattern it sits under and nothing else/);
   assert.match(evolve, /the second parent's claims and evidence must appear in this card itself/);
   assert.match(evolve, /never see the second pattern's Measure, Result, Verdict or Worst fits/);
+});
+
+test("the worker and reviewer agents leave their model to the run config", () => {
+  for (const file of ["harness/agents/ctc-worker.md", "harness/agents/ctc-reviewer.md"]) {
+    assert.ok(!("model" in frontmatter(read(file))), `${file} has no model: frontmatter line`);
+  }
+});
+
+test("every subagent dispatch in the skills names the model it runs on", () => {
+  const dispatches: string[] = [];
+  for (const file of readdirSync(SKILLS, { recursive: true })) {
+    if (!file.endsWith(".md")) continue;
+    for (const line of readFileSync(path.join(SKILLS, file), "utf8").split("\n")) {
+      if (line.includes("subagent({ agent:")) dispatches.push(`${file}: ${line.trim()}`);
+    }
+  }
+  assert.ok(dispatches.length > 0, "the skills dispatch subagents");
+  for (const dispatch of dispatches) {
+    assert.match(dispatch, /\bmodel: "/, `names a model: ${dispatch}`);
+  }
 });

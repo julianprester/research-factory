@@ -24,7 +24,7 @@ phase is complete.
      of Done**. It is the worker's whole contract; name the files it reads and
      writes, never paste history.
    - Dispatch it:
-     `subagent({ agent: "ctc-worker", async: true, cwd: "<node dir>", task: "Read brief.md and carry it out." })`
+     `subagent({ agent: "ctc-worker", model: "<worker model from your kickoff>", async: true, cwd: "<node dir>", task: "Read brief.md and carry it out." })`
    - Append the ledger line for the dispatch (it names the run id from the
      dispatch receipt — the ledger is where run ids are kept), then immediately
      `tree_update({ nodeId: "<id>", status: "active" })`.

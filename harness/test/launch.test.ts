@@ -14,6 +14,7 @@ import {
   HARNESS_ROOT,
   ensureSession,
   findWorkspace,
+  kickOff,
   nudgeOwner,
   ownerState,
   readConfig,
@@ -162,8 +163,19 @@ test("startOwner starts a gone owner: split, export CTC_PHASE, agent start, prom
       "--skill",
       PHASE1_SKILL,
     ],
-    ["agent", "prompt", "owner-p1", `You own phase 1 of the run in ${RUN_DIR}. Follow phase-owner and your phase skill. Start now.`],
+    ["agent", "prompt", "owner-p1", `You own phase 1 of the run in ${RUN_DIR}. Follow phase-owner and your phase skill. Start now. Worker model: test/model-a. Pass it as model: "test/model-a" on every subagent call you make (workers and reviewers). Judge model: test/model-a.`],
   ]);
+});
+
+test("kickOff names the worker model and the judge model, which defaults to the worker model", () => {
+  const plain = kickOff(RUN_DIR, 1, { model: "m1", phases: {} });
+  assert.ok(plain.includes("Worker model: m1."), plain);
+  assert.ok(plain.includes('Pass it as model: "m1"'), plain);
+  assert.ok(plain.includes("Judge model: m1."), plain);
+
+  const judged = kickOff(RUN_DIR, 1, { model: "m1", judgeModel: "j", phases: {} });
+  assert.ok(judged.includes("Worker model: m1."), judged);
+  assert.ok(judged.includes("Judge model: j."), judged);
 });
 
 test("findWorkspace reads only the labelled workspace and never starts a server", () => {

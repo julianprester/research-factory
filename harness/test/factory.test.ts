@@ -11,7 +11,17 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { init, latestRun, parseCommand, resume, runCommand, status, stop, type FactoryDeps } from "../factory.ts";
+import {
+  DEFAULT_CONFIG as SHIPPED_CONFIG,
+  init,
+  latestRun,
+  parseCommand,
+  resume,
+  runCommand,
+  status,
+  stop,
+  type FactoryDeps,
+} from "../factory.ts";
 import { HARNESS_ROOT, sessionServerStarter, supervisorPid, type Herdr } from "../launch.ts";
 import { createChild, initRun, updateNode } from "../tree.ts";
 
@@ -125,7 +135,7 @@ function spyServerStart(onStart?: (session: string) => void): { calls: string[];
 const SUPERVISE = path.join(HARNESS_ROOT, "harness", "supervise.ts");
 const DATASET = path.join(HARNESS_ROOT, "harness", "test", "fixtures", "mini-dataset");
 const DEFAULT_CONFIG = {
-  model: "opencode-go/deepseek-v4.1-flash",
+  model: "claude-bridge/claude-haiku-5-5",
   phases: {
     "0": "harness/skills/phase-0",
     "1": "harness/skills/phase-1",
@@ -145,6 +155,10 @@ function makeRun(dir: string): string {
   initRun(runDir, DATASET, "test interest");
   return runDir;
 }
+
+test("the shipped default model is the claude-bridge haiku model", () => {
+  assert.equal(SHIPPED_CONFIG.model, "claude-bridge/claude-haiku-5-5");
+});
 
 test("parseCommand splits shell-like quoting and rejects unknown subcommands", () => {
   assert.deepEqual(parseCommand('init data "work on platforms" runs/x'), {

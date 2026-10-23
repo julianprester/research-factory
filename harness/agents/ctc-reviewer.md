@@ -1,7 +1,6 @@
 ---
 name: ctc-reviewer
 description: Reviews one Phase 2 puzzle independently: reads the card and the pattern evidence, writes one review with a closing Status line.
-model: opencode-go/minimax-m3.1-flash-free
 tools: read, write, bash
 extensions:
   - ./harness/reviewer-extension.ts
