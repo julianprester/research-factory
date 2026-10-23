@@ -1,0 +1,45 @@
+# Analysis image (`ctc-analysis:1`)
+
+The container that explanation analysis scripts run in. Workers do not call
+`docker`; the `run_analysis` tool starts it through `analysis/run.ts`, with no
+network, the run's exploration split mounted read-only at `/data`, and the node's
+`workspace/scripts` (read) and `workspace/output` (write) mounted. Scripts run
+from `/work/scripts`, and `CTC_OUT=/work/output`.
+
+## Build
+
+From the repository root:
+
+```sh
+docker build -t ctc-analysis:1 harness/analysis/
+```
+
+The base is `rocker/r-ver:4.5.1` (Ubuntu 24.04). Its Rprofile pins the Posit
+Package Manager snapshot, so the R packages are dated binaries and the build does
+not compile them. Python packages come from PyPI into `/opt/venv`, unpinned; see
+the build log for the versions installed.
+
+The image holds R: data.table, dplyr, stringr, ggplot2, arrow, lme4, igraph,
+quanteda, topicmodels; and Python: pandas, numpy, scipy, statsmodels,
+scikit-learn, networkx, gensim, matplotlib, pyarrow.
+
+## The helpers
+
+Both languages expose the same API and write the same files under `$CTC_OUT`.
+
+| Call | Effect |
+| --- | --- |
+| `rec(key, value, note = "")` | Record a number for the next `save_numbers`. A key may be recorded once per section; the value must be finite. |
+| `save_numbers(section)` | Write `numbers/<section>.csv` (`name,value,note`), then clear. Integers print bare; other numbers with 10 significant digits. |
+| `reg(file, key)` | The value under `key` in `numbers/<file>.csv`. Stops unless exactly one row has that name. |
+| `put_var(variable, value, source, rendered = None)` | Set a manuscript variable. `rendered` defaults to the number as formatted above. |
+| `write_variables()` | Write `assets/_variables.yml` (`name: "rendered"`) and `assets/variables_sources.csv`, then clear. |
+
+Python: `import ctc` (`PYTHONPATH=/opt/ctc` is set in the image).
+R: `source("/opt/ctc/ctc.R")`.
+
+## Tests
+
+`harness/test/analysis-lib.test.ts` runs the Python helper on the host's `python3`.
+The R tests run `Rscript` inside `ctc-analysis:1` and are skipped, with a reason,
+when that image is not built.

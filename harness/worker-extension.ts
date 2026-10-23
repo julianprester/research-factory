@@ -21,6 +21,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
 
+import { realExec, runScript, type Exec } from "./analysis/run.ts";
+import { readConfig } from "./launch.ts";
 import {
   datasetRefusal,
   dockerRefusal,
@@ -45,6 +47,23 @@ interface PiLike {
 }
 
 const PreregisterParams = Type.Object({});
+const RunAnalysisParams = Type.Object({
+  script: Type.String({ description: "The script's bare file name, for example A_01.R; it runs from workspace/scripts/." }),
+});
+
+/** The last lines of a script's log that run_analysis returns to the worker. */
+const LOG_TAIL_LINES = 40;
+
+/** The Exec run_analysis uses; undefined in production, where it is realExec. */
+let execForTests: Exec | undefined;
+
+/**
+ * Replace the Exec run_analysis runs containers with (default realExec). Tests
+ * use this to inject a fake docker; pass undefined to restore the default.
+ */
+export function setExecForTests(exec: Exec | undefined): void {
+  execForTests = exec;
+}
 
 function result(text: string) {
   return { content: [{ type: "text", text }], details: undefined };
@@ -160,6 +179,59 @@ export default function workerExtension(pi: PiLike): void {
       const relPath = path.relative(runDir, measure).split(path.sep).join("/");
       const sha = commitFile(runDir, relPath, `worker-${id}`, `[P1:preregister] ${id} — measure.md`);
       return result(`pre-registered at ${sha}`);
+    },
+  });
+
+  pi.registerTool({
+    name: "run_analysis",
+    label: "Run analysis script",
+    description:
+      "Run one of this task's analysis scripts (workspace/scripts/<L>_nn.R or .py, or assets.R|py for the last task) in the analysis container: no network, the exploration split read-only, output written to workspace/output. Returns the exit code and the end of the log.",
+    parameters: RunAnalysisParams,
+    async execute(_toolCallId: string, params: { script: string }) {
+      const cwd = process.cwd();
+      const nodeDir = findNodeDir(cwd);
+      if (nodeDir === undefined) {
+        throw new Error(`Refusing to run an analysis: this session is not inside a node folder (no node.json above ${cwd})`);
+      }
+      if (!isExplanationNode(nodeDir)) {
+        throw new Error("Refusing to run an analysis: run_analysis is for explanation analysis tasks only");
+      }
+      const task = taskOf(nodeDir, cwd);
+      if (task === undefined) {
+        throw new Error(`Refusing to run an analysis: this session is not inside a task folder (tasks/<L>/ under ${nodeDir})`);
+      }
+      if (!/^[A-Z]$/.test(task)) {
+        throw new Error(`Refusing to run an analysis: literature task ${task} runs no scripts`);
+      }
+      const script = params.script;
+      if (path.basename(script) !== script) {
+        throw new Error(`Refusing to run "${script}": give a bare file name, such as ${task}_01.R`);
+      }
+      if (!explanationWorkerMayWrite(nodeDir, task, path.join(nodeDir, "workspace", "scripts", script))) {
+        throw new Error(
+          `Refusing to run ${script}: task ${task} may run only its own ${task}_nn.R|py and, as the last-lettered task, assets.R|py`,
+        );
+      }
+      const runDir = findRunDir(nodeDir);
+      if (runDir === undefined) {
+        throw new Error(`Refusing to run an analysis: there is no .git repository above ${nodeDir}`);
+      }
+      const config = readConfig(runDir);
+      const run = await runScript({
+        runDir,
+        nodeDir,
+        script,
+        image: config.analysisImage,
+        timeoutMs: config.analysisTimeoutMs,
+        exec: execForTests ?? realExec,
+      });
+      const tail = run.log.replace(/\n$/, "").split("\n").slice(-LOG_TAIL_LINES).join("\n");
+      const status = `exit code ${run.code}${run.timedOut ? ", timed out" : ""}`;
+      return {
+        content: [{ type: "text", text: `${status}\n${tail}` }],
+        details: { code: run.code, timedOut: run.timedOut },
+      };
     },
   });
 

@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import workerExtension, { findNodeDir } from "../worker-extension.ts";
-import { createChild, findNode, initRun, updateNode } from "../tree.ts";
+import type { Exec } from "../analysis/run.ts";
+import workerExtension, { findNodeDir, setExecForTests } from "../worker-extension.ts";
+import { createChild, findNode, findRunDir, initRun, updateNode } from "../tree.ts";
 
 interface CapturedTool {
   name: string;
@@ -152,10 +153,10 @@ test("preregister refuses when measurement files already exist", async (t) => {
 });
 
 /** A run with an explanation E01 under puzzle P01 in phase 3; returns the explanation's folder. */
-function explanationNode(t: TestContext): string {
+function explanationNode(t: TestContext, dataset = "data"): string {
   const run = mkdtempSync(path.join(tmpdir(), "ctc-explanation-"));
   t.after(() => rmSync(run, { recursive: true, force: true }));
-  initRun(run, "data", "interest");
+  initRun(run, dataset, "interest");
   createChild(run, "D01", "Self Presentation", "owner-p1");
   createChild(run, "T01", "status quo: crowd", "owner-p2");
   createChild(run, "P01", "Explanation of crowd", "owner-p3", [], "explanation");
@@ -251,4 +252,169 @@ test("empty measurement directories do not block preregister", async (t) => {
   const result = await tool.execute("call-1", {});
   assert.match(result.content[0]?.text ?? "", /^pre-registered at [0-9a-f]{7,}$/);
   assert.equal(git(run, "log", "-1", "--format=%s"), "[P1:preregister] T01 — measure.md");
+});
+
+/**
+ * An explanation E01 in phase 3 whose run has a real dataset, the split lists and a
+ * config with a test image and timeout: the setup run_analysis needs. Returns the
+ * explanation's folder.
+ */
+function analysisNode(t: TestContext): string {
+  const dataset = mkdtempSync(path.join(tmpdir(), "ctc-dataset-"));
+  t.after(() => rmSync(dataset, { recursive: true, force: true }));
+  writeFileSync(path.join(dataset, "a.csv"), "a,1\n");
+  const explanation = explanationNode(t, dataset);
+  const run = findRunDir(explanation);
+  assert.ok(run, "the explanation sits inside a run");
+  const split = path.join(run, "prep", "Z01-profile", "workspace", "split");
+  mkdirSync(split, { recursive: true });
+  writeFileSync(path.join(split, "exploration.txt"), "a.csv\n");
+  writeFileSync(path.join(split, "holdout.txt"), "");
+  writeFileSync(
+    path.join(run, "config.json"),
+    JSON.stringify({ model: "m", phases: { "3": "skills/x.md" }, analysisImage: "ctc-analysis:test", analysisTimeoutMs: 1234 }),
+  );
+  return explanation;
+}
+
+/** An Exec that records its calls and resolves with `result`. */
+function recordingExec(result: Partial<Awaited<ReturnType<Exec>>> = {}): { exec: Exec; calls: Array<{ args: string[]; timeoutMs: number }> } {
+  const calls: Array<{ args: string[]; timeoutMs: number }> = [];
+  const exec: Exec = async (args, opts) => {
+    calls.push({ args, timeoutMs: opts.timeoutMs });
+    return { code: 0, stdout: "", stderr: "", timedOut: false, ...result };
+  };
+  return { exec, calls };
+}
+
+/** run_analysis, registered with `exec` injected through the test hook (removed after the test). */
+function runAnalysisTool(t: TestContext, exec: Exec): CapturedTool {
+  setExecForTests(exec);
+  t.after(() => setExecForTests(undefined));
+  const { pi, tools } = fakePi();
+  workerExtension(pi);
+  const tool = tools.get("run_analysis");
+  assert.ok(tool, "the worker extension registers run_analysis");
+  return tool;
+}
+
+/** Move the test's cwd to `dir` for the rest of the test. */
+function enter(t: TestContext, dir: string): void {
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+  process.chdir(dir);
+}
+
+test("the worker extension registers run_analysis with a script parameter", (t) => {
+  const { pi, tools } = fakePi();
+  workerExtension(pi);
+  const tool = tools.get("run_analysis");
+  assert.ok(tool);
+  assert.deepEqual(Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties), ["script"]);
+});
+
+test("run_analysis runs the task's script in the configured image and returns the exit code and the log's last 40 lines", async (t) => {
+  const explanation = analysisNode(t);
+  const task = path.join(explanation, "tasks", "A");
+  mkdirSync(task, { recursive: true });
+  mkdirSync(path.join(explanation, "workspace", "scripts"), { recursive: true });
+  writeFileSync(path.join(explanation, "workspace", "scripts", "A_01.R"), "cat('x')\n");
+  enter(t, task);
+
+  const stdout = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join("\n") + "\n";
+  const { exec, calls } = recordingExec({ stdout });
+  const tool = runAnalysisTool(t, exec);
+  const result = await tool.execute("call-1", { script: "A_01.R" });
+
+  assert.equal(calls.length, 1, "one container run");
+  assert.equal(calls[0]?.args.at(-1), "scripts/A_01.R", "the script runs from scripts/");
+  assert.ok(calls[0]?.args.includes("ctc-analysis:test"), "the configured image");
+  assert.equal(calls[0]?.timeoutMs, 1234, "the configured timeout");
+  const text = result.content[0]?.text ?? "";
+  assert.match(text, /^exit code 0\n/);
+  assert.match(text, /^line 50$/m, "the last line of output is returned");
+  assert.match(text, /^line 12$/m, "the last 40 lines are returned");
+  assert.doesNotMatch(text, /^line 11$/m, "earlier lines are not");
+  assert.deepEqual(result.details, { code: 0, timedOut: false });
+});
+
+test("run_analysis reports a timed-out run", async (t) => {
+  const explanation = analysisNode(t);
+  const task = path.join(explanation, "tasks", "A");
+  mkdirSync(task, { recursive: true });
+  mkdirSync(path.join(explanation, "workspace", "scripts"), { recursive: true });
+  writeFileSync(path.join(explanation, "workspace", "scripts", "A_01.R"), "repeat {}\n");
+  enter(t, task);
+
+  const tool = runAnalysisTool(t, recordingExec({ code: 124, timedOut: true }).exec);
+  const result = await tool.execute("call-1", { script: "A_01.R" });
+  assert.match(result.content[0]?.text ?? "", /^exit code 124, timed out\n/);
+  assert.deepEqual(result.details, { code: 124, timedOut: true });
+});
+
+test("run_analysis refuses another task's script and any script name that is not a bare file name", async (t) => {
+  const explanation = analysisNode(t);
+  const task = path.join(explanation, "tasks", "A");
+  mkdirSync(task, { recursive: true });
+  enter(t, task);
+
+  const { exec, calls } = recordingExec();
+  const tool = runAnalysisTool(t, exec);
+  await assert.rejects(() => tool.execute("call-1", { script: "B_01.R" }), /may run only its own A_nn\.R/);
+  await assert.rejects(() => tool.execute("call-2", { script: "../A_01.R" }), /bare file name/);
+  await assert.rejects(() => tool.execute("call-3", { script: "A_01.txt" }), /may run only its own/);
+  assert.equal(calls.length, 0, "no container was started");
+});
+
+test("run_analysis refuses in a literature task", async (t) => {
+  const explanation = analysisNode(t);
+  const task = path.join(explanation, "tasks", "lit-01");
+  mkdirSync(task, { recursive: true });
+  enter(t, task);
+
+  const { exec, calls } = recordingExec();
+  const tool = runAnalysisTool(t, exec);
+  await assert.rejects(() => tool.execute("call-1", { script: "A_01.R" }), /lit-01 runs no scripts/);
+  assert.equal(calls.length, 0);
+});
+
+test("run_analysis refuses outside an explanation's task folder and outside an explanation", async (t) => {
+  const explanation = analysisNode(t);
+  enter(t, explanation);
+  const { exec, calls } = recordingExec();
+  const tool = runAnalysisTool(t, exec);
+  await assert.rejects(() => tool.execute("call-1", { script: "A_01.R" }), /not inside a task folder/);
+  assert.equal(calls.length, 0);
+});
+
+test("run_analysis refuses in a pattern node, which is not an explanation", async (t) => {
+  const { nodeDir } = patternNode(t);
+  mkdirSync(path.join(nodeDir, "tasks", "A"), { recursive: true });
+  process.chdir(path.join(nodeDir, "tasks", "A"));
+
+  const { exec, calls } = recordingExec();
+  const tool = runAnalysisTool(t, exec);
+  await assert.rejects(() => tool.execute("call-1", { script: "A_01.R" }), /explanation analysis tasks only/);
+  assert.equal(calls.length, 0);
+});
+
+test("run_analysis runs assets.R only for the greatest-lettered task", async (t) => {
+  const explanation = analysisNode(t);
+  for (const letter of ["A", "B"]) mkdirSync(path.join(explanation, "tasks", letter), { recursive: true });
+  mkdirSync(path.join(explanation, "workspace", "scripts"), { recursive: true });
+  writeFileSync(path.join(explanation, "workspace", "scripts", "assets.R"), "# assets\n");
+
+  // One restore only: a second t.after would run after the fixture has removed the run.
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+  const { exec, calls } = recordingExec();
+  const tool = runAnalysisTool(t, exec);
+  process.chdir(path.join(explanation, "tasks", "A"));
+  await assert.rejects(() => tool.execute("call-1", { script: "assets.R" }), /may run only its own A_nn\.R/);
+  assert.equal(calls.length, 0, "task A is not the last letter");
+
+  process.chdir(path.join(explanation, "tasks", "B"));
+  await tool.execute("call-2", { script: "assets.R" });
+  assert.equal(calls.length, 1, "task B owns the shared assets script");
+  assert.equal(calls[0]?.args.at(-1), "scripts/assets.R");
 });
