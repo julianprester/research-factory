@@ -436,6 +436,59 @@ test("runScript refuses an output/logs folder that is a symlink", async (t) => {
   assert.equal(calls.length, 0);
 });
 
+test("runScript refuses output/logs swapped for a symlink during the run, and writes nothing outside", async (t) => {
+  const { runDir } = makeRun(t);
+  const nodeDir = makeNode(runDir, ["B_01.R"]);
+  const outside = outsideDir(t);
+  writeFileSync(path.join(outside, "B_01.txt"), "keep\n");
+  const logs = path.join(nodeDir, "workspace", "output", "logs");
+  // A script running in the container can replace the logs folder with a link.
+  const exec: Exec = async () => {
+    rmSync(logs, { recursive: true, force: true });
+    symlinkSync(outside, logs);
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
+  };
+  await assert.rejects(
+    runScript({ runDir, nodeDir, script: "B_01.R", image: "img", timeoutMs: 1000, exec }),
+    /output\/logs must be a real folder/,
+  );
+  assert.equal(readFileSync(path.join(outside, "B_01.txt"), "utf8"), "keep\n", "the outside file is untouched");
+  assert.deepEqual(readdirSync(outside), ["B_01.txt"], "nothing is added outside the node");
+});
+
+test("runScript refuses output swapped for a symlink during the run, and writes nothing outside", async (t) => {
+  const { runDir } = makeRun(t);
+  const nodeDir = makeNode(runDir, ["B_01.R"]);
+  const outside = outsideDir(t);
+  const output = path.join(nodeDir, "workspace", "output");
+  const exec: Exec = async () => {
+    rmSync(output, { recursive: true, force: true });
+    symlinkSync(outside, output);
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
+  };
+  await assert.rejects(
+    runScript({ runDir, nodeDir, script: "B_01.R", image: "img", timeoutMs: 1000, exec }),
+    /workspace\/output must be a real folder/,
+  );
+  assert.deepEqual(readdirSync(outside), [], "nothing is written outside the node");
+});
+
+test("runScript refuses a directory planted at the log's name, with a clear message", async (t) => {
+  const { runDir } = makeRun(t);
+  const nodeDir = makeNode(runDir, ["B_01.R"]);
+  const logFile = path.join(nodeDir, "workspace", "output", "logs", "B_01.txt");
+  const exec: Exec = async () => {
+    mkdirSync(logFile);
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
+  };
+  await assert.rejects(
+    runScript({ runDir, nodeDir, script: "B_01.R", image: "img", timeoutMs: 1000, exec }),
+    (error: unknown) =>
+      error instanceof Error && /B_01\.txt is a directory, not a log file/.test(error.message) && !/ERR_FS/.test(error.message),
+  );
+  assert.equal(lstatSync(logFile).isDirectory(), true, "the planted directory is left in place");
+});
+
 test("prepareExploration refuses a symlink that points at a hold-out file, and copies nothing", (t) => {
   const { runDir, dataset } = makeRun(t, ["data/a.csv", "data/link.csv"]);
   symlinkSync(path.join(dataset, "data", "holdout-x.csv"), path.join(dataset, "data", "link.csv"));

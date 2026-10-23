@@ -273,13 +273,19 @@ function assertRealFolder(dir: string, nodeReal: string): void {
   }
 }
 
+/** True when `error` is a Node system error with one of `codes`. */
+function isErrorCode(error: unknown, ...codes: string[]): boolean {
+  return error instanceof Error && codes.includes((error as NodeJS.ErrnoException).code ?? "");
+}
+
 /**
  * Run `workspace/scripts/<script>` in the analysis container and write its log
  * to `workspace/output/logs/<stem>.txt`. The script name must be an analysis
  * name (`X_nn.R|py` or `assets.R|py`) and must exist. The scripts and output
  * folders must be real folders inside the node, checked before anything is
  * created. The output folders are then created, and the exploration split is
- * prepared before docker runs.
+ * prepared before docker runs. The output and logs folders are checked again
+ * after the run, since the container could have replaced them with links.
  */
 export async function runScript(o: {
   runDir: string;
@@ -323,10 +329,24 @@ export async function runScript(o: {
   if (result.timedOut) header.push(`TIMED OUT after ${o.timeoutMs} ms`);
   const log = `${header.join("\n")}\n--- stdout ---\n${block(result.stdout)}--- stderr ---\n${block(result.stderr)}`;
   const stem = path.basename(o.script, path.extname(o.script));
-  // The script could have left a link at this name: remove the link itself, then
-  // create the file exclusively, so the write never follows a link.
-  const logFile = path.join(output, "logs", `${stem}.txt`);
-  fs.rmSync(logFile, { force: true });
+  // The container ran as the harness user with output/ writable, so it could have
+  // swapped either folder for a link while it ran. Check both again before the
+  // write; a link here means the result is lost, and nothing is written.
+  const logs = path.join(output, "logs");
+  assertRealFolder(output, nodeReal);
+  assertRealFolder(logs, nodeReal);
+  fs.mkdirSync(logs, { recursive: true });
+  // The script could have left a link (or a directory) at the log's name: remove a
+  // link itself, never what it points to, then create the file exclusively.
+  const logFile = path.join(logs, `${stem}.txt`);
+  try {
+    fs.rmSync(logFile, { force: true });
+  } catch (error) {
+    if (isErrorCode(error, "ERR_FS_EISDIR", "EISDIR")) {
+      throw new Error(`${logFile} is a directory, not a log file: refusing to replace it`);
+    }
+    throw error;
+  }
   fs.writeFileSync(logFile, log, { flag: "wx" });
   return { code: result.code, log, timedOut: result.timedOut };
 }
