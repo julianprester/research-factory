@@ -50,11 +50,28 @@ function result(text: string) {
   return { content: [{ type: "text", text }], details: undefined };
 }
 
-/** The nearest ancestor of `start` (or `start` itself) that holds a `node.json`. */
+/**
+ * True when `dir` is an explanation's `tasks/` folder or lies under one. Those
+ * folders are writable by the task workers, so a `node.json` there is not a node.
+ */
+function isInsideExplanationTasks(dir: string): boolean {
+  for (let current = dir; ; ) {
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    if (path.basename(current) === "tasks" && isExplanationNode(parent)) return true;
+    current = parent;
+  }
+}
+
+/**
+ * The nearest ancestor of `start` (or `start` itself) that holds a `node.json`,
+ * passing over an explanation's task folders: a worker writes those, so a stray
+ * `node.json` there must not redirect the guards to the task folder.
+ */
 export function findNodeDir(start: string): string | undefined {
   let dir = path.resolve(start);
   for (;;) {
-    if (fs.existsSync(path.join(dir, "node.json"))) return dir;
+    if (fs.existsSync(path.join(dir, "node.json")) && !isInsideExplanationTasks(dir)) return dir;
     const parent = path.dirname(dir);
     if (parent === dir) return undefined;
     dir = parent;

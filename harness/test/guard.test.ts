@@ -1171,6 +1171,8 @@ test("taskOf reads the task letter or literature name from a cwd under the expla
 
 test("an explanation worker writes its own task folder, its scripts and the shared assets, and nothing else", (t) => {
   const { explanation } = explanationRun(t);
+  // A is the only letter task here, so it is the one that owns the shared assets.
+  mkdirSync(path.join(explanation, "tasks", "A"), { recursive: true });
   const may = (task: string, relPath: string) => explanationWorkerMayWrite(explanation, task, path.join(explanation, relPath));
   assert.equal(may("A", "tasks/A/handoff.md"), true);
   assert.equal(may("A", "tasks/A/notes/x.md"), true, "anything under its task folder");
@@ -1274,4 +1276,48 @@ test("an explanation reviewer writes its report and reads no sibling, no review 
     true,
     "the ancestor puzzle is another puzzle to a reviewer",
   );
+});
+
+test("no explanation role may write a node.json under tasks/, so no task can make itself a node", (t) => {
+  const { run, explanation } = explanationRun(t);
+  const worker = (task: string, relPath: string) =>
+    explanationWorkerMayWrite(explanation, task, path.join(explanation, relPath));
+  assert.equal(worker("A", "tasks/A/node.json"), false, "a stray node.json would redirect findNodeDir");
+  assert.equal(worker("A", "tasks/A/sub/node.json"), false, "at any depth under the task");
+  assert.equal(worker("lit-02", "tasks/lit-02/node.json"), false, "a literature task too");
+  assert.equal(
+    ownerMayWrite(run, 3, path.join(explanation, "tasks", "C", "node.json")),
+    false,
+    "the owner may not write it either",
+  );
+  assert.equal(
+    reviewerMayWrite(explanation, path.join(explanation, "tasks", "A", "node.json")),
+    false,
+    "nor the reviewer",
+  );
+});
+
+test("assets.R and assets.py belong to the greatest-lettered task folder, ignoring lit-NN and other names", (t) => {
+  const { explanation } = explanationRun(t);
+  const may = (task: string, relPath: string) =>
+    explanationWorkerMayWrite(explanation, task, path.join(explanation, relPath));
+  // lit-09 sorts after B, and c after B in code units, so only a letter-only rule keeps B the owner.
+  for (const task of ["A", "B", "lit-09", "c"]) mkdirSync(path.join(explanation, "tasks", task), { recursive: true });
+  assert.equal(may("B", "workspace/scripts/assets.R"), true, "B is the greatest letter");
+  assert.equal(may("B", "workspace/scripts/assets.py"), true);
+  assert.equal(may("A", "workspace/scripts/assets.R"), false, "A is not the last letter");
+  assert.equal(may("A", "workspace/scripts/assets.py"), false);
+  assert.equal(may("A", "workspace/scripts/A_01.R"), true, "A's own scripts are unchanged");
+  assert.equal(may("lit-09", "workspace/scripts/assets.R"), false, "a literature task never writes assets");
+});
+
+test("assets belong to the only letter task, and a literature task never writes them", (t) => {
+  const { explanation } = explanationRun(t);
+  const may = (task: string, relPath: string) =>
+    explanationWorkerMayWrite(explanation, task, path.join(explanation, relPath));
+  mkdirSync(path.join(explanation, "tasks", "lit-01"), { recursive: true });
+  assert.equal(may("lit-01", "workspace/scripts/assets.R"), false, "lit-01 with no letter task");
+  mkdirSync(path.join(explanation, "tasks", "A"), { recursive: true });
+  assert.equal(may("A", "workspace/scripts/assets.R"), true, "A is the only letter task");
+  assert.equal(may("lit-01", "workspace/scripts/assets.py"), false, "lit-01 beside A");
 });

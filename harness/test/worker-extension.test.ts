@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import workerExtension from "../worker-extension.ts";
+import workerExtension, { findNodeDir } from "../worker-extension.ts";
 import { createChild, findNode, initRun, updateNode } from "../tree.ts";
 
 interface CapturedTool {
@@ -191,6 +191,55 @@ test("an explanation worker writes from its task folder only, and is blocked out
   const blocked = write(path.join(explanation, "workspace", "scripts", "A_01.R"));
   assert.equal(blocked?.block, true, "the node folder itself is no task, so every write is blocked");
   assert.match(blocked?.reason ?? "", /not inside a task folder/);
+});
+
+test("an explanation worker cannot write a node.json under its task folder", (t) => {
+  const explanation = explanationNode(t);
+  mkdirSync(path.join(explanation, "tasks", "A"), { recursive: true });
+
+  const handlers = new Map<string, (event: { toolName: string; input?: { path?: unknown } }) => { block?: boolean; reason?: string } | undefined>();
+  workerExtension({
+    registerTool() {},
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+  });
+  const guard = handlers.get("tool_call");
+  assert.ok(guard, "the worker registers a tool_call handler");
+
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+  process.chdir(path.join(explanation, "tasks", "A"));
+  assert.equal(guard({ toolName: "write", input: { path: "node.json" } })?.block, true, "a relative node.json");
+  assert.equal(
+    guard({ toolName: "write", input: { path: path.join(explanation, "tasks", "A", "sub", "node.json") } })?.block,
+    true,
+    "a node.json at any depth",
+  );
+});
+
+test("findNodeDir passes over an explanation's task folders, so a stray node.json there cannot redirect the guards", (t) => {
+  const explanation = explanationNode(t);
+  const puzzle = path.dirname(path.dirname(explanation));
+  const stray = '{"phase":1,"status":"ready"}\n';
+  mkdirSync(path.join(explanation, "tasks", "A", "sub"), { recursive: true });
+  writeFileSync(path.join(explanation, "tasks", "A", "node.json"), stray);
+  writeFileSync(path.join(explanation, "tasks", "A", "sub", "node.json"), stray);
+  writeFileSync(path.join(explanation, "tasks", "node.json"), stray);
+
+  assert.equal(findNodeDir(path.join(explanation, "tasks", "A")), explanation, "the task folder's stray node.json is skipped");
+  assert.equal(findNodeDir(path.join(explanation, "tasks", "A", "sub")), explanation, "at any depth");
+  assert.equal(findNodeDir(path.join(explanation, "tasks")), explanation, "the tasks folder itself");
+  assert.equal(findNodeDir(path.join(explanation, "workspace")), explanation, "the node's own folders are unchanged");
+  assert.equal(findNodeDir(path.join(puzzle, "workspace")), puzzle, "a puzzle node is found as before");
+});
+
+test("findNodeDir still finds a run whose own folder is named tasks", (t) => {
+  const base = mkdtempSync(path.join(tmpdir(), "ctc-tasks-named-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const run = path.join(base, "tasks", "run");
+  initRun(run, "data", "interest");
+  assert.equal(findNodeDir(run), run);
 });
 
 test("empty measurement directories do not block preregister", async (t) => {

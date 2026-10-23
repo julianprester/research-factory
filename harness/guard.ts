@@ -56,8 +56,11 @@ const TASK_NAME = /^(?:[A-Z]|lit-\d\d)$/;
 /** A letter task's script `<L>_<nn>.R` or `.py`: its letter, then two digits. */
 const TASK_SCRIPT = /^([A-Z])_\d\d\.(?:R|py)$/;
 
-/** The shared scripts every letter task may write. */
+/** The shared scripts: only the greatest-lettered task folder may write them (`assetsOwner`). */
 const SHARED_SCRIPTS = new Set(["assets.R", "assets.py"]);
+
+/** The node-state file `findNodeDir` looks for; no task may write one, so no task can make itself a node. */
+const NODE_STATE_FILE = "node.json";
 
 /** A literature task `lit-<nn>` writes the report `workspace/reports/<nn>.md`. */
 const LIT_TASK = /^lit-(\d\d)$/;
@@ -120,23 +123,44 @@ export function taskOf(nodeDir: string, cwd: string): string | undefined {
 }
 
 /**
+ * The letter task that owns the shared `assets.R|.py`: the greatest single-capital
+ * `tasks/<L>` folder under the node, or undefined when there is none. `lit-NN`
+ * folders and any other name are ignored, and the list is read from disk each
+ * time, so the owner is whatever folders exist when the write is checked.
+ */
+function assetsOwner(nodeDir: string): string | undefined {
+  let names: string[];
+  try {
+    names = fs
+      .readdirSync(path.join(nodeDir, "tasks"), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^[A-Z]$/.test(entry.name))
+      .map((entry) => entry.name);
+  } catch {
+    return undefined;
+  }
+  return names.sort().at(-1);
+}
+
+/**
  * True only for what an explanation worker of `task` may write: its task folder
- * (`tasks/<task>/**`), and for a letter task its own scripts
- * (`workspace/scripts/<task>_<nn>.R|.py`) and the shared `assets.R|.py`; for a
- * literature task `lit-<nn>` its report `workspace/reports/<nn>.md`. The argument,
- * `archive/`, `output/`, another round's report and another task are not theirs.
+ * (`tasks/<task>/**`, but never a `node.json` in it), and for a letter task its
+ * own scripts (`workspace/scripts/<task>_<nn>.R|.py`) and, only when it is the
+ * greatest-lettered task, the shared `assets.R|.py`; for a literature task
+ * `lit-<nn>` its report `workspace/reports/<nn>.md`. The argument, `archive/`,
+ * `output/`, another round's report and another task are not theirs.
  */
 export function explanationWorkerMayWrite(nodeDir: string, task: string, absPath: string): boolean {
   if (!TASK_NAME.test(task)) return false;
   const relative = relativeInside(nodeDir, absPath);
   if (relative === undefined) return false;
   const parts = relative.split(path.sep);
-  if (parts[0] === "tasks" && parts[1] === task) return parts.length > 2;
+  if (parts[0] === "tasks" && parts[1] === task) return parts.length > 2 && !parts.includes(NODE_STATE_FILE);
   const lit = LIT_TASK.exec(task);
   if (lit) return parts.length === 3 && parts[0] === "workspace" && parts[1] === "reports" && parts[2] === `${lit[1]}.md`;
   if (parts.length !== 3 || parts[0] !== "workspace" || parts[1] !== "scripts") return false;
   const name = parts[2] ?? "";
-  return SHARED_SCRIPTS.has(name) || TASK_SCRIPT.exec(name)?.[1] === task;
+  if (SHARED_SCRIPTS.has(name)) return assetsOwner(nodeDir) === task;
+  return TASK_SCRIPT.exec(name)?.[1] === task;
 }
 
 /**
