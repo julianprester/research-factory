@@ -8,11 +8,15 @@ import test, { type TestContext } from "node:test";
 import {
   datasetRefusal,
   dockerRefusal,
+  explanationWorkerMayWrite,
   holdoutLocked,
+  isExplanationNode,
   ownerMayWrite,
   ownersRefusal,
+  reviewerMayWrite,
   reviewsRefusal,
   siblingRefusal,
+  taskOf,
   workerMayWrite,
 } from "../guard.ts";
 import ownerExtension from "../owner-extension.ts";
@@ -1133,4 +1137,141 @@ test("a symlink in the reviewer's own folder cannot reach a sibling", (t) => {
   const call = reviewerGuard(t, p1);
   assert.equal(call("read", { path: "workspace/link/puzzle.md" })?.block, true, "the real path is a sibling's");
   assert.match(call("read", { path: "workspace/link/puzzle.md" })?.reason ?? "", /sibling puzzles/);
+});
+
+/** The puzzle run plus an explanation E01 under P01, moved to phase 3 as its owner would. */
+function explanationRun(t: TestContext): PuzzleRun & { explanation: string } {
+  const fixture = puzzleRun(t);
+  createChild(fixture.run, "P01", "Explanation of crowd", "owner-p3", [], "explanation");
+  updateNode(fixture.run, "E01", { phase: 3, status: "active" }, "owner-p3");
+  return { ...fixture, explanation: findNode(fixture.run, "E01").dir };
+}
+
+test("isExplanationNode recognises an E<nn> folder under explanations and nothing else", (t) => {
+  const { explanation, p1, run } = explanationRun(t);
+  assert.equal(isExplanationNode(explanation), true);
+  assert.equal(isExplanationNode(p1), false, "a puzzle is not an explanation");
+  assert.equal(isExplanationNode(path.join(run, "framings", "E01-x")), false, "the parent folder must be explanations");
+  assert.equal(isExplanationNode(path.join(p1, "explanations", "P01-x")), false, "the name must be E<nn>-");
+});
+
+test("taskOf reads the task letter or literature name from a cwd under the explanation's tasks folder", (t) => {
+  const { explanation, p1 } = explanationRun(t);
+  assert.equal(taskOf(explanation, path.join(explanation, "tasks", "A")), "A");
+  assert.equal(taskOf(explanation, path.join(explanation, "tasks", "A", "scratch")), "A", "a folder inside the task keeps its name");
+  assert.equal(taskOf(explanation, path.join(explanation, "tasks", "lit-02")), "lit-02");
+  assert.equal(taskOf(explanation, path.join(explanation, "tasks", "a")), undefined, "a lower-case letter is no task");
+  assert.equal(taskOf(explanation, path.join(explanation, "tasks", "AB")), undefined);
+  assert.equal(taskOf(explanation, path.join(explanation, "tasks", "lit-2")), undefined);
+  assert.equal(taskOf(explanation, explanation), undefined, "the node folder itself has no task");
+  assert.equal(taskOf(explanation, path.join(explanation, "tasks")), undefined);
+  assert.equal(taskOf(explanation, path.join(explanation, "workspace")), undefined);
+  assert.equal(taskOf(explanation, path.join(p1, "tasks", "A")), undefined, "a cwd outside the node has no task");
+});
+
+test("an explanation worker writes its own task folder, its scripts and the shared assets, and nothing else", (t) => {
+  const { explanation } = explanationRun(t);
+  const may = (task: string, relPath: string) => explanationWorkerMayWrite(explanation, task, path.join(explanation, relPath));
+  assert.equal(may("A", "tasks/A/handoff.md"), true);
+  assert.equal(may("A", "tasks/A/notes/x.md"), true, "anything under its task folder");
+  assert.equal(may("A", "workspace/scripts/A_01.R"), true);
+  assert.equal(may("A", "workspace/scripts/A_12.py"), true);
+  assert.equal(may("A", "workspace/scripts/assets.R"), true);
+  assert.equal(may("A", "workspace/scripts/assets.py"), true);
+  assert.equal(may("A", "workspace/scripts/B_01.R"), false, "another task's script");
+  assert.equal(may("A", "workspace/scripts/A_1.R"), false, "the script number has two digits");
+  assert.equal(may("A", "workspace/argument.md"), false, "the argument is the owner's");
+  assert.equal(may("A", "workspace/archive/x"), false);
+  assert.equal(may("A", "workspace/output/numbers/A_01.csv"), false);
+  assert.equal(may("A", "tasks/B/handoff.md"), false, "another task's folder");
+  assert.equal(may("A", "handoff.md"), false, "the node's handoff is not a task's");
+  assert.equal(may("A", "workspace/reports/02.md"), false, "a letter task writes no report");
+  assert.equal(
+    explanationWorkerMayWrite(explanation, "A", path.join(explanation, "..", "E02-y", "tasks", "A", "x")),
+    false,
+    "a path that climbs out of the node",
+  );
+  assert.equal(
+    explanationWorkerMayWrite(explanation, "a", path.join(explanation, "tasks", "a", "x")),
+    false,
+    "an invalid task name writes nothing",
+  );
+});
+
+test("a literature task writes its own folder and its report, not another round's", (t) => {
+  const { explanation } = explanationRun(t);
+  const may = (task: string, relPath: string) => explanationWorkerMayWrite(explanation, task, path.join(explanation, relPath));
+  assert.equal(may("lit-02", "tasks/lit-02/handoff.md"), true);
+  assert.equal(may("lit-02", "workspace/reports/02.md"), true);
+  assert.equal(may("lit-02", "workspace/reports/01.md"), false, "another round's report");
+  assert.equal(may("lit-02", "workspace/scripts/A_01.R"), false);
+  assert.equal(may("lit-02", "workspace/scripts/assets.R"), false, "the shared assets belong to letter tasks");
+  assert.equal(may("lit-02", "tasks/A/handoff.md"), false, "another task's folder");
+});
+
+test("reviewerMayWrite lets an explanation reviewer write its report, and a puzzle reviewer not", (t) => {
+  const { explanation, p1 } = explanationRun(t);
+  assert.equal(reviewerMayWrite(explanation, path.join(explanation, "workspace", "reviews", "report.md")), true);
+  assert.equal(reviewerMayWrite(explanation, path.join(explanation, "workspace", "reviews", "a.md")), true, "the review slots still apply");
+  assert.equal(reviewerMayWrite(explanation, path.join(explanation, "workspace", "argument.md")), false);
+  assert.equal(reviewerMayWrite(p1, path.join(p1, "workspace", "reviews", "report.md")), false, "report.md is an explanation's review");
+});
+
+test("ownerMayWrite lets the owner write an explanation's argument, revision, requests and briefs", (t) => {
+  const { run, explanation, p1 } = explanationRun(t);
+  const may = (relPath: string) => ownerMayWrite(run, 3, path.join(explanation, relPath));
+  assert.equal(may("workspace/argument.md"), true);
+  assert.equal(may("workspace/reviews/revision.md"), true);
+  assert.equal(may("workspace/data-requests.md"), true);
+  assert.equal(may("tasks/C/brief.md"), true);
+  assert.equal(may("tasks/lit-01/brief.md"), true);
+  assert.equal(may("brief.md"), true, "the node's own brief");
+  assert.equal(may("brief-review.md"), true, "the explanation's reviewer brief");
+  assert.equal(ownerMayWrite(run, 3, path.join(run, "owners", "phase-3", "ledger.md")), true);
+  assert.equal(
+    ownerMayWrite(run, 3, path.join(run, "owners", "phase-3", "loop", "E01", "rounds.json")),
+    false,
+    "the loop records belong to the loop tools",
+  );
+  assert.equal(may("rounds/01/plan.md"), false);
+  assert.equal(may("workspace/scripts/A_01.R"), false, "a worker's script");
+  assert.equal(may("tasks/C/handoff.md"), false, "a task's handoff is the worker's");
+  assert.equal(ownerMayWrite(run, 3, path.join(p1, "workspace", "argument.md")), false, "a puzzle has no argument");
+});
+
+test("an explanation worker reads its own card, but not a sibling puzzle or its ancestor puzzle outside the node", (t) => {
+  const { p1, p2, explanation } = explanationRun(t);
+  const call = workerGuard(t, explanation);
+  assert.equal(call("read", { path: "workspace/puzzle.md" }), undefined, "its own card is a snapshot in the node");
+  assert.equal(call("read", { path: path.join(p2, "workspace", "puzzle.md") })?.block, true, "a sibling puzzle");
+  assert.match(call("read", { path: path.join(p2, "workspace", "puzzle.md") })?.reason ?? "", /sibling puzzles/);
+  assert.equal(call("read", { path: path.join(p1, "workspace", "puzzle.md") })?.block, true, "the ancestor puzzle's card");
+  assert.equal(
+    call("read", { path: path.join(p1, "workspace", "reviews", "merged.md") })?.block,
+    true,
+    "the ancestor puzzle's merged review",
+  );
+});
+
+test("an explanation worker's bash may name its ancestor puzzle, not a sibling", (t) => {
+  const { p1, p2, explanation } = explanationRun(t);
+  const call = workerGuard(t, explanation);
+  assert.equal(call("bash", { command: `cat ${path.join(p1, "workspace", "puzzle.md")}` }), undefined, "naming the ancestor puzzle");
+  assert.equal(call("bash", { command: "cat workspace/puzzle.md" }), undefined, "its own card");
+  assert.equal(call("bash", { command: `cat ${path.join(p2, "workspace", "puzzle.md")}` })?.block, true, "naming a sibling");
+  assert.equal(call("bash", { command: "cat ../../P02*/workspace/puzzle.md" })?.block, true, "a sibling behind a glob");
+});
+
+test("an explanation reviewer writes its report and reads no sibling, no review and no argument it does not own", (t) => {
+  const { p1, explanation } = explanationRun(t);
+  const call = reviewerGuard(t, explanation);
+  assert.equal(call("write", { path: "workspace/reviews/report.md" }), undefined, "its report");
+  assert.equal(call("write", { path: "workspace/argument.md" })?.block, true, "the argument is the owner's");
+  assert.equal(call("read", { path: "workspace/puzzle.md" }), undefined, "its own card");
+  assert.equal(call("read", { path: "workspace/reviews/report.md" })?.block, true, "no review, not even its own");
+  assert.equal(
+    call("read", { path: path.join(p1, "workspace", "puzzle.md") })?.block,
+    true,
+    "the ancestor puzzle is another puzzle to a reviewer",
+  );
 });

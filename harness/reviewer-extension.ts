@@ -1,15 +1,16 @@
 // The reviewer extension: one puzzle in, one review out, no review read.
 //
 // Pi loads this into every `ctc-reviewer` child (see
-// harness/agents/ctc-reviewer.md). Reviewers are Phase 2 only and run with their
-// puzzle node as cwd. The guard enforces the independence the Phase 2 design
-// promises (§5.3) with code, not with the prompt:
+// harness/agents/ctc-reviewer.md). Reviewers run with their puzzle or explanation
+// node as cwd. The guard enforces the independence the Phase 2 design promises
+// (§5.3) with code, not with the prompt:
 //
-// - `write`/`edit` only to `<nodeDir>/workspace/reviews/a.md` or `b.md`; the
-//   merge (`merged.md`), the card and `handoff.md` are not a reviewer's files.
-//   A session outside a puzzle node folder is refused every tool call, so a
-//   dispatch that lands in the run root or a pattern node fails closed instead
-//   of silently losing the isolation.
+// - `write`/`edit` only to `<nodeDir>/workspace/reviews/a.md` or `b.md` (an
+//   explanation reviewer also writes `report.md`); the merge (`merged.md`), the
+//   card and `handoff.md` are not a reviewer's files. A session outside a
+//   puzzle or explanation node folder is refused every tool call, so a dispatch
+//   that lands in the run root or a pattern node fails closed instead of
+//   silently losing the isolation.
 // - `read` and `bash` may not see a review: any path with a `reviews` segment is
 //   refused, including the reviewer's own draft (its only exit is
 //   `check-citations.ts` in bash), and so is any command naming that segment.
@@ -27,7 +28,16 @@
 // seen; the guard closes the direct, accidental spellings a model reaches for.
 import * as path from "node:path";
 
-import { datasetRefusal, holdoutRefusal, isPuzzleNode, ownersRefusal, reviewsRefusal, reviewerMayWrite, siblingRefusal } from "./guard.ts";
+import {
+  datasetRefusal,
+  holdoutRefusal,
+  isExplanationNode,
+  isPuzzleNode,
+  ownersRefusal,
+  reviewsRefusal,
+  reviewerMayWrite,
+  siblingRefusal,
+} from "./guard.ts";
 import { datasetRootOf, findNodeDir } from "./worker-extension.ts";
 
 interface ToolCallEventLike {
@@ -60,22 +70,22 @@ function refusal(nodeDir: string, event: ToolCallEventLike): string | undefined 
     return "reviewer-extension: write/edit without a path is not allowed";
   }
   if (!reviewerMayWrite(nodeDir, path.resolve(filePath))) {
-    return `Reviewers may only write workspace/reviews/a.md or b.md inside ${nodeDir}, not ${filePath}`;
+    return `Reviewers may only write workspace/reviews/a.md or b.md (report.md in an explanation) inside ${nodeDir}, not ${filePath}`;
   }
   return undefined;
 }
 
 export default function reviewerExtension(pi: PiLike): void {
   pi.on("tool_call", (event) => {
-    // A reviewer must sit in a puzzle node: anywhere else (the run root, a
-    // pattern node, outside a run) there is no review file to trust it with and
-    // no puzzle whose siblings the guard could recognise, so every call fails
-    // closed rather than falling open.
+    // A reviewer must sit in a puzzle or explanation node: anywhere else (the run
+    // root, a pattern node, outside a run) there is no review file to trust it
+    // with and no puzzle whose siblings the guard could recognise, so every call
+    // fails closed rather than falling open.
     const nodeDir = findNodeDir(process.cwd());
-    if (nodeDir === undefined || !isPuzzleNode(nodeDir)) {
+    if (nodeDir === undefined || !(isPuzzleNode(nodeDir) || isExplanationNode(nodeDir))) {
       return {
         block: true,
-        reason: `Refusing ${event.toolName}: a reviewer must run inside a puzzle node folder (cwd ${process.cwd()})`,
+        reason: `Refusing ${event.toolName}: a reviewer must run inside a puzzle node folder or an explanation node folder (cwd ${process.cwd()})`,
       };
     }
     const reason = refusal(nodeDir, event);

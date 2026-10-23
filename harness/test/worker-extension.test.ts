@@ -6,7 +6,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 
 import workerExtension from "../worker-extension.ts";
-import { createChild, findNode, initRun } from "../tree.ts";
+import { createChild, findNode, initRun, updateNode } from "../tree.ts";
 
 interface CapturedTool {
   name: string;
@@ -149,6 +149,48 @@ test("preregister refuses when measurement files already exist", async (t) => {
     );
     assert.equal(git(run, "rev-list", "--count", "HEAD"), commits, `${relPath}: no commit was made`);
   }
+});
+
+/** A run with an explanation E01 under puzzle P01 in phase 3; returns the explanation's folder. */
+function explanationNode(t: TestContext): string {
+  const run = mkdtempSync(path.join(tmpdir(), "ctc-explanation-"));
+  t.after(() => rmSync(run, { recursive: true, force: true }));
+  initRun(run, "data", "interest");
+  createChild(run, "D01", "Self Presentation", "owner-p1");
+  createChild(run, "T01", "status quo: crowd", "owner-p2");
+  createChild(run, "P01", "Explanation of crowd", "owner-p3", [], "explanation");
+  updateNode(run, "E01", { phase: 3, status: "active" }, "owner-p3");
+  return findNode(run, "E01").dir;
+}
+
+test("an explanation worker writes from its task folder only, and is blocked outside one", (t) => {
+  const explanation = explanationNode(t);
+  mkdirSync(path.join(explanation, "tasks", "A"), { recursive: true });
+
+  const handlers = new Map<string, (event: { toolName: string; input?: { path?: unknown } }) => { block?: boolean; reason?: string } | undefined>();
+  workerExtension({
+    registerTool() {},
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+  });
+  const guard = handlers.get("tool_call");
+  assert.ok(guard, "the worker registers a tool_call handler");
+  const write = (filePath: string) => guard({ toolName: "write", input: { path: filePath } });
+
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+  process.chdir(path.join(explanation, "tasks", "A"));
+  assert.equal(write(path.join(explanation, "workspace", "scripts", "A_01.R")), undefined, "a script of its own task");
+  assert.equal(write(path.join(explanation, "tasks", "A", "handoff.md")), undefined, "its task's handoff");
+  assert.equal(write(path.join(explanation, "tasks", "B", "handoff.md"))?.block, true, "another task's folder");
+  assert.equal(write(path.join(explanation, "handoff.md"))?.block, true, "the node's handoff");
+  assert.equal(write("../../workspace/argument.md")?.block, true, "the argument, reached through ..");
+
+  process.chdir(explanation);
+  const blocked = write(path.join(explanation, "workspace", "scripts", "A_01.R"));
+  assert.equal(blocked?.block, true, "the node folder itself is no task, so every write is blocked");
+  assert.match(blocked?.reason ?? "", /not inside a task folder/);
 });
 
 test("empty measurement directories do not block preregister", async (t) => {

@@ -5,18 +5,33 @@
 // extension finds the nearest ancestor of cwd holding a `node.json` and blocks
 // anything outside `<nodeDir>/workspace/**`, `<nodeDir>/rounds.md` and
 // `<nodeDir>/handoff.md`. A worker that is not inside a node at all fails
-// closed: it has no folder to be trusted with. Workers of Phase 1 to 4 nodes
+// closed: it has no folder to be trusted with. An explanation worker runs in
+// its `tasks/<L>/` (or `tasks/lit-<nn>/`) folder and may write only that task's
+// files, its scripts or its report; a session with no task folder writes
+// nothing. Workers of Phase 1 to 4 nodes
 // also cannot `read` a hold-out path or run a `bash` command that names it. A
 // Phase 3 worker also cannot `read` the dataset root (Phase 1 measures it by
 // design; Phase 3 analyses only the exploration split) or run `docker`/`podman`.
 // A Phase 2 puzzle worker can neither read a sibling puzzle's folder nor run a
 // command naming one (its `derivedFrom` parents stay readable, so an evolution
-// worker can read the cards and merged reviews it derives from).
+// worker can read the cards and merged reviews it derives from). An explanation
+// worker is held to the same rule about its ancestor puzzle, which it may name
+// but not read outside its node.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
 
-import { datasetRefusal, dockerRefusal, holdoutLocked, holdoutRefusal, siblingRefusal, workerMayWrite } from "./guard.ts";
+import {
+  datasetRefusal,
+  dockerRefusal,
+  explanationWorkerMayWrite,
+  holdoutLocked,
+  holdoutRefusal,
+  isExplanationNode,
+  siblingRefusal,
+  taskOf,
+  workerMayWrite,
+} from "./guard.ts";
 import { commitFile, findRunDir, measurementFiles, nodeIdOf, preregisterCommits, readRun } from "./tree.ts";
 
 interface ToolCallEventLike {
@@ -138,7 +153,7 @@ export default function workerExtension(pi: PiLike): void {
       const phase = nodePhase(nodeDir);
       const reason =
         (holdoutLocked(phase) ? holdoutRefusal(event.toolName, event.input) : undefined) ??
-        (phase === 2 ? siblingRefusal(nodeDir, event.toolName, event.input) : undefined) ??
+        (phase === 2 || isExplanationNode(nodeDir) ? siblingRefusal(nodeDir, event.toolName, event.input) : undefined) ??
         (phase === 3 ? phase3Refusal(nodeDir, event) : undefined);
       return reason === undefined ? undefined : { block: true, reason };
     }
@@ -154,6 +169,22 @@ export default function workerExtension(pi: PiLike): void {
         block: true,
         reason: `Refusing to write ${filePath}: this session is not inside a node folder (no node.json above ${process.cwd()})`,
       };
+    }
+    if (isExplanationNode(nodeDir)) {
+      const task = taskOf(nodeDir, process.cwd());
+      if (task === undefined) {
+        return {
+          block: true,
+          reason: `Refusing to write ${filePath}: this explanation worker is not inside a task folder (tasks/<L>/ or tasks/lit-<nn>/ under ${nodeDir})`,
+        };
+      }
+      if (!explanationWorkerMayWrite(nodeDir, task, path.resolve(filePath))) {
+        return {
+          block: true,
+          reason: `Task ${task} may only write its own tasks/${task}/ folder, scripts and report inside ${nodeDir}, not ${filePath}`,
+        };
+      }
+      return undefined;
     }
     if (!workerMayWrite(nodeDir, path.resolve(filePath))) {
       return {

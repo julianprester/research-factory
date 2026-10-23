@@ -9,11 +9,17 @@
 // `patterns/T01-a/puzzles/P01-b/brief.md`, ...), and a puzzle node's
 // `brief-review.md`.
 //
-// The owner guard also refuses the phase's `tournament/` folder: `rounds.json`,
-// `round-<n>.json` and `distinct.json` are what `tree_create` and `promote`
-// trust, and the tournament tools write them with `fs` directly rather than
-// through this guard. The ledger, strategy, meta-reviews and rulings in the rest
-// of `owners/phase-<n>/` stay writable.
+// The owner guard also refuses the phase's `tournament/` and `loop/` folders:
+// `rounds.json`, `round-<n>.json` and `distinct.json` are what `tree_create` and
+// `promote` trust, and the tournament and loop tools write them with `fs`
+// directly rather than through this guard. The ledger, strategy, meta-reviews
+// and rulings in the rest of `owners/phase-<n>/` stay writable.
+//
+// An explanation node (`explanations/E<nn>-<slug>`) is a Phase 3 node with its
+// own file set: its worker writes only its task folder (`tasks/<L>/` or
+// `tasks/lit-<nn>/`), its scripts or reports, and the owner writes its argument,
+// revision, data requests and task briefs (`explanationWorkerMayWrite`,
+// `ownerMayWrite`).
 //
 // The sibling guards are heuristics, not a sandbox: they refuse the direct
 // spellings of a forbidden read so a model cannot wander by accident, but a
@@ -38,6 +44,35 @@ const NODE_DIRS = new Set(Object.values(CHILD_DIR));
 /** The folder puzzle nodes live in (`patterns/T01-a/puzzles/P01-b`). */
 const PUZZLES_DIR = CHILD_DIR.puzzle;
 
+/** The folder explanation nodes live in (`puzzles/P01-b/explanations/E01-c`). */
+const EXPLANATIONS_DIR = CHILD_DIR.explanation;
+
+/** An explanation folder name: `E<nn>-<slug>`. */
+const EXPLANATION_FOLDER = /^E\d+-/;
+
+/** A task folder name under an explanation: a letter (`A`) or a literature task (`lit-02`). */
+const TASK_NAME = /^(?:[A-Z]|lit-\d\d)$/;
+
+/** A letter task's script `<L>_<nn>.R` or `.py`: its letter, then two digits. */
+const TASK_SCRIPT = /^([A-Z])_\d\d\.(?:R|py)$/;
+
+/** The shared scripts every letter task may write. */
+const SHARED_SCRIPTS = new Set(["assets.R", "assets.py"]);
+
+/** A literature task `lit-<nn>` writes the report `workspace/reports/<nn>.md`. */
+const LIT_TASK = /^lit-(\d\d)$/;
+
+/** The `owners/phase-<n>/` subfolders the owner's write tool may not touch: the records the tools trust. */
+const PROTECTED_OWNER_DIRS = new Set(["tournament", "loop"]);
+
+/** The files an owner writes inside an explanation node, by their path under the node. */
+const EXPLANATION_OWNER_FILES = new Set([
+  "workspace/argument.md",
+  "workspace/reviews/revision.md",
+  "workspace/data-requests.md",
+  "brief-review.md",
+]);
+
 /**
  * The path of `absPath` relative to `root`, or undefined when the resolved
  * target is `root` itself, is outside it, or escapes through `..`.
@@ -59,33 +94,83 @@ export function workerMayWrite(nodeDir: string, absPath: string): boolean {
 
 /**
  * True only for a reviewer's own two files: `<nodeDir>/workspace/reviews/a.md`
- * and `b.md`. The merge, the card and `handoff.md` are not a reviewer's.
+ * and `b.md`. An explanation reviewer also writes `workspace/reviews/report.md`.
+ * The merge, the card and `handoff.md` are not a reviewer's.
  */
 export function reviewerMayWrite(nodeDir: string, absPath: string): boolean {
   const relative = relativeInside(nodeDir, absPath);
   if (relative === undefined) return false;
   const parts = relative.split(path.sep);
-  return (
-    parts.length === 3 &&
-    parts[0] === "workspace" &&
-    parts[1] === "reviews" &&
-    (parts[2] === "a.md" || parts[2] === "b.md")
-  );
+  if (parts.length !== 3 || parts[0] !== "workspace" || parts[1] !== "reviews") return false;
+  const name = parts[2];
+  return name === "a.md" || name === "b.md" || (name === "report.md" && isExplanationNode(nodeDir));
 }
 
 /**
- * True for `owners/phase-<phase>/**` except its `tournament/` folder, and for
- * any node's `brief.md` (plus a puzzle node's `brief-review.md`). The
- * tournament records are the tools' evidence - `tree_create`'s STOP gate and
- * `promote`'s ranking/distinctness gates read them - so the owner's write tool
- * must not be able to forge them.
+ * The task a worker session is in: the `tasks/<name>` segment of `cwd` under
+ * `nodeDir`, when `<name>` is a letter or `lit-<nn>`. The node folder itself, or
+ * a `tasks/` folder with no task under it, has none.
+ */
+export function taskOf(nodeDir: string, cwd: string): string | undefined {
+  const relative = relativeInside(nodeDir, cwd);
+  if (relative === undefined) return undefined;
+  const parts = relative.split(path.sep);
+  const name = parts[1] ?? "";
+  return parts[0] === "tasks" && TASK_NAME.test(name) ? name : undefined;
+}
+
+/**
+ * True only for what an explanation worker of `task` may write: its task folder
+ * (`tasks/<task>/**`), and for a letter task its own scripts
+ * (`workspace/scripts/<task>_<nn>.R|.py`) and the shared `assets.R|.py`; for a
+ * literature task `lit-<nn>` its report `workspace/reports/<nn>.md`. The argument,
+ * `archive/`, `output/`, another round's report and another task are not theirs.
+ */
+export function explanationWorkerMayWrite(nodeDir: string, task: string, absPath: string): boolean {
+  if (!TASK_NAME.test(task)) return false;
+  const relative = relativeInside(nodeDir, absPath);
+  if (relative === undefined) return false;
+  const parts = relative.split(path.sep);
+  if (parts[0] === "tasks" && parts[1] === task) return parts.length > 2;
+  const lit = LIT_TASK.exec(task);
+  if (lit) return parts.length === 3 && parts[0] === "workspace" && parts[1] === "reports" && parts[2] === `${lit[1]}.md`;
+  if (parts.length !== 3 || parts[0] !== "workspace" || parts[1] !== "scripts") return false;
+  const name = parts[2] ?? "";
+  return SHARED_SCRIPTS.has(name) || TASK_SCRIPT.exec(name)?.[1] === task;
+}
+
+/**
+ * The part of a run-relative path after the explanation node it is inside (its
+ * first `explanations/E<nn>-` pair), or undefined when it is not inside one.
+ */
+function insideExplanation(parts: string[]): string[] | undefined {
+  for (let i = 0; i + 1 < parts.length; i += 1) {
+    if (parts[i] === EXPLANATIONS_DIR && EXPLANATION_FOLDER.test(parts[i + 1] ?? "")) return parts.slice(i + 2);
+  }
+  return undefined;
+}
+
+/**
+ * True for `owners/phase-<phase>/**` except its `tournament/` and `loop/`
+ * folders, for any node's `brief.md` (plus a puzzle node's `brief-review.md`),
+ * and for an explanation node's argument, revision, data requests, reviewer
+ * brief and its `tasks/<name>/brief.md`. The tournament and loop records are the
+ * tools' evidence - `tree_create`'s STOP gate and `promote`'s ranking/distinctness
+ * gates read them - so the owner's write tool must not be able to forge them.
  */
 export function ownerMayWrite(runDir: string, phase: number, absPath: string): boolean {
   const relative = relativeInside(runDir, absPath);
   if (relative === undefined) return false;
   const parts = relative.split(path.sep);
   if (parts[0] === "owners" && parts.length > 2 && parts[1] === `phase-${phase}`) {
-    return parts[2] !== "tournament";
+    return !PROTECTED_OWNER_DIRS.has(parts[2] ?? "");
+  }
+  const inside = insideExplanation(parts);
+  if (inside !== undefined) {
+    if (EXPLANATION_OWNER_FILES.has(inside.join("/"))) return true;
+    if (inside.length === 3 && inside[0] === "tasks" && TASK_NAME.test(inside[1] ?? "") && inside[2] === "brief.md") {
+      return true;
+    }
   }
   if (parts.length < 3) return false;
   const group = parts[parts.length - 3] ?? "";
@@ -146,6 +231,12 @@ export function isPuzzleNode(nodeDir: string): boolean {
   return path.basename(path.dirname(dir)) === PUZZLES_DIR && puzzleIdOf(path.basename(dir)) !== undefined;
 }
 
+/** An explanation node: its own folder is `E<nn>-<slug>` and its parent folder is `explanations`. */
+export function isExplanationNode(nodeDir: string): boolean {
+  const dir = path.resolve(nodeDir);
+  return path.basename(path.dirname(dir)) === EXPLANATIONS_DIR && EXPLANATION_FOLDER.test(path.basename(dir));
+}
+
 /**
  * The real path when the target exists, so a symlink cannot step around the
  * segment walk; otherwise the resolved path (a file not created yet has no real
@@ -195,7 +286,8 @@ function puzzleFoldersInPath(absPath: string): PuzzleFolder[] {
 }
 
 /**
- * Why a puzzle node may not run this tool call, or undefined when it may.
+ * Why a puzzle or explanation node may not run this tool call, or undefined when
+ * it may.
  *
  * Sibling puzzles are never visible (§5.3 of the Phase 2 design): a `read` of a
  * path under another puzzle's folder and a `bash` command that names one are
@@ -203,7 +295,10 @@ function puzzleFoldersInPath(absPath: string): PuzzleFolder[] {
  * `allowDerived` is false — so are the puzzles its `node.json` names in
  * `derivedFrom`, because an evolution worker reads its parents' cards and
  * merged reviews. Reviewers pass `{ allowDerived: false }`: an evolved puzzle's
- * parent is another puzzle to them. A node that is not a puzzle is unaffected.
+ * parent is another puzzle to them. An explanation node's own puzzle is its
+ * ancestor puzzle, which it may name in bash but may not read outside its node
+ * folder (its `workspace/puzzle.md` and `must-check.md` are snapshots); an
+ * explanation has no `derivedFrom` puzzles. A node that is neither is unaffected.
  *
  * Both checks are heuristics on a string: the read path is made real when it
  * exists (so a symlink cannot step around the walk) and otherwise resolved,
@@ -217,11 +312,14 @@ export function siblingRefusal(
   input: { path?: unknown; command?: unknown } | undefined,
   options: { allowDerived?: boolean } = {},
 ): string | undefined {
-  if (!isPuzzleNode(nodeDir)) return undefined;
+  const dir = path.resolve(nodeDir);
+  const isPuzzle = isPuzzleNode(dir);
+  if (!isPuzzle && !isExplanationNode(dir)) return undefined;
   const allowDerived = options.allowDerived ?? true;
   const ownDir = realPathOrSelf(nodeDir);
-  const ownId = puzzleIdOf(path.basename(ownDir));
-  const derived = allowDerived ? derivedPuzzleIds(ownDir) : new Set<string>();
+  const ownPuzzleDir = isPuzzle ? ownDir : path.dirname(path.dirname(ownDir));
+  const ownId = puzzleIdOf(path.basename(ownPuzzleDir));
+  const derived = allowDerived && isPuzzle ? derivedPuzzleIds(ownDir) : new Set<string>();
 
   if (toolName === "read" && typeof input?.path === "string") {
     const absPath = realPathOrSelf(input.path);
