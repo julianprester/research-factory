@@ -16,6 +16,8 @@ _numbers = {}
 _variables = {}
 _SECTION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 _VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# A variable's source: the registry file and key it came from, as output/numbers/<section>.csv#<key>.
+_SOURCE = re.compile(r"output/numbers/[^/#\n]+\.csv#.+")
 
 
 def _out():
@@ -75,6 +77,8 @@ def put_var(variable, value, source, rendered=None):
     """Set a manuscript variable: its value, the text it renders as, and its source file#key."""
     if not _VARIABLE.fullmatch(variable):
         raise ValueError(f'"{variable}" is not a variable name (letters, digits and _)')
+    if not isinstance(source, str) or not _SOURCE.fullmatch(source):
+        raise ValueError(f'"{source}" is not a source: expected output/numbers/<section>.csv#<key>')
     if variable in _variables:
         raise ValueError(f'variable "{variable}" is already set')
     _check_number(value)

@@ -1,0 +1,11 @@
+# The Python packages in ctc-analysis:1, pinned to the versions the image was built
+# and tested with. Pip installs these into /opt/venv (see the Dockerfile).
+pandas==3.1.0
+numpy==2.5.4
+scipy==1.18.1
+statsmodels==0.15.0
+scikit-learn==1.9.1
+networkx==3.7
+gensim==4.4.0
+matplotlib==3.11.2
+pyarrow==26.0.0

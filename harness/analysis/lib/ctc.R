@@ -95,6 +95,10 @@ put_var <- function(variable, value, source, rendered = NULL) {
   if (!grepl("^[A-Za-z_][A-Za-z0-9_]*$", variable)) {
     stop(sprintf('"%s" is not a variable name (letters, digits and _)', variable))
   }
+  # The source is the registry file and key it came from: output/numbers/<section>.csv#<key>.
+  if (!is.character(source) || length(source) != 1 || !grepl("^output/numbers/[^/#\\n]+\\.csv#.+\\z", source, perl = TRUE)) {
+    stop(sprintf('"%s" is not a source: expected output/numbers/<section>.csv#<key>', paste(source, collapse = " ")))
+  }
   if (variable %in% names(.ctc$variables)) stop(sprintf('variable "%s" is already set', variable))
   ctc_check_number(value)
   shown <- if (is.null(rendered)) ctc_format(value) else as.character(rendered)
