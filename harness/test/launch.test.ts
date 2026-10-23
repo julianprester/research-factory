@@ -433,21 +433,61 @@ test("readConfig accepts canonical non-negative integer phase keys", (t) => {
     "12": "harness/skills/demo-phase12",
   };
   writeFileSync(path.join(dir, "config.json"), JSON.stringify({ model: "m1", phases }));
-  assert.deepEqual(readConfig(dir), { model: "m1", judgeModel: "m1", phases });
+  assert.deepEqual(readConfig(dir), { model: "m1", judgeModel: "m1", ...ANALYSIS_DEFAULTS, phases });
 });
 
 test("readConfig reads the model and the phases", (t) => {
   const dir = configDir(t);
   const cfg = { model: "m1", phases: { "1": "harness/skills/demo-phase1" } };
   writeFileSync(path.join(dir, "config.json"), JSON.stringify(cfg));
-  assert.deepEqual(readConfig(dir), { ...cfg, judgeModel: "m1" });
+  assert.deepEqual(readConfig(dir), { ...cfg, judgeModel: "m1", ...ANALYSIS_DEFAULTS });
 });
 
 test("readConfig reads judgeModel when the run names a different judge model", (t) => {
   const dir = configDir(t);
   const cfg = { model: "worker/model", judgeModel: "judge/model", phases: { "2": "harness/skills/phase-2" } };
   writeFileSync(path.join(dir, "config.json"), JSON.stringify(cfg));
-  assert.deepEqual(readConfig(dir), cfg);
+  assert.deepEqual(readConfig(dir), { ...cfg, ...ANALYSIS_DEFAULTS });
+});
+
+test("readConfig returns the analysis keys with their defaults", (t) => {
+  const dir = configDir(t);
+  writeFileSync(path.join(dir, "config.json"), JSON.stringify({ model: "m1", phases: {} }));
+  const cfg = readConfig(dir);
+  assert.equal(cfg.analysisImage, "ctc-analysis:1");
+  assert.equal(cfg.analysisTimeoutMs, 1_800_000);
+  assert.equal(cfg.roundCap, 6);
+});
+
+test("readConfig reads the analysis keys when the run sets them", (t) => {
+  const dir = configDir(t);
+  const cfg = { model: "m1", analysisImage: "ctc-analysis:2", analysisTimeoutMs: 60_000, roundCap: 3, phases: {} };
+  writeFileSync(path.join(dir, "config.json"), JSON.stringify(cfg));
+  assert.deepEqual(readConfig(dir), { ...cfg, judgeModel: "m1" });
+});
+
+test("readConfig rejects a non-string analysisImage, naming the key", (t) => {
+  const dir = configDir(t);
+  writeFileSync(path.join(dir, "config.json"), JSON.stringify({ model: "m1", analysisImage: 7, phases: {} }));
+  assert.throws(() => readConfig(dir), /config\.json: "analysisImage" must be a string/);
+});
+
+test("readConfig rejects a roundCap or analysisTimeoutMs that is not a positive integer", (t) => {
+  for (const [key, value] of [
+    ["roundCap", 0],
+    ["roundCap", 2.5],
+    ["roundCap", "6"],
+    ["analysisTimeoutMs", -1],
+    ["analysisTimeoutMs", 1.5],
+  ] as const) {
+    const dir = configDir(t);
+    writeFileSync(path.join(dir, "config.json"), JSON.stringify({ model: "m1", [key]: value, phases: {} }));
+    assert.throws(
+      () => readConfig(dir),
+      new RegExp(`config\\.json: "${key}" must be a positive integer`),
+      `${key}=${String(value)} is rejected and named`,
+    );
+  }
 });
 
 test("readConfig defaults judgeModel to model", (t) => {
@@ -481,6 +521,8 @@ test("readConfig throws a clear error for invalid JSON", (t) => {
   writeFileSync(path.join(dir, "config.json"), "{not json");
   assert.throws(() => readConfig(dir), /config\.json/);
 });
+
+const ANALYSIS_DEFAULTS = { analysisImage: "ctc-analysis:1", analysisTimeoutMs: 1_800_000, roundCap: 6 };
 
 function configDir(t: TestContext): string {
   const dir = mkdtempSync(path.join(tmpdir(), "ctc-launch-config-"));

@@ -23,12 +23,21 @@ export interface RunConfig {
   model: string;
   /** The judge model; defaults to `model` (see `readConfig`). */
   judgeModel?: string;
+  /** The image `run_analysis` runs scripts in; defaults to `ctc-analysis:1` (see `readConfig`). */
+  analysisImage?: string;
+  /** The wall-clock limit for one analysis script, in ms; defaults to 1800000 (see `readConfig`). */
+  analysisTimeoutMs?: number;
+  /** The most review rounds an explanation may take; defaults to 6 (see `readConfig`). */
+  roundCap?: number;
   phases: Record<string, string>;
 }
 
 const OWNER_STATES: readonly OwnerState[] = ["idle", "working", "blocked", "done", "unknown"];
 /** Canonical phase keys: non-negative integers without leading zeros. */
 const PHASE_KEY = /^(0|[1-9]\d*)$/;
+const ANALYSIS_IMAGE = "ctc-analysis:1";
+const ANALYSIS_TIMEOUT_MS = 1_800_000;
+const ROUND_CAP = 6;
 const HERDR_TIMEOUT_MS = 30_000;
 const SESSION_POLL_MS = 200;
 const SESSION_POLL_LIMIT = 100; // 20 s, as run.sh's 100 x 0.2 s
@@ -362,8 +371,10 @@ export function startSupervisor(runDir: string, herdr: Herdr): "started" | "alre
 
 /**
  * The run's config.json: `{model, phases}` with a model and a relative skill
- * path per phase. A missing or invalid file throws a clear error, so a caller
- * can log it and skip a tick rather than start an owner with no skill.
+ * path per phase, plus the optional judgeModel, analysisImage, analysisTimeoutMs
+ * and roundCap, which are filled in with their defaults here. A missing or
+ * invalid file throws a clear error, so a caller can log it and skip a tick
+ * rather than start an owner with no skill.
  */
 export function readConfig(runDir: string): RunConfig {
   const file = path.join(path.resolve(runDir), "config.json");
@@ -385,13 +396,29 @@ export function readConfig(runDir: string): RunConfig {
     throw new Error(`${file}: expected a JSON object`);
   }
 
-  const { model, phases, judgeModel } = parsed as { model?: unknown; phases?: unknown; judgeModel?: unknown };
+  const { model, phases, judgeModel, analysisImage, analysisTimeoutMs, roundCap } = parsed as {
+    model?: unknown;
+    phases?: unknown;
+    judgeModel?: unknown;
+    analysisImage?: unknown;
+    analysisTimeoutMs?: unknown;
+    roundCap?: unknown;
+  };
   if (typeof model !== "string" || model === "") throw new Error(`${file}: missing "model" (a string)`);
   // The design puts the judge behind its own key (design §8) so swapping model
   // families is a config change only. An absent key means "same as the workers"
   // and is filled in here, so every caller reads one field instead of two.
   if (judgeModel !== undefined && (typeof judgeModel !== "string" || judgeModel === "")) {
     throw new Error(`${file}: "judgeModel" must be a string when present`);
+  }
+  if (analysisImage !== undefined && (typeof analysisImage !== "string" || analysisImage === "")) {
+    throw new Error(`${file}: "analysisImage" must be a string when present`);
+  }
+  if (analysisTimeoutMs !== undefined && !isPositiveInteger(analysisTimeoutMs)) {
+    throw new Error(`${file}: "analysisTimeoutMs" must be a positive integer when present`);
+  }
+  if (roundCap !== undefined && !isPositiveInteger(roundCap)) {
+    throw new Error(`${file}: "roundCap" must be a positive integer when present`);
   }
   if (phases === null || typeof phases !== "object" || Array.isArray(phases)) {
     throw new Error(`${file}: missing "phases" (an object of phase number to skill path)`);
@@ -405,5 +432,16 @@ export function readConfig(runDir: string): RunConfig {
     if (typeof skill !== "string" || skill === "") throw new Error(`${file}: phase ${phase} needs a skill path (a string)`);
     skills[phase] = skill;
   }
-  return { model, judgeModel: judgeModel ?? model, phases: skills };
+  return {
+    model,
+    judgeModel: judgeModel ?? model,
+    analysisImage: analysisImage ?? ANALYSIS_IMAGE,
+    analysisTimeoutMs: analysisTimeoutMs ?? ANALYSIS_TIMEOUT_MS,
+    roundCap: roundCap ?? ROUND_CAP,
+    phases: skills,
+  };
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
