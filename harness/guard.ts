@@ -97,8 +97,8 @@ export function ownerMayWrite(runDir: string, phase: number, absPath: string): b
 /** The hold-out in any spelling: `holdout`, `hold-out`, `hold_out`, `hold out`, any case. */
 export const HOLDOUT_WORD = /hold[-_ ]?out/i;
 
-/** Phases whose workers never see the hold-out; later phases unlock it per node. */
-const HOLDOUT_LOCKED_PHASES = new Set([1, 2]);
+/** Phases whose workers never see the hold-out; Phase 5 is the one unlock, for the whole run. */
+const HOLDOUT_LOCKED_PHASES = new Set([1, 2, 3, 4]);
 
 /** True when workers of a node in `phase` must stay away from the hold-out. */
 export function holdoutLocked(phase: number): boolean {
@@ -494,10 +494,69 @@ export function ownersRefusal(
  */
 export function holdoutRefusal(toolName: string, input: { path?: unknown; command?: unknown } | undefined): string | undefined {
   if (toolName === "read" && typeof input?.path === "string" && HOLDOUT_WORD.test(input.path)) {
-    return `Reading ${input.path} is not allowed: Phase 1 and 2 workers never read the hold-out`;
+    return `Reading ${input.path} is not allowed: workers in Phases 1 to 4 never read the hold-out`;
   }
   if (toolName === "bash" && typeof input?.command === "string" && HOLDOUT_WORD.test(input.command)) {
-    return "This command names the hold-out, which Phase 1 and 2 workers never read";
+    return "This command names the hold-out, which workers in Phases 1 to 4 never read";
+  }
+  return undefined;
+}
+
+/**
+ * Why a node may not read the dataset root on this tool call, or undefined when
+ * it may. The dataset holds the hold-out, so a `read` at or under `datasetRoot`
+ * and a `bash` command naming it are refused. Both sides are compared as real
+ * paths, so a symlink into the dataset cannot step around the check. A `bash`
+ * command that names the root only through a relative `cd` or a variable is not
+ * seen: a guard against accidental reads, not a sandbox.
+ */
+export function datasetRefusal(
+  datasetRoot: string,
+  toolName: string,
+  input: { path?: unknown; command?: unknown } | undefined,
+): string | undefined {
+  const root = realPathOrSelf(datasetRoot);
+  if (toolName === "read" && typeof input?.path === "string") {
+    const relative = path.relative(root, realPathOrSelf(input.path));
+    const outside = relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+    if (!outside) return `Reading ${input.path} is not allowed: this node may not read the dataset root`;
+  }
+  const command = input?.command;
+  if (toolName === "bash" && typeof command === "string") {
+    for (const spelling of new Set([path.resolve(datasetRoot), root])) {
+      if (command.includes(spelling)) return `This command names the dataset root (${spelling}), which this node may not read`;
+    }
+  }
+  return undefined;
+}
+
+/** The container runtimes a node may not call directly: analyses run only through `run_analysis`. */
+const CONTAINER_RUNTIMES = new Set(["docker", "podman"]);
+
+/**
+ * The program a simple command runs: its first word that is not a `NAME=value`
+ * assignment, with any directory stripped (`/usr/bin/docker` is `docker`).
+ */
+function programOf(words: string[]): string | undefined {
+  const program = words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+  return program === undefined ? undefined : path.basename(program);
+}
+
+/**
+ * Why a node may not run this bash command, or undefined when it may: the
+ * command runs `docker` or `podman` as the program of any simple command
+ * (`cd x && docker ps` and `ls | podman ps` included). `echo docker` and a
+ * `deepis` query that names one are not. A wrapper such as `sudo` or `env` is
+ * not unwrapped; the mounts, not this check, are the control.
+ */
+export function dockerRefusal(toolName: string, input: { path?: unknown; command?: unknown } | undefined): string | undefined {
+  const command = input?.command;
+  if (toolName !== "bash" || typeof command !== "string") return undefined;
+  for (const simple of splitSimpleCommands(command)) {
+    const program = programOf(shellWords(simple));
+    if (program !== undefined && CONTAINER_RUNTIMES.has(program)) {
+      return `This command runs ${program}: analyses run only through run_analysis`;
+    }
   }
   return undefined;
 }

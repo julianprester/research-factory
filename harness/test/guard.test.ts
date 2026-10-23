@@ -5,7 +5,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { ownerMayWrite, ownersRefusal, reviewsRefusal, siblingRefusal, workerMayWrite } from "../guard.ts";
+import {
+  datasetRefusal,
+  dockerRefusal,
+  holdoutLocked,
+  ownerMayWrite,
+  ownersRefusal,
+  reviewsRefusal,
+  siblingRefusal,
+  workerMayWrite,
+} from "../guard.ts";
 import ownerExtension from "../owner-extension.ts";
 import reviewerExtension from "../reviewer-extension.ts";
 import workerExtension from "../worker-extension.ts";
@@ -76,6 +85,7 @@ function withOwnerEnv(t: TestContext, runDir: string, phase: number, fn: () => v
 
 interface PuzzleRun {
   run: string;
+  dataset: string;
   patternDir: string;
   otherPatternDir: string;
   phase1PatternDir: string;
@@ -92,7 +102,8 @@ interface PuzzleRun {
  */
 function puzzleRun(t: TestContext): PuzzleRun {
   const run = makeTempDir(t);
-  initRun(run, "data", "interest");
+  const dataset = makeTempDir(t);
+  initRun(run, dataset, "interest");
   createChild(run, "D01", "Self Presentation", "owner-p1");
   createChild(run, "D01", "Second Pattern", "owner-p1");
   createChild(run, "D01", "Third Pattern", "owner-p1");
@@ -104,6 +115,7 @@ function puzzleRun(t: TestContext): PuzzleRun {
   createChild(run, "T01", "grounding: crowd", "owner-p2", ["P01"]);
   return {
     run,
+    dataset,
     patternDir: findNode(run, "T01").dir,
     otherPatternDir: findNode(run, "T02").dir,
     phase1PatternDir: findNode(run, "T03").dir,
@@ -572,6 +584,92 @@ test("a Phase 1 worker cannot read the hold-out or run a command that names it; 
   assert.equal(call("bash", { command: "node holdout.ts data workspace/split" }), undefined, "and may run the split tool");
 });
 
+test("the hold-out stays locked through Phase 4 and opens in Phase 5", () => {
+  for (const phase of [1, 2, 3, 4]) assert.equal(holdoutLocked(phase), true, `phase ${phase} is locked`);
+  assert.equal(holdoutLocked(5), false, "Phase 5 is the one unlock");
+  assert.equal(holdoutLocked(0), false, "the Phase 0 profile worker is exempt");
+});
+
+test("datasetRefusal refuses the dataset root, at any depth, but not a sibling folder or the exploration split", (t) => {
+  const dataset = makeTempDir(t);
+  const run = makeTempDir(t);
+  mkdirSync(path.join(dataset, "handbook"));
+  writeFileSync(path.join(dataset, "handbook", "x.md"), "hold-out text\n");
+  const link = path.join(makeTempDir(t), "data-link");
+  symlinkSync(dataset, link);
+  const refuse = (toolName: string, input: { path?: unknown; command?: unknown }) =>
+    datasetRefusal(dataset, toolName, input);
+
+  assert.match(refuse("read", { path: path.join(dataset, "handbook", "x.md") }) ?? "", /dataset/, "a read under the dataset");
+  assert.ok(refuse("read", { path: dataset }), "the dataset folder itself");
+  assert.ok(refuse("read", { path: path.join(link, "handbook", "x.md") }), "a read through a symlink to the dataset");
+  assert.equal(refuse("read", { path: `${dataset}-other/x.md` }), undefined, "a sibling folder with the same prefix");
+  assert.equal(
+    refuse("read", { path: path.join(run, "analysis-data", "exploration", "handbook", "x.md") }),
+    undefined,
+    "the exploration split is readable",
+  );
+  assert.ok(refuse("bash", { command: `cat ${dataset}/handbook/x.md` }), "bash naming the dataset root");
+  assert.equal(refuse("bash", { command: "wc -l workspace/x.csv" }), undefined, "an ordinary command");
+  assert.equal(refuse("write", { path: path.join(dataset, "x.md") }), undefined, "only read and bash are checked");
+  assert.equal(refuse("read", undefined), undefined, "no input");
+});
+
+test("dockerRefusal refuses a container runtime as the first word of any simple command", () => {
+  const refuse = (command: string) => dockerRefusal("bash", { command });
+  for (const command of ["docker run --rm img", "cd x && docker ps", "podman run img", "ls | docker ps", "/usr/bin/docker ps", "VAR=1 podman run img"]) {
+    assert.match(refuse(command) ?? "", /run_analysis/, command);
+  }
+  for (const command of ["echo docker", 'deepis search "docker"', "cat docker-notes.md", "node harness/tools/check-citations.ts a.md"]) {
+    assert.equal(refuse(command), undefined, command);
+  }
+  assert.equal(dockerRefusal("read", { path: "docker" }), undefined, "only bash is checked");
+});
+
+test("a phase-3 worker reads the exploration split but not the dataset, the hold-out or a container runtime", (t) => {
+  const dataset = makeTempDir(t);
+  const run = makeTempDir(t);
+  initRun(run, dataset, "work on all-remote platforms");
+  createChild(run, "D01", "Self Presentation", "owner-p1");
+  updateNode(run, "T01", { phase: 3, status: "active" }, "owner-p3");
+  const call = workerGuard(t, findNode(run, "T01").dir);
+
+  assert.equal(call("read", { path: path.join(dataset, "handbook", "x.md") })?.block, true, "a read of the dataset");
+  assert.equal(call("bash", { command: `cat ${dataset}/handbook/x.md` })?.block, true, "bash naming the dataset");
+  assert.equal(
+    call("read", { path: path.join(run, "analysis-data", "exploration", "handbook", "x.md") }),
+    undefined,
+    "the exploration split is readable",
+  );
+  assert.equal(call("read", { path: "/x/holdout.txt" })?.block, true, "the hold-out is still refused");
+  for (const command of ["docker run --rm img", "cd x && docker ps", "podman run img"]) {
+    assert.equal(call("bash", { command })?.block, true, command);
+  }
+  for (const command of ["echo docker", 'deepis search "docker"']) {
+    assert.equal(call("bash", { command }), undefined, command);
+  }
+});
+
+test("a phase-1 worker may read the dataset, since its measurement reads it by design", (t) => {
+  const dataset = makeTempDir(t);
+  const run = makeTempDir(t);
+  initRun(run, dataset, "work on all-remote platforms");
+  createChild(run, "D01", "Self Presentation", "owner-p1");
+  const call = workerGuard(t, findNode(run, "T01").dir);
+
+  assert.equal(call("read", { path: path.join(dataset, "handbook", "x.md") }), undefined, "a read of the dataset");
+  assert.equal(call("bash", { command: `cat ${dataset}/handbook/x.md` }), undefined, "bash naming the dataset");
+});
+
+test("a phase-3 worker whose run cannot be found is refused every read and bash", (t) => {
+  const node = makeTempDir(t);
+  writeFileSync(path.join(node, "node.json"), JSON.stringify({ phase: 3, status: "active" }));
+  const call = workerGuard(t, node);
+
+  assert.match(call("read", { path: "workspace/x.md" })?.reason ?? "", /dataset root/, "a read fails closed");
+  assert.equal(call("bash", { command: "ls" })?.block, true, "bash fails closed");
+});
+
 test("a puzzle worker reads its own folder and the pattern's files but not a sibling puzzle", (t) => {
   const { patternDir, p1, p2 } = puzzleRun(t);
   const call = workerGuard(t, p1);
@@ -780,7 +878,7 @@ test("ownersRefusal refuses the owners' folder, not a similar-looking name", () 
 });
 
 test("the reviewer extension refuses reviews, siblings and writes outside its own review", (t) => {
-  const { patternDir, p1, p2 } = puzzleRun(t);
+  const { patternDir, dataset, p1, p2 } = puzzleRun(t);
   const call = reviewerGuard(t, p1);
 
   assert.equal(call("read", { path: "workspace/puzzle.md" }), undefined, "the card is readable");
@@ -802,6 +900,8 @@ test("the reviewer extension refuses reviews, siblings and writes outside its ow
   );
   assert.equal(call("read", { path: path.join(p2, "workspace", "puzzle.md") })?.block, true, "a sibling card is refused");
   assert.equal(call("read", { path: "/x/holdout.txt" })?.block, true, "the hold-out is refused");
+  assert.equal(call("read", { path: path.join(dataset, "handbook", "x.md") })?.block, true, "the dataset is refused");
+  assert.equal(call("bash", { command: `cat ${dataset}/handbook/x.md` })?.block, true, "bash naming the dataset is refused");
 
   assert.equal(
     call("bash", { command: "node harness/tools/check-citations.ts workspace/reviews/a.md" }),

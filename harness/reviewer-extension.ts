@@ -18,15 +18,17 @@
 //   worker may read — is another puzzle to the reviewer.
 // - `owners/` (the ledger, rulings and tournament round files with judge
 //   verdicts) is refused on `read` and `bash`.
-// - The hold-out stays locked for every Phase 2 session.
+// - The hold-out stays locked for every Phase 2 session, and the dataset root is
+//   refused on `read` and `bash` in every phase: a review never measures, so no
+//   phase is exempt the way Phase 1's measurement is.
 //
 // None of this is a sandbox. A shell command is tokenised into words and
 // checked for path segments and globs, and a script that walks the tree is not
 // seen; the guard closes the direct, accidental spellings a model reaches for.
 import * as path from "node:path";
 
-import { holdoutRefusal, isPuzzleNode, ownersRefusal, reviewsRefusal, reviewerMayWrite, siblingRefusal } from "./guard.ts";
-import { findNodeDir } from "./worker-extension.ts";
+import { datasetRefusal, holdoutRefusal, isPuzzleNode, ownersRefusal, reviewsRefusal, reviewerMayWrite, siblingRefusal } from "./guard.ts";
+import { datasetRootOf, findNodeDir } from "./worker-extension.ts";
 
 interface ToolCallEventLike {
   toolName: string;
@@ -40,11 +42,16 @@ interface PiLike {
 /** Why the reviewer extension refuses this call, or undefined when it allows it. */
 function refusal(nodeDir: string, event: ToolCallEventLike): string | undefined {
   if (event.toolName === "read" || event.toolName === "bash") {
+    const dataset = datasetRootOf(nodeDir);
+    if (dataset === undefined) {
+      return `Refusing ${event.toolName}: cannot find the run's dataset root above ${nodeDir}`;
+    }
     return (
       holdoutRefusal(event.toolName, event.input) ??
       siblingRefusal(nodeDir, event.toolName, event.input, { allowDerived: false }) ??
       reviewsRefusal(event.toolName, event.input) ??
-      ownersRefusal(event.toolName, event.input)
+      ownersRefusal(event.toolName, event.input) ??
+      datasetRefusal(dataset, event.toolName, event.input)
     );
   }
   if (event.toolName !== "write" && event.toolName !== "edit") return undefined;

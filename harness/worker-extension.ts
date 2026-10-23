@@ -5,17 +5,19 @@
 // extension finds the nearest ancestor of cwd holding a `node.json` and blocks
 // anything outside `<nodeDir>/workspace/**`, `<nodeDir>/rounds.md` and
 // `<nodeDir>/handoff.md`. A worker that is not inside a node at all fails
-// closed: it has no folder to be trusted with. Workers of Phase 1 and 2 nodes
-// also cannot `read` a hold-out path or run a `bash` command that names it, and
-// a Phase 2 puzzle worker can neither read a sibling puzzle's folder nor run a
+// closed: it has no folder to be trusted with. Workers of Phase 1 to 4 nodes
+// also cannot `read` a hold-out path or run a `bash` command that names it. A
+// Phase 3 worker also cannot `read` the dataset root (Phase 1 measures it by
+// design; Phase 3 analyses only the exploration split) or run `docker`/`podman`.
+// A Phase 2 puzzle worker can neither read a sibling puzzle's folder nor run a
 // command naming one (its `derivedFrom` parents stay readable, so an evolution
 // worker can read the cards and merged reviews it derives from).
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
 
-import { holdoutLocked, holdoutRefusal, siblingRefusal, workerMayWrite } from "./guard.ts";
-import { commitFile, findRunDir, measurementFiles, nodeIdOf, preregisterCommits } from "./tree.ts";
+import { datasetRefusal, dockerRefusal, holdoutLocked, holdoutRefusal, siblingRefusal, workerMayWrite } from "./guard.ts";
+import { commitFile, findRunDir, measurementFiles, nodeIdOf, preregisterCommits, readRun } from "./tree.ts";
 
 interface ToolCallEventLike {
   toolName: string;
@@ -42,6 +44,34 @@ export function findNodeDir(start: string): string | undefined {
     if (parent === dir) return undefined;
     dir = parent;
   }
+}
+
+/**
+ * The dataset root of the run `nodeDir` belongs to (`dataset` in the run's
+ * `node.json`, resolved against the run), or undefined when no readable run
+ * sits above it.
+ */
+export function datasetRootOf(nodeDir: string): string | undefined {
+  const runDir = findRunDir(nodeDir);
+  if (runDir === undefined) return undefined;
+  try {
+    return path.resolve(runDir, readRun(runDir).dataset);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Why a Phase 3 node may not run this read or bash, or undefined when it may. A
+ * run whose dataset root cannot be found is refused every call: the guard has
+ * no root to check against, so it fails closed.
+ */
+function phase3Refusal(nodeDir: string, event: ToolCallEventLike): string | undefined {
+  const dataset = datasetRootOf(nodeDir);
+  if (dataset === undefined) {
+    return `Refusing ${event.toolName}: cannot find the run's dataset root above ${nodeDir}`;
+  }
+  return datasetRefusal(dataset, event.toolName, event.input) ?? dockerRefusal(event.toolName, event.input);
 }
 
 /** The phase stored in a node's `node.json`; a node whose file can't be read is not locked. */
@@ -108,7 +138,8 @@ export default function workerExtension(pi: PiLike): void {
       const phase = nodePhase(nodeDir);
       const reason =
         (holdoutLocked(phase) ? holdoutRefusal(event.toolName, event.input) : undefined) ??
-        (phase === 2 ? siblingRefusal(nodeDir, event.toolName, event.input) : undefined);
+        (phase === 2 ? siblingRefusal(nodeDir, event.toolName, event.input) : undefined) ??
+        (phase === 3 ? phase3Refusal(nodeDir, event) : undefined);
       return reason === undefined ? undefined : { block: true, reason };
     }
     if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
