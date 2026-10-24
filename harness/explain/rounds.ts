@@ -126,13 +126,10 @@ export function loopDir(runDir: string, nodeId: string): string {
 /** The closed rounds of `nodeId`, rounds 1..n. Absent file: none yet. Anything unreadable throws. */
 export function readRounds(runDir: string, nodeId: string): RoundRecord[] {
   const file = path.join(loopDir(runDir, nodeId), "rounds.json");
-  let text: string;
-  try {
-    text = fs.readFileSync(file, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
+  // No-follow, regular files only: a link or a folder at this name is an error, not "no rounds".
+  const bytes = readRegular(runDir, path.relative(runDir, file).split(path.sep).join("/"));
+  if (bytes === undefined) return [];
+  const text = bytes.toString("utf8");
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);

@@ -984,6 +984,89 @@ test("reproduce does not follow a link where it cleans up", async (t) => {
   assert.equal(readFileSync(path.join(outside, "keep.txt"), "utf8"), "keep");
 });
 
+/** A folder outside the scratch holding sentinels where a cleanup would reach through a link: `names` are files in it, the node's folder name a sub-folder. */
+function sentinelFolder(t: TestContext, fx: Fixture, names: string[]): string {
+  const target = tempDir(t);
+  for (const name of names) write(path.join(target, name), "keep");
+  write(path.join(target, path.basename(fx.node), "sentinel.txt"), "keep");
+  return target;
+}
+
+const listing = (dir: string) => readdirSync(dir, { recursive: true }).map(String).sort();
+
+test("reproduce leaves a linked .analysis/repro alone, says so, records the failure, and submit refuses", async (t) => {
+  const fx = await closedOut(t);
+  const target = sentinelFolder(t, fx, ["other.txt"]);
+  const before = listing(target);
+  mkdirSync(path.join(fx.run, ".analysis"), { recursive: true });
+  symlinkSync(target, path.join(fx.run, ".analysis", "repro"));
+  const container = fakeContainer();
+  const text = await reproduce(fx.run, { nodeId: "E01" }, { exec: container.exec });
+  assert.match(text, /did NOT reproduce/);
+  assert.match(text, /could not remove \.analysis\/repro\/E01-argument.*a link or a file is on its path/);
+  assert.deepEqual(listing(target), before, "nothing in the linked folder was touched");
+  assert.equal(readFileSync(path.join(target, "E01-argument", "sentinel.txt"), "utf8"), "keep");
+  assert.deepEqual(container.calls, [], "no script ran through the link");
+  assert.equal(readRecord(fx).ok, false);
+  assert.match(await submitMessage(fx), /gate "reproduction"/);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+});
+
+test("reproduce leaves a linked .analysis/repro-state alone, says so, records the failure, and submit refuses", async (t) => {
+  const fx = await closedOut(t);
+  const target = sentinelFolder(t, fx, ["E01.json"]);
+  const before = listing(target);
+  mkdirSync(path.join(fx.run, ".analysis"), { recursive: true });
+  symlinkSync(target, path.join(fx.run, ".analysis", "repro-state"));
+  const container = fakeContainer();
+  const text = await reproduce(fx.run, { nodeId: "E01" }, { exec: container.exec });
+  assert.match(text, /did NOT reproduce/);
+  assert.match(text, /could not remove \.analysis\/repro-state\/E01\.json.*a link or a file is on its path/);
+  assert.deepEqual(listing(target), before, "the state file in the linked folder was neither deleted nor written");
+  assert.equal(readFileSync(path.join(target, "E01.json"), "utf8"), "keep");
+  assert.deepEqual(container.calls, [], "no script ran with its state behind a link");
+  assert.equal(readRecord(fx).ok, false);
+  assert.match(await submitMessage(fx), /gate "reproduction"/);
+});
+
+test("reproduce keeps a planted link in the reproduced registry a failure when .analysis/repro-state is a link too", async (t) => {
+  const fx = await closedOut(t);
+  const target = sentinelFolder(t, fx, ["E01.json"]);
+  mkdirSync(path.join(fx.run, ".analysis"), { recursive: true });
+  symlinkSync(target, path.join(fx.run, ".analysis", "repro-state"));
+  const planting = fakeContainer({
+    onRun: (host) => symlinkSync(path.join(host, "numbers", "A_01.csv"), path.join(host, "numbers", "L.csv")),
+  });
+  assert.match(await reproduce(fx.run, { nodeId: "E01" }, { exec: planting.exec }), /did NOT reproduce/);
+  assert.equal(readFileSync(path.join(target, "E01.json"), "utf8"), "keep");
+});
+
+test("reproduce gitignores .analysis before it creates any scratch: a call stopped by its budget leaves the tree clean", async (t) => {
+  const fx = await closedOut(t);
+  assert.equal(existsSync(path.join(fx.run, ".analysis")), false);
+  const text = await reproduce(fx.run, { nodeId: "E01" }, { exec: fakeContainer().exec, budgetMs: 0 });
+  assert.match(text, /PARTIAL/);
+  assert.equal(existsSync(path.join(fx.run, ".analysis", "repro")), true, "the scratch exists");
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+  assert.match(readFileSync(path.join(fx.run, ".gitignore"), "utf8"), /^\.analysis\/$/m);
+});
+
+test("readRounds refuses a rounds.json that is a link or not a regular file, rather than reading no rounds", async (t) => {
+  const fx = await closedOut(t);
+  const file = path.join(loopDir(fx.run, "E01"), "rounds.json");
+  const bytes = readFileSync(file);
+  rmSync(file);
+  write(path.join(fx.run, "elsewhere-rounds.json"), bytes.toString("utf8"));
+  symlinkSync(path.join(fx.run, "elsewhere-rounds.json"), file);
+  assert.throws(() => readRounds(fx.run, "E01"), /rounds\.json is a link/);
+  assert.match(await submitMessage(fx), /gate "STOP".*is a link/s);
+  unlinkSync(file);
+  mkdirSync(file);
+  assert.throws(() => readRounds(fx.run, "E01"), /rounds\.json is not a regular file/);
+  rmSync(file, { recursive: true });
+  assert.deepEqual(readRounds(fx.run, "E01"), [], "an absent record is still no rounds");
+});
+
 test("reproduce and submit are registered for Phase 3 only", async (t) => {
   const fx = await closedOut(t);
   const phase3 = captureTools(t, fx.run, 3);
@@ -1189,6 +1272,30 @@ test("a refused submit makes no commit and leaves the node where it was", async 
   assert.equal(git(fx.run, "status", "--porcelain"), "");
   const state = JSON.parse(readFileSync(path.join(fx.node, "node.json"), "utf8")) as { phase: number; status: string };
   assert.deepEqual([state.phase, state.status], [3, "ready"]);
+});
+
+test("submit's reply names its own commit, not whatever HEAD is by the time it is read", async (t) => {
+  const fx = await reproduced(t);
+  const text = await submitOk(fx);
+  const own = git(fx.run, "log", "-1", "--format=%h", "--grep", "[P4:updateNode] E01", "--fixed-strings").trim();
+  git(fx.run, "commit", "--allow-empty", "-q", "-m", "an unrelated commit by another tool");
+  assert.notEqual(git(fx.run, "rev-parse", "--short", "HEAD").trim(), own);
+  assert.ok(text.includes(own), `the reply names ${own}: ${text}`);
+  assert.equal(git(fx.run, "log", "-1", "--format=%s", own).trim(), "[P4:updateNode] E01 — status ready, phase 4");
+});
+
+test("submit's reply names the submit commit even when another commit lands as it finishes", async (t) => {
+  const fx = await reproduced(t);
+  // A post-commit hook makes another commit the moment the submit commit exists: HEAD has moved
+  // on by the time submit builds its reply, which must still name its own commit.
+  const hook = path.join(fx.run, ".git", "hooks", "post-commit");
+  write(hook, `#!/bin/sh\nif git log -1 --format=%s | grep -qF '[P4:updateNode] E01'; then\n  git -c user.name=t -c user.email=t@t commit --allow-empty -q -m 'raced commit' --no-verify\nfi\n`);
+  chmodSync(hook, 0o755);
+  const text = await submitOk(fx);
+  assert.equal(subjects(fx.run)[0], "raced commit", "another commit really landed after the submit commit");
+  const own = git(fx.run, "rev-parse", "--short", "HEAD~1").trim();
+  assert.ok(text.includes(own), `the reply names ${own}, not HEAD: ${text}`);
+  assert.ok(!text.includes(git(fx.run, "rev-parse", "--short", "HEAD").trim()));
 });
 
 test("submit refuses a second time: the node is no longer in Phase 3", async (t) => {

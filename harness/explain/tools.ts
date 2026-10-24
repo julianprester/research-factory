@@ -56,7 +56,7 @@ import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { type Exec } from "../analysis/run.ts";
+import { ignoreScratch, type Exec } from "../analysis/run.ts";
 import { readConfig } from "../launch.ts";
 import { commitFiles, findNode, updateNode, type NodeRef } from "../tree.ts";
 import { argumentLinks, checkArgument, checkRevision, parseReport } from "../tools/check-argument.ts";
@@ -524,11 +524,19 @@ export async function reproduce(runDir: string, input: ReproduceInput, deps: Rep
     throw new Error(`no STOP is recorded for ${node.id} (${history.length} closed round(s)): reproduce checks the finished workspace, after the loop has stopped`);
   }
   const config = readConfig(runDir);
+  // `.analysis/` must be ignored before the first scratch file exists, or a partial run leaves the tree dirty.
+  ignoreScratch(runDir);
   const scratch = path.join(runDir, ".analysis", "repro", path.basename(node.dir));
   const statePath = path.join(runDir, ".analysis", "repro-state", `${node.id}.json`);
 
   let result: Awaited<ReturnType<typeof reproduceWorkspace>>;
   try {
+    // The scratch and the state are written by the harness only; a link or file on their path is refused before anything is written through it.
+    for (const rel of [".analysis", ".analysis/repro", ".analysis/repro-state"]) {
+      const found = locate(runDir, rel);
+      if (found.kind === "refused") throw new Error(found.problem);
+      if (found.kind === "file") throw new Error(`${rel} is not a folder`);
+    }
     result = await reproduceWorkspace({
       runDir,
       nodeDir: node.dir,
@@ -608,9 +616,12 @@ function readReproduction(runDir: string, nodeId: string): Reproduction | undefi
   return { ok, workspaceHash: hash, mismatches };
 }
 
-/** The short sha of the run's HEAD. */
-function headSha(runDir: string): string {
-  return execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: runDir, encoding: "utf8" }).trim();
+/** The short sha of the newest commit `updateNode` made for `nodeId` (its subject begins `[P<n>:updateNode] <id> —`), which is not necessarily HEAD once the lock is released. */
+function updateCommitSha(runDir: string, nodeId: string, phase: number): string {
+  const subject = `[P${phase}:updateNode] ${nodeId} \u2014 `;
+  const sha = execFileSync("git", ["log", "-1", "--format=%h", "--fixed-strings", "--grep", subject], { cwd: runDir, encoding: "utf8" }).trim();
+  if (sha === "") throw new Error(`the commit for ${nodeId} cannot be found after updateNode`);
+  return sha;
 }
 
 /**
@@ -691,6 +702,6 @@ export async function submit(runDir: string, input: SubmitInput, deps: SubmitDep
   // The one commit: updateNode's tree commit, which carries the argument as it stands.
   const note = typeof input.note === "string" && input.note.trim() !== "" ? input.note.trim() : undefined;
   updateNode(runDir, node.id, { status: "ready", phase: 4 }, ACTOR, note);
-  const sha = headSha(runDir);
+  const sha = updateCommitSha(runDir, node.id, 4);
   return `submitted ${node.id}: now ready in Phase 4, at commit ${sha}. That commit stands as the argument's preregistration for Phase 5 (design §9): the argument, its scripts and its numbers as they were when it was submitted.`;
 }

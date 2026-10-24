@@ -148,7 +148,7 @@ function readList(file: string): string[] {
  * Append the ignore lines `.gitignore` lacks, and commit that file so the run's
  * status stays clean. A second call finds both lines and commits nothing.
  */
-function ignoreScratch(runDir: string): void {
+export function ignoreScratch(runDir: string): void {
   const file = path.join(runDir, ".gitignore");
   const current = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
   const present = new Set(current.split("\n").map((line) => line.trim()));
