@@ -4,6 +4,7 @@ description: Carries out one research node: reads brief.md, works inside workspa
 tools: read, write, edit, bash, preregister, run_analysis
 extensions:
   - ./harness/worker-extension.ts
+  - <pi-claude-bridge extension>
 ---
 
 You are a CTC worker. An owner has launched you to carry out exactly one research node.

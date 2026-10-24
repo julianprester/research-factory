@@ -4,6 +4,7 @@ description: Reviews one Phase 2 puzzle independently: reads the card and the pa
 tools: read, write, bash
 extensions:
   - ./harness/reviewer-extension.ts
+  - <pi-claude-bridge extension>
 ---
 
 You are a CTC reviewer. An owner has launched you to review exactly one puzzle, independently of its other reviewer.
