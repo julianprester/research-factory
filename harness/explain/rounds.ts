@@ -24,7 +24,7 @@
 // Everything under the node's `workspace/` and `tasks/` is written by workers
 // and scripts, so a host-side read goes through `locate` (every component
 // `lstat`ed, a link refused) and `readRegular` (opened without following a link).
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -179,12 +179,24 @@ export function argumentSha(nodeDir: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-/** Write through a temp file and a rename: a crash leaves the old file or the new, never half of one. */
-export function writeAtomic(file: string, text: string): void {
+/**
+ * Write through a temp file and a rename: a crash leaves the old file or the new,
+ * never half of one. The temp name is unpredictable and created exclusively
+ * (`wx`), because some targets sit in folders workers can write: a link planted at
+ * a guessed temp name must not be written through. `content` may be bytes, so a
+ * copied file is exact.
+ */
+export function writeAtomic(file: string, content: string | Buffer): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, text);
-  fs.renameSync(temp, file);
+  const temp = `${file}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  fs.rmSync(temp, { force: true });
+  try {
+    fs.writeFileSync(temp, content, { flag: "wx" });
+    fs.renameSync(temp, file);
+  } catch (error) {
+    fs.rmSync(temp, { force: true });
+    throw error;
+  }
 }
 
 /** What is at a path under a node. */

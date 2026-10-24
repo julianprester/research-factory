@@ -32,11 +32,12 @@
 // `locate`/`readRegular` (each path component `lstat`ed, a link refused, the file
 // opened without following one) and everything is verified before anything is
 // changed. Every write is a temp file and a rename.
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { readConfig } from "../launch.ts";
-import { findNode, type NodeRef } from "../tree.ts";
+import { commitFiles, findNode, type NodeRef } from "../tree.ts";
 import { argumentLinks } from "../tools/check-argument.ts";
 import { maskFences, normaliseHeading } from "../tools/check-puzzle.ts";
 import { ANALYSIS_SCRIPT } from "./reproduce.ts";
@@ -44,6 +45,7 @@ import {
   appendRound,
   argumentSha,
   locate,
+  loopDir,
   parsePlan,
   readRegular,
   readRounds,
@@ -69,6 +71,14 @@ export interface ArchiveScriptInput {
   nodeId: string;
   script: string;
   reason: string;
+}
+
+/** The commits are the owner's: design §4 makes each plan and each verdict one. */
+const ACTOR = "owner-p3";
+
+/** `rel` (under the node) as a path under the run, for git. */
+function runRelative(runDir: string, node: NodeRef, rel: string): string {
+  return path.relative(runDir, path.join(node.dir, ...rel.split("/"))).split(path.sep).join("/");
 }
 
 /** The explanation node `nodeId`, which must be in Phase 3. */
@@ -171,11 +181,13 @@ export async function openRound(runDir: string, input: OpenRoundInput): Promise<
   const snapshots = round === 1 ? puzzleSnapshots(runDir, node) : undefined;
 
   if (snapshots !== undefined) {
-    writeAtomic(path.join(node.dir, "workspace", "puzzle.md"), snapshots.puzzle.toString("utf8"));
+    writeAtomic(path.join(node.dir, "workspace", "puzzle.md"), snapshots.puzzle);
     writeAtomic(path.join(node.dir, "workspace", "must-check.md"), snapshots.mustCheck);
   }
   writeAtomic(path.join(node.dir, ...planFile.split("/")), input.plan.endsWith("\n") ? input.plan : `${input.plan}\n`);
   for (const { letter } of plan.tasks) fs.mkdirSync(path.join(node.dir, "tasks", letter), { recursive: true });
+  const committed = [planFile, ...(snapshots === undefined ? [] : ["workspace/puzzle.md", "workspace/must-check.md"])];
+  commitFiles(runDir, committed.map((rel) => runRelative(runDir, node, rel)), ACTOR, `[P3:plan] ${node.id} round ${name}`);
   return `opened round ${round} (rounds/${name}/plan.md) with tasks ${plan.tasks.map((task) => task.letter).join(", ")}`;
 }
 
@@ -256,6 +268,15 @@ export async function closeRound(runDir: string, input: CloseRoundInput): Promis
     letters: plan.tasks.map((task) => task.letter),
   };
   appendRound(runDir, node.id, record, cap);
+  commitFiles(
+    runDir,
+    [
+      runRelative(runDir, node, `rounds/${name}/verdict.md`),
+      path.relative(runDir, path.join(loopDir(runDir, node.id), "rounds.json")).split(path.sep).join("/"),
+    ],
+    ACTOR,
+    `[P3:verdict] ${node.id} round ${name} (${input.changed})`,
+  );
   return `round ${round} closed: ${showDecision(stopOf([...history, record], cap))}`;
 }
 
@@ -317,29 +338,64 @@ export async function archiveScript(runDir: string, input: ArchiveScriptInput): 
 
   const archive = requireFolderOrAbsent(node.dir, "workspace/archive");
   const destination = `workspace/archive/${stem}`;
-  if (archive === "folder" && locate(node.dir, destination).kind !== "absent") {
-    throw new Error(`${destination} already exists: a stem is archived once`);
+  const destinationDir = path.join(node.dir, ...destination.split("/"));
+  // A stem is archived once. The one thing tolerated is the README alone in a real
+  // folder: what an earlier attempt that died before its files arrived leaves.
+  let leftover = false;
+  if (archive === "folder") {
+    const existing = locate(node.dir, destination);
+    if (existing.kind === "refused") throw new Error(existing.problem);
+    if (existing.kind !== "absent") {
+      const entries = existing.kind === "folder" ? fs.readdirSync(destinationDir, { withFileTypes: true }) : [];
+      leftover = entries.length === 1 && entries[0]!.name === "README.md" && entries[0]!.isFile();
+      if (!leftover) throw new Error(`${destination} already exists: a stem is archived once`);
+    }
   }
 
+  // Stage the move in a private folder next to the destination and put it in place
+  // with one rename at the end, so a rename that fails part-way is undone rather
+  // than leaving a half-filled stem that blocks the retry.
   fs.mkdirSync(path.join(node.dir, "workspace", "archive"), { recursive: true });
+  const stage = path.join(node.dir, "workspace", "archive", `.stage-${stem}-${randomBytes(6).toString("hex")}`);
+  fs.mkdirSync(stage);
+  const moved: string[] = [];
   try {
-    fs.mkdirSync(path.join(node.dir, ...destination.split("/")));
+    const readme = [
+      `# Archived: ${script}`,
+      "",
+      `Reason: ${reason}`,
+      "",
+      "Moved here from:",
+      ...moving.map((rel) => `- ${rel}`),
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(stage, "README.md"), readme, { flag: "wx" });
+    for (const rel of moving) {
+      fs.renameSync(path.join(node.dir, ...rel.split("/")), path.join(stage, path.basename(rel)));
+      moved.push(rel);
+    }
+    if (leftover) fs.rmSync(path.join(destinationDir, "README.md"));
+    fs.renameSync(stage, destinationDir);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`${destination} already exists: a stem is archived once`);
+    for (const rel of moved.reverse()) {
+      try {
+        fs.renameSync(path.join(stage, path.basename(rel)), path.join(node.dir, ...rel.split("/")));
+      } catch {
+        /* the original error is the one to report */
+      }
+    }
+    fs.rmSync(stage, { recursive: true, force: true });
     throw error;
   }
-  const readme = [
-    `# Archived: ${script}`,
-    "",
-    `Reason: ${reason}`,
-    "",
-    "Moved here from:",
-    ...moving.map((rel) => `- ${rel}`),
-    "",
-  ].join("\n");
-  fs.writeFileSync(path.join(node.dir, ...destination.split("/"), "README.md"), readme, { flag: "wx" });
-  for (const rel of moving) {
-    fs.renameSync(path.join(node.dir, ...rel.split("/")), path.join(node.dir, ...destination.split("/"), path.basename(rel)));
-  }
+  commitFiles(
+    runDir,
+    [
+      ...moving.map((rel) => runRelative(runDir, node, rel)),
+      runRelative(runDir, node, `${destination}/README.md`),
+      ...moving.map((rel) => runRelative(runDir, node, `${destination}/${path.basename(rel)}`)),
+    ],
+    ACTOR,
+    `[P3:archive] ${node.id} ${stem}`,
+  );
   return `archived ${script} to ${destination}/ (${moving.map((rel) => path.basename(rel)).join(", ")})`;
 }

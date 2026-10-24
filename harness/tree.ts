@@ -277,6 +277,36 @@ export function commitFile(runDir: string, relPath: string, actor: string, subje
   });
 }
 
+/**
+ * Commit exactly `relPaths` as one commit by `actor` and return the new commit's
+ * short sha. Like `commitFile` but for a change that spans files: a path that is
+ * gone from disk but still tracked is committed as a removal (so a move leaves
+ * the tree clean), and a path that is neither on disk nor tracked is skipped.
+ * Throws when no path is left to commit.
+ */
+export function commitFiles(runDir: string, relPaths: string[], actor: string, subject: string): string {
+  return withLock(runDir, () => {
+    const paths: string[] = [];
+    for (const rel of new Set(relPaths)) {
+      const onDisk = fs.existsSync(path.join(runDir, rel)) || isLink(path.join(runDir, rel));
+      const tracked = gitOut(runDir, ["ls-files", "--", rel]).trim() !== "";
+      if (onDisk || tracked) paths.push(rel);
+    }
+    if (paths.length === 0) throw new Error(`none of ${relPaths.join(", ")} exists: write them before committing`);
+    git(runDir, ["add", "-A", "--", ...paths], actor);
+    git(runDir, ["commit", "--allow-empty", "-m", subject, "--", ...paths], actor);
+    return gitOut(runDir, ["rev-parse", "--short", "HEAD"]).trim();
+  });
+}
+
+function isLink(file: string): boolean {
+  try {
+    return fs.lstatSync(file).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
 /** The id a node folder names: `T01-slug` → `T01`; undefined for anything else. */
 export function nodeIdOf(dir: string): string | undefined {
   const match = NODE_FOLDER.exec(path.basename(path.resolve(dir)));

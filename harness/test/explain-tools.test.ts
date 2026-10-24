@@ -9,7 +9,8 @@
 // plant symlinks where workers and scripts can write (`tasks/`, `workspace/output/`,
 // `workspace/archive/`), because a host-side read or move must never follow one.
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -39,6 +40,19 @@ async function rejectMessage(promise: Promise<unknown>): Promise<string> {
   }
   assert.fail("expected the call to be refused");
 }
+
+function git(run: string, ...args: string[]): string {
+  return execFileSync("git", ["-c", "user.name=test", "-c", "user.email=test@ctc.local", ...args], { cwd: run, encoding: "utf8" });
+}
+
+/** Commit whatever the fixture or a "worker" wrote, so the next tool's own commits are what `status` shows. */
+function settle(run: string): void {
+  git(run, "add", "-A");
+  git(run, "commit", "--allow-empty", "-q", "-m", "fixture");
+}
+
+const subjects = (run: string) => git(run, "log", "--format=%s").trim().split("\n");
+const lastFiles = (run: string) => git(run, "show", "--name-status", "--format=", "HEAD").trim().split("\n").sort();
 
 function plan(...letters: string[]): string {
   return [
@@ -92,6 +106,7 @@ function fixture(t: TestContext, extra: Record<string, unknown> = {}): Fixture {
   write(path.join(puzzle.dir, "workspace", "reviews", "merged.md"), MERGED);
   const node = createChild(run, puzzle.id, "Argument", "owner-p3");
   config(run, extra);
+  settle(run);
   return { run, node: node.dir, puzzle: puzzle.dir };
 }
 
@@ -104,6 +119,7 @@ function finish(fx: Fixture, round: number, letters: string[], argument?: string
   write(path.join(fx.node, "tasks", `lit-${nn}`, "handoff.md"), "Status: DONE\n");
   write(path.join(fx.node, "workspace", "reports", `${nn}.md`), "Round: 1\n");
   if (argument !== undefined) write(path.join(fx.node, "workspace", "argument.md"), argument);
+  settle(fx.run);
 }
 
 /** Open and close a round, `changed` being "substantial" or "none". */
@@ -364,6 +380,7 @@ function withScript(fx: Fixture, script = "A_01.R"): string {
   write(path.join(workspace, "output", "numbers", `${stem}.csv`), "name,value,note\nn,1,\n");
   write(path.join(workspace, "output", "logs", `${stem}.txt`), "ran\n");
   write(path.join(workspace, "argument.md"), "# Argument\n\nNothing linked.\n");
+  settle(fx.run);
   return stem;
 }
 
@@ -453,7 +470,7 @@ test("archive_script refuses a stem already archived, whatever is there", async 
   rmSync(path.join(fx.node, "workspace", "archive", "A_01"), { recursive: true });
   mkdirSync(path.join(fx.run, "elsewhere"));
   symlinkSync(path.join(fx.run, "elsewhere"), path.join(fx.node, "workspace", "archive", "A_01"));
-  assert.match(await rejectMessage(archiveScript(fx.run, { nodeId: "E01", script: "A_01.R", reason: "why" })), /archive\/A_01 already exists/);
+  assert.match(await rejectMessage(archiveScript(fx.run, { nodeId: "E01", script: "A_01.R", reason: "why" })), /archive\/A_01 (?:is a link|already exists)/);
   assert.deepEqual(readdirSync(path.join(fx.run, "elsewhere")), []);
 });
 
@@ -594,4 +611,148 @@ test("the owner's write tool may not touch the loop records, plans or verdicts",
   assert.equal(ownerMayWrite(fx.run, 3, inNode("workspace", "argument.md")), true);
   assert.equal(ownerMayWrite(fx.run, 3, inNode("tasks", "C", "brief.md")), true);
   assert.equal(ownerMayWrite(fx.run, 3, path.join(fx.run, "owners", "phase-3", "ledger.md")), true);
+});
+
+// ---------------------------------------------------------------------------
+// Commits (design §4: each plan and each verdict is a commit)
+// ---------------------------------------------------------------------------
+
+test("open_round commits the plan (and on round 1 the snapshots) and leaves the tree clean", async (t) => {
+  const fx = fixture(t);
+  await openRound(fx.run, { nodeId: "E01", plan: plan("A") });
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+  assert.equal(subjects(fx.run)[0], "[P3:plan] E01 round 01");
+  const base = "patterns/T01-etiquette/puzzles/P01-rules-by-example/explanations/E01-argument";
+  assert.deepEqual(lastFiles(fx.run), [
+    `A\t${base}/rounds/01/plan.md`,
+    `A\t${base}/workspace/must-check.md`,
+    `A\t${base}/workspace/puzzle.md`,
+  ]);
+
+  finish(fx, 1, ["A"], ARGUMENT("v1"));
+  await closeRound(fx.run, { nodeId: "E01", changed: "substantial", summary: "s" });
+  await openRound(fx.run, { nodeId: "E01", plan: plan("B") });
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+  assert.equal(subjects(fx.run)[0], "[P3:plan] E01 round 02");
+  assert.deepEqual(lastFiles(fx.run), [`A\t${base}/rounds/02/plan.md`], "later rounds commit the plan alone");
+});
+
+test("a refused open_round, close_round or archive_script makes no commit", async (t) => {
+  const fx = fixture(t);
+  const before = subjects(fx.run).length;
+  await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: "no plan" }));
+  await rejectMessage(closeRound(fx.run, { nodeId: "E01", changed: "substantial", summary: "s" }));
+  await rejectMessage(archiveScript(fx.run, { nodeId: "E01", script: "A_01.R", reason: "" }));
+  assert.equal(subjects(fx.run).length, before);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+});
+
+test("close_round commits the verdict and rounds.json and leaves the tree clean", async (t) => {
+  const fx = fixture(t);
+  await openRound(fx.run, { nodeId: "E01", plan: plan("A") });
+  finish(fx, 1, ["A"], ARGUMENT("v1"));
+  await closeRound(fx.run, { nodeId: "E01", changed: "substantial", summary: "s" });
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+  assert.equal(subjects(fx.run)[0], "[P3:verdict] E01 round 01 (substantial)");
+  assert.deepEqual(lastFiles(fx.run), [
+    "A\towners/phase-3/loop/E01/rounds.json",
+    "A\tpatterns/T01-etiquette/puzzles/P01-rules-by-example/explanations/E01-argument/rounds/01/verdict.md",
+  ]);
+
+  await openRound(fx.run, { nodeId: "E01", plan: plan("B") });
+  finish(fx, 2, ["B"]);
+  await closeRound(fx.run, { nodeId: "E01", changed: "none", summary: "quiet" });
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+  assert.equal(subjects(fx.run)[0], "[P3:verdict] E01 round 02 (none)");
+  assert.ok(lastFiles(fx.run).includes("M\towners/phase-3/loop/E01/rounds.json"));
+});
+
+test("archive_script commits the move, removals included, and leaves the tree clean", async (t) => {
+  const fx = fixture(t);
+  withScript(fx);
+  await archiveScript(fx.run, { nodeId: "E01", script: "A_01.R", reason: "superseded" });
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+  assert.equal(subjects(fx.run)[0], "[P3:archive] E01 A_01");
+  const base = "patterns/T01-etiquette/puzzles/P01-rules-by-example/explanations/E01-argument/workspace";
+  assert.deepEqual(lastFiles(fx.run), [
+    `A\t${base}/archive/A_01/README.md`,
+    `R100\t${base}/output/logs/A_01.txt\t${base}/archive/A_01/A_01.txt`,
+    `R100\t${base}/output/numbers/A_01.csv\t${base}/archive/A_01/A_01.csv`,
+    `R100\t${base}/scripts/A_01.R\t${base}/archive/A_01/A_01.R`,
+  ].sort());
+});
+
+test("archive_script commits cleanly when the sources were never committed", async (t) => {
+  const fx = fixture(t);
+  write(path.join(fx.node, "workspace", "scripts", "A_01.R"), "x");
+  await archiveScript(fx.run, { nodeId: "E01", script: "A_01.R", reason: "never committed" });
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+  assert.equal(subjects(fx.run)[0], "[P3:archive] E01 A_01");
+});
+
+// ---------------------------------------------------------------------------
+// Temp files, retries and precedence
+// ---------------------------------------------------------------------------
+
+test("open_round copies the puzzle byte-exact and does not write through a planted temp link", async (t) => {
+  const fx = fixture(t);
+  const bytes = Buffer.from([0x23, 0xff, 0xfe, 0x0a, 0xc3, 0x28, 0x0a]);
+  writeFileSync(path.join(fx.puzzle, "workspace", "puzzle.md"), bytes);
+  settle(fx.run);
+
+  // A worker plants links at the names a host might guess for its temp files.
+  const victim = path.join(fx.run, "victim.txt");
+  writeFileSync(victim, "untouched");
+  mkdirSync(path.join(fx.node, "workspace"), { recursive: true });
+  for (const name of ["puzzle.md", "must-check.md"]) {
+    symlinkSync(victim, path.join(fx.node, "workspace", `${name}.${process.pid}.tmp`));
+  }
+  settle(fx.run);
+
+  await openRound(fx.run, { nodeId: "E01", plan: plan("A") });
+  assert.equal(readFileSync(victim, "utf8"), "untouched");
+  assert.deepEqual(readFileSync(path.join(fx.node, "workspace", "puzzle.md")), bytes);
+  assert.match(readFileSync(path.join(fx.node, "workspace", "must-check.md"), "utf8"), /handbook's silence/);
+});
+
+test("archive_script retries when the destination holds only the README an earlier attempt wrote", async (t) => {
+  const fx = fixture(t);
+  withScript(fx);
+  const dest = path.join(fx.node, "workspace", "archive", "A_01");
+  write(path.join(dest, "README.md"), "# earlier attempt\n");
+  await archiveScript(fx.run, { nodeId: "E01", script: "A_01.R", reason: "second try" });
+  assert.match(readFileSync(path.join(dest, "README.md"), "utf8"), /second try/);
+  assert.ok(existsSync(path.join(dest, "A_01.R")));
+  assert.equal(existsSync(path.join(fx.node, "workspace", "scripts", "A_01.R")), false);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+});
+
+test("archive_script undoes a rename that fails part-way, so the retry is not stuck", { skip: process.getuid?.() === 0 }, async (t) => {
+  const fx = fixture(t);
+  withScript(fx);
+  const numbers = path.join(fx.node, "workspace", "output", "numbers");
+  chmodSync(numbers, 0o555); // the script moves, then the registry file cannot leave its folder
+  const before = subjects(fx.run).length;
+  try {
+    await rejectMessage(archiveScript(fx.run, { nodeId: "E01", script: "A_01.R", reason: "why" }));
+  } finally {
+    chmodSync(numbers, 0o755);
+  }
+
+  assert.ok(existsSync(path.join(fx.node, "workspace", "scripts", "A_01.R")), "the script is back");
+  assert.ok(existsSync(path.join(numbers, "A_01.csv")));
+  assert.deepEqual(readdirSync(path.join(fx.node, "workspace", "archive")), [], "no stem and no stage folder is left");
+  assert.equal(subjects(fx.run).length, before, "no commit");
+
+  await archiveScript(fx.run, { nodeId: "E01", script: "A_01.R", reason: "why" });
+  assert.ok(existsSync(path.join(fx.node, "workspace", "archive", "A_01", "A_01.csv")));
+});
+
+test("close_round at round 6 with roundCap 6: two quiet rounds report two-quiet, not cap", async (t) => {
+  const fx = fixture(t, { roundCap: 6 });
+  for (let round = 1; round <= 4; round++) await runRound(fx, round, [String.fromCharCode(64 + round)], "substantial");
+  assert.match(await runRound(fx, 5, ["E"], "none"), /continue/);
+  const last = await runRound(fx, 6, ["F"], "none");
+  assert.match(last, /STOP \(two-quiet\)/);
+  assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("G") })), /STOP recorded \(two-quiet\)/);
 });

@@ -4,7 +4,7 @@
 // `parsePlan` is the one reading of `plan.md`. `readRounds`/`appendRound` own
 // `rounds.json`, which must be contiguous, atomic and unreadable-means-error.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -18,6 +18,7 @@ import {
   readRounds,
   ROUND_CAP,
   stopOf,
+  writeAtomic,
   type RoundRecord,
 } from "../explain/rounds.ts";
 
@@ -168,4 +169,21 @@ test("argumentSha hashes the regular file and refuses a link", (t) => {
   symlinkSync(path.join(node, "elsewhere.md"), path.join(node, "workspace", "argument.md"));
   assert.throws(() => argumentSha(node), /link/);
   assert.ok(existsSync(path.join(node, "elsewhere.md")));
+});
+
+test("writeAtomic does not write through a link planted at the old predictable temp name", (t) => {
+  const dir = tempDir(t);
+  const file = path.join(dir, "out.md");
+  const victim = path.join(dir, "victim.txt");
+  writeFileSync(victim, "untouched");
+  symlinkSync(victim, `${file}.${process.pid}.tmp`);
+
+  const bytes = Buffer.from([0xff, 0xfe, 0x00, 0x41]);
+  writeAtomic(file, bytes);
+  assert.equal(readFileSync(victim, "utf8"), "untouched");
+  assert.deepEqual(readFileSync(file), bytes, "bytes are written exactly");
+  assert.deepEqual(readdirSync(dir).sort(), [path.basename(`${file}.${process.pid}.tmp`), "out.md", "victim.txt"].sort());
+
+  writeAtomic(file, "text");
+  assert.equal(readFileSync(file, "utf8"), "text");
 });
