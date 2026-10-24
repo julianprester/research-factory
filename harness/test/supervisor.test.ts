@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { STALL_RETRY_MS, decide, phasesWithNodes, viewPhase, type Memory, type PhaseView } from "../supervisor.ts";
+import { STALL_RETRY_MS, decide, phasesWithNodes, viewPhase, type Action, type Memory, type PhaseView } from "../supervisor.ts";
 import { createChild, findNode, initRun, updateNode } from "../tree.ts";
 
 function makeRun(t: TestContext): string {
@@ -318,6 +318,40 @@ test("viewPhase splits a phase's nodes into ready, running and finished", (t) =>
     finished: [],
     inputs: [],
   });
+});
+
+test("two phase-3 puzzles: a puzzle left `ready` nudges an idle owner, both at `input` do not (the phase-3 skill moves every queued puzzle to input)", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  createChild(run, "D01", "Etiquette", "t");
+  const first = createChild(run, "T01", "Rules by example", "t");
+  const second = createChild(run, "T01", "Rules by exception", "t");
+  for (const puzzle of [first, second]) updateNode(run, puzzle.id, { phase: 3 }, "t");
+  const idle = () => viewPhase(run, 3, "idle", { configured: true, started: true, entry: false });
+  const ticks = (count: number): Action[][] => {
+    let state = memory();
+    const seen: Action[][] = [];
+    for (let tick = 0; tick < count; tick++) {
+      const result = decide([idle()], "head-1", state);
+      seen.push(result.actions);
+      state = result.memory;
+    }
+    return seen;
+  };
+
+  // The first puzzle is taken (input, with an active explanation whose workers are running); the second waits as `ready`.
+  updateNode(run, first.id, { status: "input" }, "t");
+  const explanation = createChild(run, first.id, "Argument", "t");
+  updateNode(run, explanation.id, { status: "active" }, "t");
+  const nagged = decide([idle()], "head-1", memory()).actions;
+  assert.equal(nagged.length, 1, "the leftover ready puzzle nudges the idle owner");
+  assert.match(nagged[0]?.kind === "nudge" ? nagged[0].message : "", /Continue phase 3: 1 ready, 0 handoffs waiting \(P02\)/);
+
+  // The skill's start-of-run move: every queued puzzle goes to input, so nothing is `ready`.
+  updateNode(run, second.id, { status: "input" }, "t");
+  const view3 = idle();
+  assert.deepEqual([view3.ready, view3.inputs, view3.running], [[], ["P01", "P02"], ["E01"]]);
+  for (const [tick, actions] of ticks(6).entries()) assert.deepEqual(actions, [], `tick ${tick + 1}: an idle owner waiting on its workers is not nudged`);
 });
 
 test("viewPhase reports an input node as an input, not as ready", (t) => {

@@ -1221,6 +1221,16 @@ test("the Phase 3 skill closes a round that cannot finish, and ranks the two cap
   assert.match(body, /pattern's `<pattern node dir>\/handoff\.md`/);
 });
 
+test("the Phase 3 skill moves every queued puzzle to input at the start and works one at a time", () => {
+  const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
+  assert.match(skill, /\*\*At the very start, before anything else, move every queued phase-3 puzzle to `input`/);
+  assert.match(skill, /so that none stays `ready`/);
+  assert.match(skill, /a `ready` puzzle makes the supervisor nudge you while your workers run/);
+  assert.match(skill, /An `input` puzzle with no explanation under it is queued/);
+  assert.match(skill, /work \*\*one puzzle at a time\*\*/);
+  assert.match(skill, /the cap of 4 active workers still holds/);
+});
+
 test("the assets task keeps earlier variables across rounds, in one language", () => {
   const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
   assert.match(skill, /reads the existing assets script first and keeps every earlier variable and table fragment/);

@@ -37,6 +37,10 @@ Then resume. Call `tree_list({})` (all phases) and read
 - A puzzle already `input` with an explanation under it: do not create another.
   Continue that explanation, unless it is already `ready` in Phase 4 (it was
   submitted): then only close the puzzle input node (§6).
+- An `input` puzzle with no explanation under it is queued: it is waiting for its
+  turn (or you were interrupted before creating its explanation). Take it when
+  no other puzzle is in progress. Move any puzzle still `ready` to `input` first
+  (§1).
 - `owners/phase-3/loop/<E>/rounds.json` lists the **closed** rounds (the code
   wrote it; you cannot). Read it before anything else. A recorded STOP is final.
   The number of records is the number of closed rounds.
@@ -56,8 +60,15 @@ Then resume. Call `tree_list({})` (all phases) and read
 ## 1. The queue and one puzzle's setup
 
 `tree_list({ phase: 3 })` with no status filter. The queue is the phase-3
-**puzzles** in `ready` (promoted by Phase 2); a puzzle already `input` has its
-explanation under way. Take them one at a time.
+**puzzles** in `ready` (promoted by Phase 2), plus any `input` puzzle with no
+explanation under it (see §0).
+
+**At the very start, before anything else, move every queued phase-3 puzzle to
+`input`** (`tree_update({ nodeId: "<P..>", status: "input" })` for each), so that
+none stays `ready`: a `ready` puzzle makes the supervisor nudge you while your
+workers run, and a nudge is not an order to start it. Then work **one puzzle at
+a time**, in the order you moved them; the cap of 4 active workers still holds
+across the whole phase. A puzzle waits at `input` until you reach it.
 
 For each puzzle `<P..>`:
 
@@ -67,9 +78,9 @@ For each puzzle `<P..>`:
    `data-character.md` and `glossary.md` at the absolute paths the Phase 0
    `manifest.md` names, and the Phase 0 caveats as Phase 2 recorded them. You
    read these files; you never read the dataset or the hold-out.
-2. Move the puzzle to `input`: `tree_update({ nodeId: "<P..>", status: "input" })`.
-   It keeps Phase 3 alive for the supervisor, it is never briefed or dispatched,
-   and you close it at the end (§6).
+2. The puzzle is already `input` (moved at the start). It keeps Phase 3 alive
+   for the supervisor, it is never briefed or dispatched, and you close it at
+   the end (§6).
 3. Create the explanation: `tree_create({ parentId: "<P..>", title: "<short title>" })`
    (the default child of a puzzle is an explanation). Then **at once**
    `tree_update({ nodeId: "<E..>", status: "active" })`. The explanation node is
