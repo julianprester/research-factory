@@ -149,7 +149,7 @@ function parseRegistry(text: string): Row[] {
 }
 
 /** RFC 4180 rows: a quoted field may hold commas, doubled quotes and newlines; a leading byte-order mark is dropped. */
-function parseCsv(raw: string): string[][] {
+export function parseCsv(raw: string): string[][] {
   const text = raw.startsWith("\uFEFF") ? raw.slice(1) : raw;
   const rows: string[][] = [];
   let row: string[] = [];
