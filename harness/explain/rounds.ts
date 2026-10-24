@@ -11,7 +11,9 @@
 //   rounds are checked first, so a quiet sixth round reports the finding that
 //   the argument settled, not the cost backstop. **A STOP is a latch**:
 //   `stopOf` scans every prefix of the history, so a record that stops at some
-//   round stops the loop for good however later records would read.
+//   round stops the loop for good however later records would read. The round
+//   that stops the loop stores the reason in its own record (`stop`), so editing
+//   `roundCap` afterwards cannot reopen it.
 // - **The record.** `rounds.json` is an array of `RoundRecord`, rounds 1..n with
 //   no hole, written through a temp file and a rename so a crash cannot tear
 //   it. A file that exists but cannot be read is an error, not a fresh start:
@@ -40,6 +42,12 @@ export interface RoundRecord {
   argumentSha: string;
   summary: string;
   letters: string[];
+  /**
+   * Why the loop stopped, when this is the round that stopped it. Stored when the stop occurs, so a later
+   * change of `roundCap` cannot un-latch it. Records written before this field existed have none; their
+   * stop is derived from the history and the cap, as it always was.
+   */
+  stop?: "two-quiet" | "cap";
 }
 
 /** Yes or no, and for a yes the rule that fired. */
@@ -64,10 +72,13 @@ export function decideStop(history: RoundRecord[], cap: number = ROUND_CAP): Dec
 /**
  * The decision that stands for `history`: the earliest prefix that stops, else
  * continue. This is the latch - what `open_round` reads - so a record that once
- * stopped can never read as "continue" because of what follows it.
+ * stopped can never read as "continue" because of what follows it. A stop recorded
+ * in a round's own record (`stop`) stands as written, whatever `cap` is now.
  */
 export function stopOf(history: RoundRecord[], cap: number = ROUND_CAP): Decision {
   for (let length = 1; length <= history.length; length++) {
+    const recorded = history[length - 1]?.stop;
+    if (recorded !== undefined) return { stop: true, reason: recorded };
     const decision = decideStop(history.slice(0, length), cap);
     if (decision.stop) return decision;
   }
@@ -148,11 +159,13 @@ export function readRounds(runDir: string, nodeId: string): RoundRecord[] {
 
 function recordOf(value: unknown): RoundRecord | undefined {
   if (typeof value !== "object" || value === null) return undefined;
-  const { round, changed, argumentSha, summary, letters } = value as Partial<RoundRecord>;
+  const { round, changed, argumentSha, summary, letters, stop } = value as Partial<RoundRecord>;
   if (typeof round !== "number" || !Number.isInteger(round) || round < 1) return undefined;
   if (typeof changed !== "boolean" || typeof argumentSha !== "string" || typeof summary !== "string") return undefined;
   if (!Array.isArray(letters) || !letters.every((letter) => typeof letter === "string")) return undefined;
-  return { round, changed, argumentSha, summary, letters };
+  if (stop === undefined) return { round, changed, argumentSha, summary, letters };
+  if (stop !== "two-quiet" && stop !== "cap") return undefined;
+  return { round, changed, argumentSha, summary, letters, stop };
 }
 
 /**

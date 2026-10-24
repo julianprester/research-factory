@@ -21,7 +21,7 @@
 //
 // The problems, in order: `argument.md` missing (or not a regular file), a
 // heading or `Contribution:` line missing, an empty `## Alternatives
-// considered`, each link that does not resolve, each registry link whose key is
+// considered` or `## Predictions`, each link that does not resolve, each registry link whose key is
 // absent or repeated, each file in `workspace/scripts/` not named as a script,
 // the assets pair (`_variables.yml`, `variables_sources.csv`) missing or
 // inconsistent, each report without its `Round:` line or a heading, each
@@ -372,9 +372,13 @@ export function checkArgument(
     if (kind !== "theoretical" && kind !== "pattern") {
       problems.push('workspace/argument.md lacks a "Contribution: theoretical|pattern" line');
     }
-    const alternatives = sections.get("## Alternatives considered");
-    if (alternatives !== undefined && alternatives.every((line) => line.trim() === "")) {
-      problems.push('workspace/argument.md\'s "## Alternatives considered" section is empty');
+    // Both are present-and-empty problems: the alternatives are the argument's honesty, the predictions
+    // become the Phase 5 preregistration. A missing heading is reported above.
+    for (const heading of ["## Alternatives considered", "## Predictions"]) {
+      const body = sections.get(heading);
+      if (body !== undefined && body.every((line) => line.trim() === "")) {
+        problems.push(`workspace/argument.md's "${heading}" section is empty`);
+      }
     }
     warnings.push(...bareNumbers(lines));
   }

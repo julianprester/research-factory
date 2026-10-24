@@ -307,6 +307,22 @@ test("an empty Alternatives considered section is a problem", (t) => {
   assert.deepEqual(problemsOf(fixture), ['workspace/argument.md\'s "## Alternatives considered" section is empty']);
 });
 
+test("an empty Predictions section is a problem (they are the Phase 5 preregistration)", (t) => {
+  const fixture = nodeFixture(t);
+  write(argumentFile(fixture.nodeDir), emptySection(argument(), "## Predictions"));
+  assert.deepEqual(problemsOf(fixture), ['workspace/argument.md\'s "## Predictions" section is empty']);
+
+  const fenced = `${emptySection(argument(), "## Predictions").trimEnd()}\n\`\`\`\nThe hold-out should agree.\n\`\`\`\n`;
+  write(argumentFile(fixture.nodeDir), fenced);
+  assert.deepEqual(problemsOf(fixture), ['workspace/argument.md\'s "## Predictions" section is empty'], "a fenced block is not a prediction");
+});
+
+test("a one-line Predictions section passes, whatever it says", (t) => {
+  const fixture = nodeFixture(t);
+  write(argumentFile(fixture.nodeDir), `${emptySection(argument(), "## Predictions").trimEnd()}\nThe ordering holds.\n`);
+  assert.deepEqual(problemsOf(fixture), []);
+});
+
 test("a one-line Alternatives considered section passes, whatever it says", (t) => {
   const fixture = nodeFixture(t);
   write(argumentFile(fixture.nodeDir), argument().replace("The timing account is ruled out by the ordering in the registry.", "Nothing."));

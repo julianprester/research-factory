@@ -19,9 +19,9 @@
 // nothing but the owner's `brief.md` does not count as a use of `<L>`.
 //
 // **`closeRound`** is the verdict gate (design §6.3). It refuses unless every
-// task of the round left a handoff whose first line is a non-BLOCKED `Status:`,
-// the round's literature worker left its handoff and report, and the argument
-// exists. It will not take `none` on round 1, and will not take `substantial`
+// task of the round left a handoff whose first line is `Status: DONE` or
+// `DONE_WITH_CONCERNS`, the round's literature worker left a handoff with the
+// same rule and its report, and the argument exists. It will not take `none` on round 1, and will not take `substantial`
 // when the argument's hash equals the previous round's: a substantial change
 // cannot be claimed without an edit. It writes `verdict.md`, appends the record
 // and returns the stop decision. The verdict is written before the record, so a
@@ -73,6 +73,7 @@ import { ANALYSIS_SCRIPT, reproduceWorkspace, workspaceHash } from "./reproduce.
 import {
   appendRound,
   argumentSha,
+  decideStop,
   locate,
   loopDir,
   parsePlan,
@@ -83,6 +84,7 @@ import {
   stopOf,
   writeAtomic,
   type Decision,
+  type RoundRecord,
 } from "./rounds.ts";
 
 export interface OpenRoundInput {
@@ -328,7 +330,9 @@ export async function closeRound(runDir: string, input: CloseRoundInput): Promis
     const problem = handoffProblem(node, `tasks/${letter}/handoff.md`, `task ${letter}`);
     if (problem !== undefined) problems.push(problem);
   }
-  for (const rel of [`tasks/lit-${name}/handoff.md`, `workspace/reports/${name}.md`, "workspace/argument.md"]) {
+  const literature = handoffProblem(node, `tasks/lit-${name}/handoff.md`, "the literature worker");
+  if (literature !== undefined) problems.push(literature);
+  for (const rel of [`workspace/reports/${name}.md`, "workspace/argument.md"]) {
     const problem = fileProblem(node, rel);
     if (problem !== undefined) problems.push(problem);
   }
@@ -346,13 +350,16 @@ export async function closeRound(runDir: string, input: CloseRoundInput): Promis
   }
 
   writeAtomic(path.join(node.dir, "rounds", name, "verdict.md"), `Changed: ${input.changed}\n\n${summary}\n`);
-  const record = {
+  const record: RoundRecord = {
     round,
     changed: input.changed === "substantial",
     argumentSha: sha,
     summary,
     letters: plan.tasks.map((task) => task.letter),
   };
+  // The stop is stored in the record that causes it, so a later change of roundCap cannot un-latch it.
+  const stopping = decideStop([...history, record], cap);
+  if (stopping.stop) record.stop = stopping.reason;
   appendRound(runDir, node.id, record, cap);
   commitFiles(
     runDir,

@@ -220,7 +220,11 @@ on a stronger model, with `cwd` the same task folder). If the task still has no
 usable handoff, there is one terminal step: dispatch **one more fresh worker
 whose only job is to close the task** with `Status: DONE_WITH_CONCERNS`, stating
 exactly what could not be done (the round then closes and the gap goes into the
-argument's *Limitations*). If even that worker fails, record
+argument's *Limitations*). For a **literature** task (`lit-<NN>`) that closing
+worker must also write a valid `workspace/reports/<NN>.md`: a `Round: <N>` line
+and all six headings of the literature role, each saying what could not be
+searched, because `close_round` and `check-argument` require the report as well
+as the handoff. If even that worker fails, record
 `Ruling: Phase 3 stuck — task <L> of <E..> cannot reach a usable handoff — <why> — <cost if wrong: an unfinished explanation>`, then park the explanation and its
 puzzle (`tree_update` to `parked`, each with a note) and move on. A handoff
 that has not appeared after about 15 minutes: check the run with
@@ -312,7 +316,7 @@ markdown; the code checks it:
 - Citations are `[@chunk]` with verbatim quotes; run
   `node ./harness/tools/check-citations.ts <node dir>/workspace/argument.md`
   until exit 0 (see `./harness/skills/roles/deepis.md`).
-- **Predictions** are what the hold-out could contradict, specific enough to
+- **Predictions** (non-empty, code-checked) are what the hold-out could contradict, specific enough to
   fail. The commit that `submit` makes stands as their **preregistration** for
   Phase 5. **Limitations** carry the data requested but not available (§4) and,
   after a cap stop, the plain statement that the loop was truncated at the cap.
@@ -324,8 +328,8 @@ When the argument is edited, close the round:
 `close_round({ nodeId: "<E..>", changed: "substantial", summary: "<what changed in the argument, or why nothing did>" })`
 
 The tool refuses unless every task of the plan has a handoff with a usable
-status, the round's literature handoff and report exist and `argument.md`
-exists. `changed` is `"substantial"` or `"none"`. **Substantial means a different
+status (`DONE` or `DONE_WITH_CONCERNS`), the round's literature handoff has one
+too, the literature report exists and `argument.md` exists. `changed` is `"substantial"` or `"none"`. **Substantial means a different
 mechanism, scope or claim set, not rewording**: adding a number, tightening a
 sentence, reordering or citing one more paper is `none`. Be honest in both
 directions: calling churn "unchanged" stops the loop early on a weak argument;

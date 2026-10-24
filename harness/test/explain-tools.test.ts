@@ -202,6 +202,32 @@ test("open_round refuses any round after STOP (the latch)", async (t) => {
   assert.equal(existsSync(path.join(fx.node, "tasks", "D")), false);
 });
 
+test("a recorded STOP survives a later change of roundCap in the config", async (t) => {
+  const fx = fixture(t, { roundCap: 2 });
+  await runRound(fx, 1, ["A"], "substantial");
+  assert.match(await runRound(fx, 2, ["B"], "substantial"), /STOP \(cap\)/);
+  assert.equal(readRounds(fx.run, "E01")[1]?.stop, "cap", "the reason is stored in the closing record");
+  assert.equal(readRounds(fx.run, "E01")[0]?.stop, undefined, "a round that did not stop stores none");
+
+  config(fx.run, { roundCap: 10 });
+  assert.equal(
+    await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("C") })),
+    "STOP recorded (cap): no more rounds",
+    "raising the cap does not reopen the loop",
+  );
+  config(fx.run, { roundCap: 2 });
+});
+
+test("a two-quiet STOP is stored in its record too, and reproduce still sees the stop after the cap is raised", async (t) => {
+  const fx = fixture(t);
+  await runRound(fx, 1, ["A"], "substantial");
+  await runRound(fx, 2, ["B"], "none");
+  assert.match(await runRound(fx, 3, ["C"], "none"), /STOP \(two-quiet\)/);
+  assert.equal(readRounds(fx.run, "E01")[2]?.stop, "two-quiet");
+  config(fx.run, { roundCap: 99 });
+  assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("D") })), /STOP recorded \(two-quiet\)/);
+});
+
 test("open_round refuses after the cap, which comes from the config", async (t) => {
   const fx = fixture(t, { roundCap: 2 });
   await runRound(fx, 1, ["A"], "substantial");
@@ -278,7 +304,16 @@ test("close_round refuses each condition in turn, then closes", async (t) => {
   write(path.join(fx.node, "tasks", "B", "handoff.md"), "Status: DONE_WITH_CONCERNS\n");
   assert.match(await rejectMessage(close()), /tasks\/lit-01\/handoff\.md is missing/);
 
-  write(path.join(fx.node, "tasks", "lit-01", "handoff.md"), "Status: DONE\n");
+  write(path.join(fx.node, "tasks", "lit-01", "handoff.md"), "Status: BLOCKED\n\ndeepis was down.\n");
+  assert.match(await rejectMessage(close()), /the literature worker is BLOCKED \(tasks\/lit-01\/handoff\.md\)/);
+
+  write(path.join(fx.node, "tasks", "lit-01", "handoff.md"), "The search is done.\n\nStatus: DONE\n");
+  assert.match(await rejectMessage(close()), /tasks\/lit-01\/handoff\.md must start with a "Status:" line/);
+
+  write(path.join(fx.node, "tasks", "lit-01", "handoff.md"), "Status: RECOMMEND_PARK\n");
+  assert.match(await rejectMessage(close()), /tasks\/lit-01\/handoff\.md has the status "RECOMMEND_PARK"/);
+
+  write(path.join(fx.node, "tasks", "lit-01", "handoff.md"), "Status: DONE_WITH_CONCERNS\n\nOne source unread.\n");
   assert.match(await rejectMessage(close()), /workspace\/reports\/01\.md is missing/);
 
   write(path.join(fx.node, "workspace", "reports", "01.md"), "Round: 1\n");

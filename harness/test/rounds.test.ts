@@ -78,6 +78,30 @@ test("stopOf is a latch: a stop in a prefix stands whatever follows", () => {
   assert.deepEqual(stopOf(history("cnc")), { stop: false });
 });
 
+test("stopOf honours a recorded stop, whatever cap the config holds now", () => {
+  const recorded = history("cc").map((record, index) => (index === 1 ? { ...record, stop: "cap" as const } : record));
+  assert.deepEqual(stopOf(recorded, 6), { stop: true, reason: "cap" }, "a raised cap does not un-latch it");
+  assert.deepEqual(stopOf(recorded, 2), { stop: true, reason: "cap" });
+  const quiet = history("cnn").map((record, index) => (index === 2 ? { ...record, stop: "cap" as const } : record));
+  assert.deepEqual(stopOf(quiet, 6), { stop: true, reason: "cap" }, "the recorded reason is the one reported, not a re-derived one");
+  assert.deepEqual(stopOf(history("cc"), 6), { stop: false }, "records without a stop read as before");
+  assert.deepEqual(stopOf(history("cc"), 2), { stop: true, reason: "cap" }, "and still derive it from the cap");
+});
+
+test("rounds.json keeps a recorded stop, and refuses a stop that is not one of the two reasons", (t) => {
+  const run = tempDir(t);
+  const [one, two] = history("cc");
+  appendRound(run, "E01", one!, 2);
+  appendRound(run, "E01", { ...two!, stop: "cap" }, 2);
+  assert.deepEqual(readRounds(run, "E01")[1]?.stop, "cap");
+  assert.equal(Object.hasOwn(readRounds(run, "E01")[0]!, "stop"), false, "an old-style record gains no key");
+  const file = path.join(loopDir(run, "E01"), "rounds.json");
+  writeFileSync(file, JSON.stringify([{ ...one!, stop: "tired" }]));
+  assert.throws(() => readRounds(run, "E01"), /rounds:.*entry 0/);
+  writeFileSync(file, JSON.stringify([one!]));
+  assert.deepEqual(readRounds(run, "E01"), [one], "the old shape still reads");
+});
+
 test("parsePlan accepts a two-task plan", () => {
   const plan = parsePlan(
     [

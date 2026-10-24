@@ -1258,6 +1258,14 @@ test("the Phase 3 skill says an unlinked registry number warns and dead ends are
   assert.doesNotMatch(skill, /is not a dead end; keep it/);
 });
 
+test("the Phase 3 skill: the terminal literature worker writes a valid report, and the close/Predictions rules match the code", () => {
+  const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
+  assert.match(skill, /For a \*\*literature\*\* task \(`lit-<NN>`\) that closing worker must also write a valid `workspace\/reports\/<NN>\.md`: a `Round: <N>` line and all six headings of the literature role/);
+  assert.match(skill, /because `close_round` and `check-argument` require the report as well as the handoff/);
+  assert.match(skill, /the round's literature handoff has one too, the literature report exists and `argument\.md` exists/);
+  assert.match(skill, /\*\*Predictions\*\* \(non-empty, code-checked\)/);
+});
+
 test("the assets task keeps earlier variables across rounds, in one language", () => {
   const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
   assert.match(skill, /reads the existing assets script first and keeps every earlier variable and table fragment/);
