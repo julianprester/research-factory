@@ -11,7 +11,7 @@
 // handoffs, a literature report, `argument.md`, the registry and assets, the review and
 // the revision); the container is a fake `Exec` and the citation runner a stub, so no
 // model, Docker or `deepis` is involved. The workers' files stay untracked between owner calls, as in a
-// real run: `owner().call` records `git status` and HEAD around every tool and asserts a tool commits only its own paths and adds no
+// real run until `close_round` commits the round's `workspace/` and `tasks/` (design §4): `owner().call` records `git status` and HEAD around every tool and asserts a tool commits only its own paths (and, for `close_round`, pending files under the node's `workspace/` and `tasks/`) and adds no
 // dirty path, and the tree operations (`tree_*`, `submit`) are the sweeps that take the pending files.
 // Helpers are shared with explain-tools.test.ts through explain-fixture.ts.
 import assert from "node:assert/strict";
@@ -102,9 +102,25 @@ function owner(t: TestContext, run: string): Owner {
       self.committed =
         headAfter === headBefore ? [] : git(run, "diff", "--name-only", headBefore, headAfter).split("\n").filter((line) => line !== "").sort();
       if (!SWEEPS.has(name)) {
-        // A tool that commits its own paths leaves the workers' pending files exactly as they were: no new
-        // dirty path, and none swept into its commit. (Its own files are written and committed within the call.)
-        assert.deepEqual(dirty(run), dirtyBefore, `${name}: the pending set is identical before and after`);
+        // A tool that commits its own paths adds no dirty path. Only `close_round` takes pending files (the
+        // node's `workspace/` and `tasks/`, design §4); every other tool leaves the pending set exactly as it was
+        // and commits none of it. (A tool's own files are written and committed within the call.)
+        const pendingBefore = dirtyBefore.map((line) => line.slice(3));
+        const taken = pendingBefore.filter((file) => self.committed.includes(file));
+        if (name === "close_round") {
+          assert.ok(taken.length > 0, "close_round takes the round's pending files");
+          assert.ok(
+            taken.every((file) => /\/(workspace|tasks)\//.test(file)),
+            `close_round takes only workspace/ and tasks/ files: ${taken.join(", ")}`,
+          );
+        } else {
+          assert.deepEqual(taken, [], `${name} commits none of the pending files`);
+        }
+        assert.deepEqual(
+          dirty(run),
+          dirtyBefore.filter((line) => !taken.includes(line.slice(3))),
+          `${name}: the pending set shrinks by exactly what it committed, and gains nothing`,
+        );
       }
       return answer.content.map((part) => part.text).join("\n");
     },
@@ -201,12 +217,16 @@ test("the Phase 3 chain runs end to end", async (t) => {
   assert.match(closed1, /round 1 closed/);
   assert.match(closed1, /continue/);
   assert.equal(subjects(run)[0], "[P3:verdict] E01 round 01 (substantial)");
+  const pendingFiles = pending.map((line) => line.slice(3));
   assert.deepEqual(
     tools.committed,
-    [`${loop}/rounds.json`, `${base}/rounds/01/verdict.md`],
-    "the verdict commit holds verdict.md and rounds.json, not the argument or the handoffs",
+    [`${loop}/rounds.json`, `${base}/rounds/01/verdict.md`, ...pendingFiles].sort(),
+    "the verdict commit holds verdict.md, rounds.json and the round's results, reports, handoffs and argument (design §4)",
   );
-  assert.deepEqual(dirty(run), pending, "the workers' files are still untracked: only a tree operation sweeps them");
+  assert.ok(tools.committed.includes(`${base}/workspace/argument.md`), "the argument as it stood at the verdict");
+  assert.ok(tools.committed.includes(`${base}/workspace/scripts/A_01.R`), "the scripts");
+  assert.ok(tools.committed.includes(`${base}/tasks/A/handoff.md`), "the handoffs");
+  assert.deepEqual(dirty(run), [], "close_round leaves the tree clean: the round's files are in its commit");
 
   // The loop has not stopped, so neither reproduce nor submit is open to the owner.
   assert.match(await rejectMessage(tools.call("submit", { nodeId: "E01" })), /gate "STOP".*no STOP is recorded/s);
@@ -271,7 +291,6 @@ test("the Phase 3 chain runs end to end", async (t) => {
   assert.equal(record.ok, true);
   assert.equal(subjects(run)[0], "[P3:reproduce] E01");
   assert.deepEqual(tools.committed, [`${loop}/reproduction.json`], "the reproduction commit holds the record alone");
-  assert.ok(dirty(run).some((line) => line.endsWith("workspace/scripts/A_01.R")), "the scripts are still pending");
 
   // 9. A finding with no ruling is refused. A script edited after the reproduction invalidates it: reproduce again.
   assert.match(await rejectMessage(tools.call("submit", { nodeId: "E01" })), /gate "revision".*F1/s, "a finding with no ruling");
@@ -289,8 +308,8 @@ test("the Phase 3 chain runs end to end", async (t) => {
   const submitted = await tools.call("submit", { nodeId: "E01", note: "the account is settled" });
   assert.match(submitted, /submitted E01: now ready in Phase 4/);
   const sha = git(run, "rev-parse", "--short", "HEAD").trim();
-  assert.ok(tools.committed.includes(`${base}/workspace/scripts/A_01.R`), "the submit commit is the tree sweep: it takes the pending scripts");
-  assert.ok(tools.committed.includes(`${base}/workspace/argument.md`), "and the argument");
+  assert.ok(tools.committed.includes(`${base}/workspace/scripts/A_01.R`), "the submit commit is the tree sweep: it takes the script edited after the last verdict");
+  assert.ok(tools.committed.includes(`${base}/workspace/reviews/report.md`), "and the review");
   assert.ok(submitted.includes(sha), `the reply names the commit ${sha}`);
   assert.deepEqual([findNode(run, "E01").phase, findNode(run, "E01").status], [4, "ready"]);
   clean(run, "submit");

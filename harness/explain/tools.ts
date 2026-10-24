@@ -21,6 +21,9 @@
 // cannot be claimed without an edit. It writes `verdict.md`, appends the record
 // and returns the stop decision. The verdict is written before the record, so a
 // crash between them leaves the round open and the close can simply be repeated.
+// The verdict commit also takes the node's `workspace/` and `tasks/` (design §4: each
+// set of results, each report and each verdict is a commit), so the history can be
+// rebuilt round by round; it never takes `.analysis/` or `analysis-data/`.
 //
 // **`archiveScript`** is how an analysis is dropped (design §6.2): the script,
 // its registry file and its log move to `workspace/archive/<stem>/` with a README
@@ -336,6 +339,10 @@ export async function closeRound(runDir: string, input: CloseRoundInput): Promis
     [
       runRelative(runDir, node, `rounds/${name}/verdict.md`),
       path.relative(runDir, path.join(loopDir(runDir, node.id), "rounds.json")).split(path.sep).join("/"),
+      // The round's results, reports, handoffs and argument (design §4): one commit per verdict. Never
+      // `.analysis/` or `analysis-data/`, which live at the run's root and are not the node's.
+      runRelative(runDir, node, "workspace"),
+      runRelative(runDir, node, "tasks"),
     ],
     ACTOR,
     `[P3:verdict] ${node.id} round ${name} (${input.changed})`,

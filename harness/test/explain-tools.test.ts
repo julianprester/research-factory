@@ -564,6 +564,40 @@ test("close_round commits the verdict and rounds.json and leaves the tree clean"
   assert.ok(lastFiles(fx.run).includes("M\towners/phase-3/loop/E01/rounds.json"));
 });
 
+test("close_round's verdict commit holds the node's workspace/ and tasks/, and never .analysis/ or analysis-data/ (design §4)", async (t) => {
+  const fx = fixture(t);
+  await openRound(fx.run, { nodeId: "E01", plan: plan("A") });
+  // Nothing hides the run-level scratch from git, so a sweeping commit would take it.
+  write(path.join(fx.run, ".gitignore"), "");
+  write(path.join(fx.run, ".analysis", "repro", "scratch.txt"), "scratch");
+  write(path.join(fx.run, "analysis-data", "exploration", "a.csv"), "a,1\n");
+  // The workers' files, deliberately not settled: they are pending until close_round.
+  write(path.join(fx.node, "tasks", "A", "handoff.md"), "Status: DONE\n");
+  write(path.join(fx.node, "tasks", "lit-01", "handoff.md"), "Status: DONE\n");
+  write(path.join(fx.node, "workspace", "reports", "01.md"), "Round: 1\n");
+  write(path.join(fx.node, "workspace", "argument.md"), ARGUMENT("v1"));
+  write(path.join(fx.node, "workspace", "scripts", "A_01.R"), "x <- 1\n");
+  write(path.join(fx.node, "workspace", "output", "numbers", "A_01.csv"), REGISTRY);
+  await closeRound(fx.run, { nodeId: "E01", changed: "substantial", summary: "s" });
+
+  const base = `${NODE_BASE}`;
+  assert.equal(subjects(fx.run)[0], "[P3:verdict] E01 round 01 (substantial)");
+  assert.deepEqual(
+    lastFiles(fx.run),
+    [
+      "A\towners/phase-3/loop/E01/rounds.json",
+      `A\t${base}/rounds/01/verdict.md`,
+      `A\t${base}/tasks/A/handoff.md`,
+      `A\t${base}/tasks/lit-01/handoff.md`,
+      `A\t${base}/workspace/argument.md`,
+      `A\t${base}/workspace/output/numbers/A_01.csv`,
+      `A\t${base}/workspace/reports/01.md`,
+      `A\t${base}/workspace/scripts/A_01.R`,
+    ].sort(),
+  );
+  assert.equal(git(fx.run, "status", "--porcelain", "-uall").split("\n").filter((line) => line !== "" && !line.endsWith(".gitignore")).sort().join("|"), "?? .analysis/repro/scratch.txt|?? analysis-data/exploration/a.csv");
+});
+
 test("archive_script commits the move, removals included, and leaves the tree clean", async (t) => {
   const fx = fixture(t);
   withScript(fx);
