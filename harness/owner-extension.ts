@@ -10,6 +10,7 @@
 import * as path from "node:path";
 import { Type } from "typebox";
 
+import { archiveScript, closeRound, openRound, type ArchiveScriptInput, type CloseRoundInput, type OpenRoundInput } from "./explain/tools.ts";
 import { ownerMayWrite } from "./guard.ts";
 import {
   checkDuplicates,
@@ -81,6 +82,28 @@ const PromoteParams = Type.Object({
   note: Type.Optional(Type.String({ description: "Why this one: recorded in the commit message, not on the node" })),
 });
 
+const OpenRoundParams = Type.Object({
+  nodeId: Type.String({ description: "The explanation node, e.g. E01" }),
+  plan: Type.String({
+    description:
+      "The round's plan, markdown: a `## Questions` section and a `## Tasks` section with one `### Task <L>: <aim>` heading per task, <L> a capital letter never used before in this node",
+  }),
+});
+
+const CloseRoundParams = Type.Object({
+  nodeId: Type.String({ description: "The explanation node, e.g. E01" }),
+  changed: Type.Union([Type.Literal("substantial"), Type.Literal("none")], {
+    description: '"substantial" if the theoretical argument changed substantially this round (it must differ from the last round\'s), otherwise "none"',
+  }),
+  summary: Type.String({ description: "What changed in the argument, or why nothing did; it becomes the round's verdict" }),
+});
+
+const ArchiveScriptParams = Type.Object({
+  nodeId: Type.String({ description: "The explanation node, e.g. E01" }),
+  script: Type.String({ description: "The script file name in workspace/scripts, e.g. A_01.R" }),
+  reason: Type.String({ description: "Why this analysis is dropped; recorded in archive/<stem>/README.md" }),
+});
+
 interface TreeListInput {
   phase?: number;
   status?: string;
@@ -125,6 +148,12 @@ function actor(phase: number): string {
 function requirePhase2(tool: string): void {
   const phase = ownerPhase();
   if (phase !== 2) throw new Error(`Not your phase: ${tool} is a phase-2 tool and you own P${phase}`);
+}
+
+/** The explanation-loop tools are Phase 3's alone. */
+function requirePhase3(tool: string): void {
+  const phase = ownerPhase();
+  if (phase !== 3) throw new Error(`Not your phase: ${tool} is a phase-3 tool and you own P${phase}`);
 }
 
 function refuseNotYourPhase(nodePhase: number, phase: number): Error {
@@ -263,6 +292,42 @@ export default function ownerExtension(pi: PiLike): void {
     async execute(_toolCallId: string, params: PromoteInput) {
       requirePhase2("promote");
       return result(await promote(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "open_round",
+    label: "Open a round",
+    description:
+      "Open the next round of an explanation node from your plan. The plan needs `## Questions` and `## Tasks` sections, each task a `### Task <L>: <aim>` heading with a capital letter never used in this node before. The tool writes rounds/NN/plan.md, creates tasks/<L>/ for each letter, and on round 1 snapshots the puzzle and its Phase 3 must-check list into the workspace. It refuses while the previous round is open, after the cap, and after a recorded STOP.",
+    parameters: OpenRoundParams,
+    async execute(_toolCallId: string, params: OpenRoundInput) {
+      requirePhase3("open_round");
+      return result(await openRound(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "close_round",
+    label: "Close a round",
+    description:
+      "Close the open round with your verdict. Refuses unless every task of the plan has a handoff whose first line is a Status other than BLOCKED, the round's literature handoff and report exist, and workspace/argument.md exists; round 1 cannot be \"none\", and \"substantial\" needs an argument that differs from the previous round's. Writes rounds/NN/verdict.md, records the round and reports whether the loop continues or STOPs (two consecutive \"none\" rounds, or the round cap).",
+    parameters: CloseRoundParams,
+    async execute(_toolCallId: string, params: CloseRoundInput) {
+      requirePhase3("close_round");
+      return result(await closeRound(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "archive_script",
+    label: "Archive a script",
+    description:
+      "Drop an analysis: move workspace/scripts/<script> and its output/numbers/<stem>.csv and output/logs/<stem>.txt into workspace/archive/<stem>/ with a README holding your reason. Refuses an empty reason and any script or output file that argument.md links to.",
+    parameters: ArchiveScriptParams,
+    async execute(_toolCallId: string, params: ArchiveScriptInput) {
+      requirePhase3("archive_script");
+      return result(await archiveScript(runDir(), params));
     },
   });
 
