@@ -25,6 +25,7 @@ import {
   setExecForTests,
   submit,
 } from "../explain/tools.ts";
+import ownerExtension from "../owner-extension.ts";
 import { ownerMayWrite } from "../guard.ts";
 import { createChild, updateNode } from "../tree.ts";
 import {
@@ -1311,4 +1312,110 @@ test("tree_create refuses an explanation under a puzzle that is not in Phase 3",
   const phase3 = captureTools(t, fx.run, 3);
   const made = await phase3.get("tree_create")!.execute("c", { parentId: "P01", title: "Second take" });
   assert.match(made.content[0]!.text, /created E02 explanation 3 ready/);
+});
+
+// ---------------------------------------------------------------------------
+// The owner never reads the dataset or the hold-out (phases 3 and 4)
+// ---------------------------------------------------------------------------
+
+type GuardEvent = { toolName: string; input: Record<string, unknown> };
+
+/** The owner extension's `tool_call` guard, as an owner session of `phase` sees it: returns the block, if any. */
+function ownerGuard(t: TestContext, run: string, phase: number): (toolName: string, input: Record<string, unknown>) => { block?: boolean; reason?: string } | undefined {
+  const saved = { run: process.env.CTC_RUN_DIR, phase: process.env.CTC_PHASE };
+  process.env.CTC_RUN_DIR = run;
+  process.env.CTC_PHASE = String(phase);
+  t.after(() => {
+    for (const [name, value] of [["CTC_RUN_DIR", saved.run], ["CTC_PHASE", saved.phase]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  let handler: ((event: GuardEvent) => { block?: boolean; reason?: string } | undefined) | undefined;
+  ownerExtension({
+    registerTool() {
+      /* the tools are tested elsewhere */
+    },
+    on(event: string, callback: typeof handler) {
+      if (event === "tool_call") handler = callback;
+    },
+  });
+  assert.ok(handler !== undefined, "the owner extension registers a tool_call guard");
+  return (toolName, input) => handler!({ toolName, input });
+}
+
+function datasetOf(fx: Fixture): string {
+  return (JSON.parse(readFileSync(path.join(fx.run, "node.json"), "utf8")) as { dataset: string }).dataset;
+}
+
+test("a phase-3 owner's read or bash of the dataset is refused, whatever the spelling of the hold-out", (t) => {
+  const fx = fixture(t);
+  const dataset = datasetOf(fx);
+  write(path.join(dataset, "handbook", "x.md"), "x");
+  const guard = ownerGuard(t, fx.run, 3);
+  const blocked = (toolName: string, input: Record<string, unknown>) => guard(toolName, input)?.block === true;
+
+  assert.equal(blocked("read", { path: path.join(dataset, "handbook", "x.md") }), true, "a read under the dataset root");
+  assert.equal(blocked("read", { path: path.join(dataset, "a.csv") }), true);
+  assert.equal(blocked("bash", { command: `cat ${path.join(dataset, "x")}` }), true, "a bash command naming the dataset root");
+  assert.equal(blocked("bash", { command: `ls ${dataset}` }), true);
+  for (const spelling of ["holdout", "hold-out", "hold_out", "hold out", "HOLDOUT"]) {
+    assert.equal(blocked("read", { path: path.join(fx.run, "prep", "Z01-profile", "workspace", "split", `${spelling}.txt`) }), true, `read of ${spelling}`);
+    assert.equal(blocked("bash", { command: `cat split/${spelling}.csv` }), true, `bash on ${spelling}`);
+  }
+  assert.match(guard("read", { path: path.join(dataset, "a.csv") })?.reason ?? "", /dataset root/);
+  assert.match(guard("bash", { command: "cat holdout.csv" })?.reason ?? "", /hold-out/);
+});
+
+test("a phase-3 owner can still read its own files and run the tools the skill names", (t) => {
+  const fx = fixture(t);
+  const guard = ownerGuard(t, fx.run, 3);
+  const allowed = (toolName: string, input: Record<string, unknown>) => guard(toolName, input) === undefined;
+  const repo = path.resolve(import.meta.dirname, "..", "..");
+
+  for (const file of [
+    path.join(fx.run, "owners", "phase-3", "ledger.md"),
+    path.join(fx.node, "tasks", "A", "handoff.md"),
+    path.join(fx.node, "workspace", "output", "numbers", "A_01.csv"),
+    path.join(fx.node, "workspace", "argument.md"),
+    path.join(fx.puzzle, "workspace", "puzzle.md"),
+    path.join(repo, "harness", "skills", "roles", "explain-analysis.md"),
+  ]) {
+    assert.equal(allowed("read", { path: file }), true, `read ${file}`);
+  }
+  for (const command of [
+    `node ${repo}/harness/tools/check-argument.ts ${fx.node}`,
+    `node ${repo}/harness/tools/check-argument.ts ${fx.node} --report`,
+    `node ${repo}/harness/tools/check-citations.ts ${fx.node}/workspace/argument.md`,
+    'deepis search "organisational control in rule documents"',
+    `cat ${fx.node}/tasks/A/handoff.md`,
+    `find ${fx.run} -type d -name 'E01-*'`,
+    `ls ${fx.node}/workspace/output/numbers`,
+    "git status --porcelain",
+  ]) {
+    assert.equal(allowed("bash", { command }), true, command);
+  }
+});
+
+test("the dataset and hold-out guard applies to phase 4 owners too, and not to owners of phases 0 to 2", (t) => {
+  const fx = fixture(t);
+  const dataset = datasetOf(fx);
+  const reads = [{ toolName: "read", input: { path: path.join(dataset, "a.csv") } }, { toolName: "bash", input: { command: `head ${dataset}/a.csv` } }, { toolName: "read", input: { path: "split/holdout.txt" } }];
+  const guard4 = ownerGuard(t, fx.run, 4);
+  for (const call of reads) assert.equal(guard4(call.toolName, call.input)?.block, true, `phase 4: ${JSON.stringify(call)}`);
+  for (const phase of [0, 1, 2]) {
+    const guard = ownerGuard(t, fx.run, phase);
+    for (const call of reads) assert.equal(guard(call.toolName, call.input), undefined, `phase ${phase}: ${JSON.stringify(call)}`);
+  }
+});
+
+test("a phase-3 owner's guard fails closed when the run's dataset cannot be read, and still guards writes", (t) => {
+  const fx = fixture(t);
+  const guard = ownerGuard(t, fx.run, 3);
+  rmSync(path.join(fx.run, "node.json"));
+  assert.equal(guard("read", { path: path.join(fx.node, "workspace", "argument.md") })?.block, true);
+  assert.equal(guard("bash", { command: "ls" })?.block, true);
+  // write/edit are unchanged: the write guard still decides on its own.
+  assert.equal(guard("write", { path: path.join(fx.run, "owners", "phase-3", "ledger.md") }), undefined);
+  assert.equal(guard("write", { path: path.join(fx.node, "workspace", "scripts", "A_01.R") })?.block, true);
 });

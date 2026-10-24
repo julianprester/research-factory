@@ -1246,6 +1246,11 @@ test("the Phase 3 skill states the letter rule, brief-first folders and the roun
   assert.match(skill, /On round 1 the tool also prepares the exploration split: if it refuses with a message about the split lists, stop and tell the researcher/);
 });
 
+test("the Phase 3 skill tells the owner it never reads the dataset, and the guard refuses it", () => {
+  const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
+  assert.match(skill, /\*\*You never read the dataset:\*\* your `read` and `bash` are refused for any path under the dataset root and for any command that names it or the hold-out in any spelling/);
+});
+
 test("the assets task keeps earlier variables across rounds, in one language", () => {
   const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
   assert.match(skill, /reads the existing assets script first and keeps every earlier variable and table fragment/);

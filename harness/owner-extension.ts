@@ -4,7 +4,9 @@
 // harness/launch.ts's startOwner):
 // CTC_RUN_DIR is the run folder, CTC_PHASE the phase this session owns. Every
 // tool refuses nodes outside that phase, and a `tool_call` guard blocks
-// `write`/`edit` calls outside `owners/phase-<phase>/` and node briefs. The
+// `write`/`edit` calls outside `owners/phase-<phase>/` and node briefs. Owners
+// of Phases 3 and 4 also get `read`/`bash` refused for the dataset and the
+// hold-out (design §9: the owner's Predictions are the Phase 5 preregistration). The
 // environment is read when a tool runs, not at module load, so tests (and
 // reloaded sessions) can set it around the factory call.
 import * as path from "node:path";
@@ -22,7 +24,7 @@ import {
   type ReproduceInput,
   type SubmitInput,
 } from "./explain/tools.ts";
-import { ownerMayWrite } from "./guard.ts";
+import { datasetRefusal, holdoutRefusal, ownerMayWrite } from "./guard.ts";
 import {
   checkDuplicates,
   judgeRound,
@@ -33,11 +35,11 @@ import {
   type PromoteInput,
 } from "./tournament/tools.ts";
 import { readStop, type Decision } from "./tournament/stop.ts";
-import { CHILD_TYPE, createChild, findNode, listNodes, updateNode, type NodeRef } from "./tree.ts";
+import { CHILD_TYPE, createChild, findNode, listNodes, readRun, updateNode, type NodeRef } from "./tree.ts";
 
 interface ToolCallEventLike {
   toolName: string;
-  input?: { path?: unknown } | undefined;
+  input?: { path?: unknown; command?: unknown } | undefined;
 }
 
 interface PiLike {
@@ -158,6 +160,33 @@ function ownerPhase(): number {
   const phase = Number(raw);
   if (!Number.isInteger(phase)) throw new Error(`CTC_PHASE must be an integer, got ${JSON.stringify(raw)}`);
   return phase;
+}
+
+/**
+ * Why a phase-3 or phase-4 owner may not run this `read` or `bash`, or undefined when it may. Design §9
+ * locks the hold-out for Phases 1-4, and the owner writes the Predictions that become the Phase 5
+ * preregistration, so one stray look at the dataset would contaminate them: the owner reads no dataset
+ * file and names no hold-out, exactly as its workers cannot. (The workers read the data; the owner never
+ * does.) Owners of phases 0 to 2 are unaffected. A phase-3/4 owner whose run's dataset cannot be read is
+ * refused every read and bash: the guard has no root to check against, so it fails closed.
+ */
+function dataOrHoldoutRefusal(event: ToolCallEventLike): string | undefined {
+  let phase: number;
+  try {
+    phase = ownerPhase();
+  } catch {
+    return undefined; // an owner session with no phase configured: the write guard already fails closed
+  }
+  if (phase !== 3 && phase !== 4) return undefined;
+  const holdout = holdoutRefusal(event.toolName, event.input);
+  if (holdout !== undefined) return holdout.replace("workers in Phases 1 to 4", "the owner in Phases 3 and 4");
+  let dataset: string;
+  try {
+    dataset = path.resolve(runDir(), readRun(runDir()).dataset);
+  } catch {
+    return `Refusing ${event.toolName}: the run's dataset root cannot be read, so the owner cannot show it is not being read`;
+  }
+  return datasetRefusal(dataset, event.toolName, event.input);
 }
 
 function actor(phase: number): string {
@@ -387,6 +416,10 @@ export default function ownerExtension(pi: PiLike): void {
   });
 
   pi.on("tool_call", (event) => {
+    if (event.toolName === "read" || event.toolName === "bash") {
+      const reason = dataOrHoldoutRefusal(event);
+      return reason === undefined ? undefined : { block: true, reason };
+    }
     if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
     const filePath = event.input?.path;
     if (typeof filePath !== "string" || filePath.length === 0) {

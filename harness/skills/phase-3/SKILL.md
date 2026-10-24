@@ -14,7 +14,10 @@ Phase 3 takes **one promoted puzzle at a time** and produces **one argument**
 rounds: analysis workers run scripts, literature workers then set the results
 against the literature, you read both and edit the argument. You never run an
 analysis, write a script or read the dataset yourself; the workers do the work
-and the code does the counting. Nothing is fetched: the harness collects no data.
+and the code does the counting. **You never read the dataset:** your `read` and
+`bash` are refused for any path under the dataset root and for any command that
+names it or the hold-out in any spelling (so keep the word out of your shell
+commands; your ledger and files are not affected). Nothing is fetched: the harness collects no data.
 
 ## 0. Budget ruling, then resume
 
