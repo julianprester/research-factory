@@ -15,6 +15,8 @@ Write only inside your node folder:
 - `rounds.md` — notes on each round;
 - `handoff.md` — your final handoff.
 
+**Explanation nodes.** If your working directory is a task folder of an explanation node (`…/tasks/<L>/` or `…/tasks/lit-<NN>/`), your handoff is `handoff.md` in that folder, and everything else you write goes to the ABSOLUTE paths your brief names: a relative `workspace/` would land inside the task folder, and `rounds.md` is not used. Your role file says the rest.
+
 Read only the input paths the brief lists, even when they point into another
 node's folder; never browse a node folder the brief does not name. You may also
 read your own node folder — `rounds.md`, `handoff.md` and `workspace/` — even

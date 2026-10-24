@@ -35,14 +35,18 @@ Then resume. Call `tree_list({})` (all phases) and read
 `$CTC_RUN_DIR/owners/phase-3/ledger.md`. Never recreate work:
 
 - A puzzle already `input` with an explanation under it: do not create another.
-  Continue that explanation.
+  Continue that explanation, unless it is already `ready` in Phase 4 (it was
+  submitted): then only close the puzzle input node (§6).
 - `owners/phase-3/loop/<E>/rounds.json` lists the **closed** rounds (the code
   wrote it; you cannot). Read it before anything else. A recorded STOP is final.
   The number of records is the number of closed rounds.
 - `rounds/<NN>/plan.md` in the node exists for round `NN` = closed rounds + 1
   and the round has no `verdict.md`: that round is **open**. Do not call
   `open_round` again (it refuses); read which `tasks/<L>/handoff.md` files exist
-  and carry on from §2.
+  and carry on from §2. If `rounds/<NN>/verdict.md` exists but `rounds.json` has
+  no record for round `NN`, a close was interrupted: call `close_round` again
+  with the same arguments (the tool writes the verdict before the record, so the
+  repeat is safe).
 - `owners/phase-3/loop/<E>/reproduction.json` exists: the end gate (§5) has
   started; `submit` tells you which gate is unmet.
 - Untracked or modified worker files in `git status` are normal: the tools you
@@ -120,9 +124,10 @@ ever used.
 
 **Letters.** A letter is unique across the node's whole life; round 2 continues
 from the next unused letter, upward, never a lower one. There are only 26 for
-all rounds: plan 3–4 per round and count what is left before you plan. Make
-each task one coherent line of analysis (a measure, a model family, a robustness
-battery), 2–4 per round.
+all rounds, so plan **at most 4 lettered tasks per round, the assets task
+included** (2–3 analysis tasks plus the assets task): six rounds then fit in 26
+letters. Count what is left before you plan. Make each task one coherent line of
+analysis (a measure, a model family, a robustness battery).
 
 **The assets task.** `assets.R` or `assets.py` (the manuscript variables and
 fragments, §2 below) is writable only by the task with the **lexicographically
@@ -130,7 +135,14 @@ greatest** letter folder in `tasks/`. So the assets job always gets the **last
 letter** of its round, no other task of that round touches it, and the next
 round's assets job is the new highest letter. Include one assets task every round
 (you cannot know which round will be the last), listing the registry rows it
-should expose as variables.
+should expose as variables. Because the new highest letter owns `assets.*` the
+moment `open_round` creates its folder, an earlier round's assets worker can no
+longer write it. The assets worker of round 2 and later therefore (a) reads the
+existing assets script first and keeps every earlier variable and table
+fragment, because `write_variables` replaces both files, (b) keeps the language
+of the existing assets script (never both `assets.R` and `assets.py`), and (c)
+rewrites that one file; rewriting assets is the one exception to "never
+overwrite". Put these three duties in its brief.
 
 Then call (the plan is the whole markdown text):
 
@@ -152,7 +164,9 @@ sections (the owner may write briefs, `argument.md`, `reviews/revision.md`,
 - **Inputs:** the task's aim from the plan; `<node dir>/workspace/puzzle.md`
   and `<node dir>/workspace/must-check.md`; the pattern's `measure.md` and
   `pattern.md` and Phase 0's `data-character.md` and `glossary.md` at absolute
-  paths; the registry files and scripts it builds on; the `Caveat:` lines. No
+  paths; the registry files and scripts it builds on; the pattern's
+  `<pattern node dir>/handoff.md` (where the `Caveat:` lines you recorded came
+  from; copy each into the brief). No
   dataset path, no hold-out, no other node's files.
 - **Outputs:** scripts `<node dir>/workspace/scripts/<L>_01.R|py`, `<L>_02…`;
   the handoff `<node dir>/tasks/<L>/handoff.md`. For the assets task: only
@@ -180,9 +194,17 @@ after their handoffs are in and after you have archived what the round dropped
 
 When a completion notification arrives, read `tasks/<L>/handoff.md` and act on
 its status line as phase-owner says. `close_round` accepts only `DONE` or
-`DONE_WITH_CONCERNS` for every task of the plan: `BLOCKED` and any `RECOMMEND_*`
-go through the fix loop (resume the same worker with the findings; up to 3, then
-fresh workers) until the worker closes with a status the round can use. A handoff
+`DONE_WITH_CONCERNS` for every task of the plan, you cannot drop a task from the
+plan and you cannot write a handoff yourself. `Status: BLOCKED` (and any
+`RECOMMEND_*`) is not an answer: re-dispatch with the findings as phase-owner's
+fix loop says (resume the same worker up to 3 times, then up to 2 fresh workers
+on a stronger model, with `cwd` the same task folder). If the task still has no
+usable handoff, there is one terminal step: dispatch **one more fresh worker
+whose only job is to close the task** with `Status: DONE_WITH_CONCERNS`, stating
+exactly what could not be done (the round then closes and the gap goes into the
+argument's *Limitations*). If even that worker fails, record
+`Ruling: Phase 3 stuck — task <L> of <E..> cannot reach a usable handoff — <why> — <cost if wrong: an unfinished explanation>`, then park the explanation and its
+puzzle (`tree_update` to `parked`, each with a note) and move on. A handoff
 that has not appeared after about 15 minutes: check the run with
 `subagent({ action: "status", id })`; if it is dead, `resume` it or re-dispatch,
 and record the outcome in the ledger.
@@ -224,11 +246,20 @@ so round 1 is `lit-01`; `close_round` requires exactly this task's handoff and
 - **Definition of Done:** the role file's DoD, copied in.
 
 A second literature worker, when the results split into two bodies of
-literature, is `tasks/lit-<50+NN>` (for example `lit-51`), which writes
-`workspace/reports/<50+NN>.md` with the same `Round: <N>` line (valid while
-`roundCap` < 50). Dispatch with `cwd: <node dir>/tasks/lit-<NN>`:
+literature, has the folder `tasks/lit-<NN2>` with `NN2` = 50 + the round number
+(round 1 is `lit-51`, round 2 `lit-52`; valid while `roundCap` < 50). It writes
+`workspace/reports/<NN2>.md` (the guard accepts exactly that name for that
+folder), and its report's `Round:` line is still the **real round number** (`1`,
+not `51`). Write its `brief.md` in that folder; its Outputs name
+`<node dir>/workspace/reports/<NN2>.md` and `<node dir>/tasks/lit-<NN2>/handoff.md`,
+and its Inputs add the first worker's focus so the two do not overlap.
+`close_round` needs only `lit-<NN>`; the second report is checked by
+`check-argument` like any other.
 
-`subagent({ agent: "ctc-worker", model: "<worker model from your kickoff>", async: true, cwd: "<node dir>/tasks/lit-<NN>", task: "Read brief.md and carry it out." })`
+Dispatch each with `cwd` its own task folder, for example round 1's two:
+
+`subagent({ agent: "ctc-worker", model: "<worker model from your kickoff>", async: true, cwd: "<node dir>/tasks/lit-01", task: "Read brief.md and carry it out." })`
+`subagent({ agent: "ctc-worker", model: "<worker model from your kickoff>", async: true, cwd: "<node dir>/tasks/lit-51", task: "Read brief.md and carry it out." })`
 
 Then read the report(s).
 
@@ -325,8 +356,10 @@ After STOP, in this order. Ledger line before each tool call.
    `_variables.yml` and `variables_sources.csv`, each literature report's
    `Round:` line and six headings, and `check-citations` on the argument and
    every report. Fix `argument.md` yourself; for a worker's file (a script, a
-   report, `assets.R`) resume that task's worker with the problem lines, or
-   dispatch a fresh `ctc-worker` with `cwd` the same task folder. The check
+   report) resume that task's worker with the problem lines, or dispatch a fresh
+   `ctc-worker` with `cwd` the same task folder. For `assets.R|py` that is only
+   the **highest-lettered** task's worker (the guard refuses any earlier assets
+   task); give it the duties of §2 (keep earlier variables and the language). The check
    calls `deepis`, so it is slow.
 2. **Reproduce.** `reproduce({ nodeId: "<E..>" })` re-runs every script in
    order into an empty output in the container and compares the registry (exact
@@ -350,9 +383,13 @@ After STOP, in this order. Ledger line before each tool call.
    `subagent({ agent: "ctc-reviewer", model: "<worker model from your kickoff>", async: true, cwd: "<node dir>", task: "Read brief-review.md and write workspace/reviews/report.md" })`
    When it finishes, run `check-argument.ts <node dir> --report`: it also
    requires the report to parse and each check to open with `Result:`. If the
-   report fails, re-dispatch the reviewer up to 2 times, then once with a fresh
-   `ctc-reviewer`; then park (`review-failed: <why>`) and say why. A report
-   closed `Status: BLOCKED` is not accepted by `submit`.
+   report fails, or it closes `Status: BLOCKED` (an aborted review, which
+   `submit` does not accept), re-dispatch the reviewer with the problem lines or
+   the blocking reason: up to 2 times, then once with a fresh `ctc-reviewer`;
+   then park (`review-failed: <why>`) and say why. **This cap (2 re-dispatches
+   plus 1 fresh reviewer) overrides phase-owner's fix-loop cap here**, as in
+   Phase 2, because phase-owner's cap is written for a worker's handoff, not a
+   review file; workers' handoffs keep phase-owner's cap (§2).
 4. **One revision.** Read the report. Make a single revision pass on
    `argument.md`, and write `<node dir>/workspace/reviews/revision.md` with one
    line per finding: `F<n>: taken — <what changed>` or

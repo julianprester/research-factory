@@ -3,12 +3,23 @@
 // on, and the paths the prose sends workers to (a role that names a tool that
 // does not exist, or a role file nobody briefs, is a broken dispatch).
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { DEFAULT_CONFIG } from "../factory.ts";
+import {
+  explanationWorkerMayWrite,
+  holdoutRefusal,
+  ownerMayWrite,
+  ownersRefusal,
+  reviewerMayWrite,
+  reviewsRefusal,
+  siblingRefusal,
+  taskOf,
+} from "../guard.ts";
 import { checkRevision, parseReport } from "../tools/check-argument.ts";
 import { parseReview, reviewProblems } from "../tools/merge-reviews.ts";
 
@@ -1043,14 +1054,14 @@ test("the argument and report headings the roles name are the ones check-argumen
   for (const heading of reviewHeadings) {
     assert.ok(read("harness/skills/roles/explain-review.md").includes(heading), `explain-review.md names ${heading}`);
   }
-  // Every `## ` heading a role file shows in a format block is one check-argument knows.
+  // Every `## ` heading a role file shows is one check-argument knows, or one of the file's own structural headings.
   const known = new Set([...argumentHeadings, ...reportHeadings, ...reviewHeadings]);
   for (const role of ["explain-literature", "explain-review"]) {
-    for (const match of read(`harness/skills/roles/${role}.md`).matchAll(/^## .+$/gm)) {
-      const heading = match[0];
-      if (/^## (Definition of Done|Citations|Rules|Never|\d+\.)/.test(heading)) continue;
-      if (/^## \d/.test(heading)) continue;
-      assert.ok(known.has(heading) || /^## [A-Z]/.test(heading), `${role}.md heading ${heading}`);
+    const headings = [...read(`harness/skills/roles/${role}.md`).matchAll(/^## .+$/gm)].map((m) => m[0]);
+    assert.ok(headings.length > 6, `${role}.md has headings`);
+    for (const heading of headings) {
+      if (heading === "## Definition of Done" || /^## \d+\. /.test(heading)) continue;
+      assert.ok(known.has(heading), `${role}.md heading ${heading} is not one check-argument.ts checks`);
     }
   }
 });
@@ -1164,4 +1175,128 @@ test("explain-review's worked example is a report the code accepts, and its find
   assert.deepEqual(checkRevision(parsed.findings, revision), []);
   assert.deepEqual(checkRevision(parsed.findings, "F1: taken — x\n"), ["revision.md has no ruling for F2", "revision.md has no ruling for F3"]);
   assert.match(normalise(read("harness/skills/phase-3/SKILL.md")), /F<n>: taken — <what changed>.*F<n>: overruled — <reason>/);
+});
+
+test("the agent files carry the explanation-node overrides", () => {
+  const worker = normalise(read("harness/agents/ctc-worker.md"));
+  assert.match(worker, /working directory is a task folder of an explanation node \(`…\/tasks\/<L>\/` or `…\/tasks\/lit-<NN>\/`\)/);
+  assert.match(worker, /your handoff is `handoff\.md` in that folder/);
+  assert.match(worker, /ABSOLUTE paths your brief names/);
+  assert.match(worker, /a relative `workspace\/` would land inside the task folder, and `rounds\.md` is not used/);
+  const reviewer = normalise(read("harness/agents/ctc-reviewer.md"));
+  assert.match(reviewer, /working directory is an explanation node/);
+  assert.match(reviewer, /overrides the Phase 2 wording here \(one puzzle, `a\.md`\/`b\.md`, `Phase 3 must check:`\)/);
+  assert.match(reviewer, /`workspace\/reviews\/report\.md`/);
+});
+
+test("the reviewer's Status line is bare, and the code rejects anything else", () => {
+  const role = normalise(read("harness/skills/roles/explain-review.md"));
+  assert.match(role, /is \*\*bare\*\*: exactly `Status: DONE`, `Status: DONE_WITH_CONCERNS` or `Status: BLOCKED`, nothing after it/);
+  assert.match(role, /what you could not check goes in the relevant check section/i);
+  const example = read("harness/skills/roles/explain-review.md");
+  const body = example.slice(example.indexOf("BEGIN REPORT EXAMPLE\n") + "BEGIN REPORT EXAMPLE\n".length, example.indexOf("END REPORT EXAMPLE")).trim();
+  assert.ok(parseReport(body) !== null, "the bare form parses");
+  const withStatus = (status: string): string => body.replace(/Status: DONE$/, status);
+  for (const bad of ["Status: DONE_WITH_CONCERNS (could not check)", "Status: BLOCKED — deepis down", "**Status: DONE**"]) {
+    assert.equal(parseReport(withStatus(bad)), null, `${bad} is malformed`);
+  }
+  for (const good of ["Status: DONE_WITH_CONCERNS", "Status: BLOCKED"]) {
+    assert.ok(parseReport(withStatus(good)) !== null, `${good} parses`);
+  }
+});
+
+test("the Phase 3 skill closes a round that cannot finish, and ranks the two caps", () => {
+  const body = normalise(read("harness/skills/phase-3/SKILL.md"));
+  assert.match(body, /you cannot drop a task from the plan and you cannot write a handoff yourself/);
+  assert.match(body, /one more fresh worker whose only job is to close the task\*\* with `Status: DONE_WITH_CONCERNS`, stating exactly what could not be done/);
+  assert.match(body, /park the explanation and its puzzle/);
+  assert.match(body, /This cap \(2 re-dispatches plus 1 fresh reviewer\) overrides phase-owner's fix-loop cap here/);
+  assert.match(body, /closes `Status: BLOCKED`/);
+  assert.match(body, /at most 4 lettered tasks per round, the assets task included/);
+  assert.match(body, /call `close_round` again with the same arguments/);
+  assert.match(body, /already `ready` in Phase 4 \(it was submitted\): then only close the puzzle input node/);
+  assert.match(body, /`tasks\/lit-<NN2>` with `NN2` = 50 \+ the round number/);
+  assert.match(body, /still the \*\*real round number\*\*/);
+  assert.match(body, /cwd: "<node dir>\/tasks\/lit-51"/);
+  assert.match(body, /pattern's `<pattern node dir>\/handoff\.md`/);
+});
+
+test("the assets task keeps earlier variables across rounds, in one language", () => {
+  const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
+  assert.match(skill, /reads the existing assets script first and keeps every earlier variable and table fragment/);
+  assert.match(skill, /keeps the language of the existing assets script \(never both `assets\.R` and `assets\.py`\)/);
+  assert.match(skill, /the one exception to "never overwrite"/);
+  assert.match(skill, /only the \*\*highest-lettered\*\* task's worker/);
+  const role = normalise(read("harness/skills/roles/explain-analysis.md"));
+  assert.match(role, /read it first, \*\*keep its language\*\*/);
+  assert.match(role, /Rewriting it is the one exception to never-overwrite/);
+  assert.match(role, /the assets script instead ends with `write_variables\(\)`, need not call `save_numbers`/);
+  assert.match(normalise(read("harness/skills/roles/explain-literature.md")), /refuses any bash command that contains the word `hold-out`[^.]*a `deepis` query included/);
+  assert.match(normalise(read("harness/skills/roles/explain-literature.md")), /`lit-51` writes `reports\/51\.md`/);
+});
+
+test("the paths the Phase 3 skill and roles name pass the guards", (t) => {
+  const run = mkdtempSync(path.join(tmpdir(), "ctc-skill-guards-"));
+  t.after(() => rmSync(run, { recursive: true, force: true }));
+  const puzzle = path.join(run, "patterns", "T01-p", "puzzles", "P01-q");
+  const node = path.join(puzzle, "explanations", "E01-x");
+  const pattern = path.join(run, "patterns", "T01-p");
+  mkdirSync(path.join(node, "workspace", "scripts"), { recursive: true });
+  for (const task of ["A", "B", "C", "D", "lit-01", "lit-51"]) mkdirSync(path.join(node, "tasks", task), { recursive: true });
+  mkdirSync(path.join(pattern, "workspace"), { recursive: true });
+  for (const file of [path.join(pattern, "workspace", "pattern.md"), path.join(pattern, "workspace", "measure.md"), path.join(pattern, "handoff.md")]) {
+    writeFileSync(file, "x\n");
+  }
+  const w = (task: string, file: string): boolean => explanationWorkerMayWrite(node, task, path.join(node, ...file.split("/")));
+
+  // The analysis workers: own scripts and handoff by absolute path; the assets script only for the greatest letter.
+  assert.equal(taskOf(node, path.join(node, "tasks", "B")), "B");
+  assert.ok(w("B", "workspace/scripts/B_01.R") && w("B", "workspace/scripts/B_02.py") && w("B", "tasks/B/handoff.md"));
+  assert.ok(!w("B", "workspace/scripts/A_01.R") && !w("B", "workspace/scripts/assets.R") && !w("B", "handoff.md"));
+  assert.ok(!w("B", "workspace/argument.md") && !w("B", "workspace/output/numbers/B_01.csv") && !w("B", "workspace/archive/B_01/README.md"));
+  assert.ok(!w("B", "workspace/data-requests.md") && !w("B", "workspace/reviews/revision.md") && !w("B", "workspace/scripts/helper.R"));
+  assert.ok(w("D", "workspace/scripts/assets.R") && w("D", "workspace/scripts/assets.py") && !w("C", "workspace/scripts/assets.R"));
+  mkdirSync(path.join(node, "tasks", "E"));
+  assert.ok(w("E", "workspace/scripts/assets.R") && !w("D", "workspace/scripts/assets.R"), "a later round's higher letter takes the assets script");
+  // A relative workspace/ lands inside the task folder: allowed by the guard, so the skill must (and does) say absolute paths.
+  assert.ok(explanationWorkerMayWrite(node, "A", path.join(node, "tasks", "A", "workspace", "scripts", "A_01.R")));
+  assert.match(read("harness/skills/phase-3/SKILL.md"), /use absolute paths/i);
+  // The literature workers: their numbered report and handoff only; the second worker's `lit-51` writes reports/51.md.
+  assert.ok(w("lit-01", "workspace/reports/01.md") && w("lit-01", "tasks/lit-01/handoff.md") && !w("lit-01", "workspace/reports/51.md"));
+  assert.ok(w("lit-51", "workspace/reports/51.md") && !w("lit-51", "workspace/reports/01.md") && !w("lit-01", "workspace/scripts/A_01.R"));
+  // The owner's own files, and not the code's.
+  const o = (file: string): boolean => ownerMayWrite(run, 3, path.join(node, ...file.split("/")));
+  for (const file of ["workspace/argument.md", "workspace/reviews/revision.md", "workspace/data-requests.md", "brief-review.md", "tasks/A/brief.md", "tasks/lit-01/brief.md", "tasks/lit-51/brief.md"]) {
+    assert.ok(o(file), `the owner writes ${file}`);
+  }
+  for (const file of ["rounds/01/plan.md", "rounds/01/verdict.md", "tasks/A/handoff.md", "workspace/reviews/report.md", "workspace/scripts/A_01.R"]) {
+    assert.ok(!o(file), `the owner does not write ${file}`);
+  }
+  assert.ok(!ownerMayWrite(run, 3, path.join(run, "owners", "phase-3", "loop", "E01", "rounds.json")));
+  assert.ok(ownerMayWrite(run, 3, path.join(run, "owners", "phase-3", "ledger.md")));
+  // The reviewer: report.md only, and its check-citations call is allowed.
+  assert.ok(reviewerMayWrite(node, path.join(node, "workspace", "reviews", "report.md")));
+  assert.ok(!reviewerMayWrite(node, path.join(node, "workspace", "reviews", "revision.md")));
+  assert.equal(
+    reviewsRefusal("bash", { command: "node ./harness/tools/check-citations.ts workspace/reviews/report.md" }),
+    undefined,
+  );
+  assert.notEqual(reviewsRefusal("read", { path: path.join(node, "workspace", "reviews", "report.md") }), undefined);
+  assert.notEqual(ownersRefusal("read", { path: path.join(run, "owners", "phase-3", "ledger.md") }), undefined);
+  // The paths the briefs name are readable by workers: the pattern's files, the node's own, and other tasks' handoffs.
+  for (const file of [
+    path.join(pattern, "workspace", "pattern.md"),
+    path.join(pattern, "workspace", "measure.md"),
+    path.join(pattern, "handoff.md"),
+    path.join(node, "workspace", "puzzle.md"),
+    path.join(node, "workspace", "must-check.md"),
+    path.join(node, "tasks", "A", "handoff.md"),
+    path.join(node, "rounds", "01", "plan.md"),
+  ]) {
+    assert.equal(siblingRefusal(node, "read", { path: file }), undefined, `${file} is readable`);
+    assert.equal(siblingRefusal(node, "read", { path: file }, { allowDerived: false }), undefined, `${file} is readable by the reviewer`);
+  }
+  // The hold-out word is refused in any bash command, a deepis query included: the literature role warns about it.
+  assert.notEqual(holdoutRefusal("bash", { command: 'timeout 60 deepis search "hold-out validation" -n 10' }), undefined);
+  assert.equal(holdoutRefusal("bash", { command: 'timeout 60 deepis search "validation sample" -n 10' }), undefined);
 });

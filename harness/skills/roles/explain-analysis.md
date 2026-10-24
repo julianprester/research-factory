@@ -85,7 +85,8 @@ script or a handoff that the registry does not hold.
 
 While a script is still failing or unread you may fix it. Once it has run and
 you have read its numbers, **never overwrite it**: add a new script (the next
-number). Earlier tasks' scripts are not yours and cannot be written.
+number). Earlier tasks' scripts are not yours and cannot be written. The one
+exception is the assets script, which the assets task rewrites (§5).
 
 ## 4. The handoff
 
@@ -107,9 +108,16 @@ Write `<node dir>/tasks/<L>/handoff.md`:
 
 ## 5. The assets script
 
-Only when the brief says you are the assets task (the greatest-lettered task):
-write `<node dir>/workspace/scripts/assets.R` **or** `assets.py`, one file in
-one language, and run `run_analysis({ script: "assets.R" })`. It is the only
+Only when the brief says you are the assets task (the greatest-lettered task;
+an earlier round's assets task can no longer write it). **If an assets script
+already exists** (`assets.R` or `assets.py` in `workspace/scripts/`), read it
+first, **keep its language** (never create both `assets.R` and `assets.py`),
+and keep every variable and table fragment it already makes: edit the file to
+add yours. Rewriting it is the one exception to never-overwrite, because
+`write_variables` replaces both `_variables.yml` and `variables_sources.csv`, so
+a variable you drop disappears. Otherwise write
+`<node dir>/workspace/scripts/assets.R` **or** `assets.py`, one file in
+one language. Then run `run_analysis({ script: "assets.R" })`. It is the only
 place numbers are formatted and it fits no models. It reads rows with
 `reg("<section>", "<key>")` and, for every manuscript variable the brief lists,
 calls `put_var(variable, value, source, rendered)`:
@@ -127,7 +135,9 @@ Table fragments (`.qmd` with a caption and `{#id}`) and figures go into
 ## Definition of Done
 
 Every script in your task asks one question, sets its seed, ends with
-`save_numbers("<stem>")` and exited 0 through `run_analysis`; every number the
+`save_numbers("<stem>")` and exited 0 through `run_analysis` (the assets script
+instead ends with `write_variables()`, need not call `save_numbers`, and keeps
+every earlier variable and the existing language); every number the
 handoff mentions is in a registry row; nothing outside your letter's scripts and
 your task folder was written; the handoff opens with `Status:` and `Summary:`
 and has `Dead ends:` and `Data requests:` headings; nothing was fetched, and no

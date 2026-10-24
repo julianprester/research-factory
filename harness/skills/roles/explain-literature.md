@@ -43,9 +43,18 @@ and so do you:
 
 Say plainly when a search found none, and which searches.
 
+The guard refuses any bash command that contains the word `hold-out` (or
+`holdout`, `hold_out`, `hold out`) in any case, a `deepis` query included. If a
+search needs that phrase, reword it (for example *reserved sample* or
+*validation data*); never try to spell around the guard with a path.
+
 ## 2. The report
 
-Write `<node dir>/workspace/reports/<NN>.md`. Its first lines, before the first
+Write `<node dir>/workspace/reports/<NN>.md`, where `<NN>` is your task folder's
+number (`lit-<NN>`): the round number, two digits, for the first literature worker
+of a round, or 50 + the round number for the second (`lit-51` writes
+`reports/51.md`). The `Round:` line is always the **real round number**, never
+`51`. Its first lines, before the first
 `## ` heading (an optional `# Title` may come first), are:
 
 ```
