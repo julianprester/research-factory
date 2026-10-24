@@ -9,13 +9,10 @@
 // plant symlinks where workers and scripts can write (`tasks/`, `workspace/output/`,
 // `workspace/archive/`), because a host-side read or move must never follow one.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import type { Exec } from "../analysis/run.ts";
 import { workspaceHash } from "../explain/reproduce.ts";
 import { loopDir, readRounds } from "../explain/rounds.ts";
 import {
@@ -29,121 +26,33 @@ import {
   submit,
 } from "../explain/tools.ts";
 import { ownerMayWrite } from "../guard.ts";
-import ownerExtension from "../owner-extension.ts";
-import { createChild, initRun, updateNode } from "../tree.ts";
+import { createChild, updateNode } from "../tree.ts";
+import {
+  ARGUMENT,
+  ARGUMENT_FULL,
+  NODE_BASE,
+  REGISTRY,
+  REPORT_FULL,
+  REVISION,
+  captureTools,
+  config,
+  fakeContainer,
+  finish,
+  fixture,
+  git,
+  inWorkspace,
+  lastFiles,
+  plan,
+  rejectMessage,
+  review,
+  runRound,
+  settle,
+  subjects,
+  tempDir,
+  write,
+  type Fixture,
+} from "./explain-fixture.ts";
 
-function tempDir(t: TestContext): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "ctc-explain-tools-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
-}
-
-function write(file: string, text: string): void {
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, text);
-}
-
-async function rejectMessage(promise: Promise<unknown>): Promise<string> {
-  try {
-    await promise;
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
-  assert.fail("expected the call to be refused");
-}
-
-function git(run: string, ...args: string[]): string {
-  return execFileSync("git", ["-c", "user.name=test", "-c", "user.email=test@ctc.local", ...args], { cwd: run, encoding: "utf8" });
-}
-
-/** Commit whatever the fixture or a "worker" wrote, so the next tool's own commits are what `status` shows. */
-function settle(run: string): void {
-  git(run, "add", "-A");
-  git(run, "commit", "--allow-empty", "-q", "-m", "fixture");
-}
-
-const subjects = (run: string) => git(run, "log", "--format=%s").trim().split("\n");
-const lastFiles = (run: string) => git(run, "show", "--name-status", "--format=", "HEAD").trim().split("\n").sort();
-
-function plan(...letters: string[]): string {
-  return [
-    "# Plan",
-    "",
-    "## Questions",
-    "- Does the ordering hold at depth 2?",
-    "",
-    "## Tasks",
-    "",
-    ...letters.flatMap((letter) => [`### Task ${letter}: aim of ${letter}`, "Definition of done: a registry.", ""]),
-  ].join("\n");
-}
-
-const MERGED = [
-  "# Merged review",
-  "",
-  "## Findings",
-  "",
-  "None.",
-  "",
-  "## Phase 3 must check",
-  "",
-  "- whether the handbook's silence is a rule or an omission",
-  "",
-  "## Something after",
-  "",
-  "- not a must-check question",
-  "",
-].join("\n");
-
-interface Fixture {
-  run: string;
-  /** The explanation node `E01`. */
-  node: string;
-  puzzle: string;
-}
-
-function config(run: string, extra: Record<string, unknown> = {}): void {
-  write(path.join(run, "config.json"), JSON.stringify({ model: "m", phases: {}, ...extra }));
-}
-
-/** A run with a puzzle in Phase 3 (with its snapshot sources) and an explanation node under it. */
-function fixture(t: TestContext, extra: Record<string, unknown> = {}): Fixture {
-  const run = tempDir(t);
-  // A real dataset and split lists, so `reproduce` can mount an exploration split.
-  const dataset = tempDir(t);
-  write(path.join(dataset, "a.csv"), "a,1\n");
-  initRun(run, dataset, "interest");
-  write(path.join(run, "prep", "Z01-profile", "workspace", "split", "exploration.txt"), "a.csv\n");
-  write(path.join(run, "prep", "Z01-profile", "workspace", "split", "holdout.txt"), "");
-  createChild(run, "D01", "Etiquette", "owner-p1");
-  const puzzle = createChild(run, "T01", "Rules by example", "owner-p2");
-  updateNode(run, puzzle.id, { phase: 3 }, "owner-p2");
-  write(path.join(puzzle.dir, "workspace", "puzzle.md"), "# The puzzle\nA card.\n");
-  write(path.join(puzzle.dir, "workspace", "reviews", "merged.md"), MERGED);
-  const node = createChild(run, puzzle.id, "Argument", "owner-p3");
-  config(run, extra);
-  settle(run);
-  return { run, node: node.dir, puzzle: puzzle.dir };
-}
-
-const ARGUMENT = (version: string) => `# Argument\n\nVersion ${version}.\n`;
-
-/** Everything `close_round` needs for round `round` with the given task letters, all passing. */
-function finish(fx: Fixture, round: number, letters: string[], argument?: string): void {
-  const nn = String(round).padStart(2, "0");
-  for (const letter of letters) write(path.join(fx.node, "tasks", letter, "handoff.md"), `Status: DONE\n\nDone ${letter}.\n`);
-  write(path.join(fx.node, "tasks", `lit-${nn}`, "handoff.md"), "Status: DONE\n");
-  write(path.join(fx.node, "workspace", "reports", `${nn}.md`), "Round: 1\n");
-  if (argument !== undefined) write(path.join(fx.node, "workspace", "argument.md"), argument);
-  settle(fx.run);
-}
-
-/** Open and close a round, `changed` being "substantial" or "none". */
-async function runRound(fx: Fixture, round: number, letters: string[], changed: "substantial" | "none"): Promise<string> {
-  await openRound(fx.run, { nodeId: "E01", plan: plan(...letters) });
-  finish(fx, round, letters, changed === "substantial" ? ARGUMENT(`v${round}`) : undefined);
-  return closeRound(fx.run, { nodeId: "E01", changed, summary: `round ${round} ${changed}` });
-}
 
 // ---------------------------------------------------------------------------
 // open_round
@@ -563,34 +472,6 @@ test("archive_script refuses an argument.md it cannot read as a regular file", a
 // The registrations, and what the owner's write tool may not touch
 // ---------------------------------------------------------------------------
 
-interface CapturedTool {
-  name: string;
-  execute(toolCallId: string, params: Record<string, unknown>): Promise<{ content: { type: string; text: string }[] }>;
-}
-
-function captureTools(t: TestContext, run: string, phase: number): Map<string, CapturedTool> {
-  const savedRun = process.env.CTC_RUN_DIR;
-  const savedPhase = process.env.CTC_PHASE;
-  process.env.CTC_RUN_DIR = run;
-  process.env.CTC_PHASE = String(phase);
-  t.after(() => {
-    if (savedRun === undefined) delete process.env.CTC_RUN_DIR;
-    else process.env.CTC_RUN_DIR = savedRun;
-    if (savedPhase === undefined) delete process.env.CTC_PHASE;
-    else process.env.CTC_PHASE = savedPhase;
-  });
-  const tools = new Map<string, CapturedTool>();
-  ownerExtension({
-    registerTool(tool: CapturedTool) {
-      tools.set(tool.name, tool);
-    },
-    on() {
-      /* the write guard is checked through ownerMayWrite below */
-    },
-  });
-  return tools;
-}
-
 test("the owner extension registers the three tools for Phase 3 only", async (t) => {
   const fx = fixture(t);
   const phase3 = captureTools(t, fx.run, 3);
@@ -777,84 +658,6 @@ test("close_round at round 6 with roundCap 6: two quiet rounds report two-quiet,
 // reproduce and submit (design §9, §10)
 // ---------------------------------------------------------------------------
 
-const NODE_BASE = "patterns/T01-etiquette/puzzles/P01-rules-by-example/explanations/E01-argument";
-const REGISTRY = "name,value,note\nn,1234,\n";
-
-const ARGUMENT_FULL = [
-  "Contribution: theoretical",
-  "",
-  "## Explanation",
-  "Etiquette rules travel by example rather than by statement.",
-  "",
-  "## Mechanism and scope",
-  "Readers copy the first example they meet.",
-  "",
-  "## What would count against it",
-  "Rules stated in full on the opening pages.",
-  "",
-  "## Alternatives considered",
-  "The timing account is ruled out.",
-  "",
-  "## Evidence",
-  "The sample is [1234](output/numbers/A_01.csv#n) pages long.",
-  "The literature is in [report one](reports/01.md).",
-  "",
-  "## Limitations",
-  "The snapshot cannot show causality.",
-  "",
-  "## Predictions",
-  "The hold-out sample should show the same ordering.",
-  "",
-].join("\n");
-
-const REPORT_FULL = (round: number) =>
-  [
-    `Round: ${round}`,
-    "",
-    ...[
-      "What the results are",
-      "Literature on these results",
-      "Rival and artifact accounts",
-      "What else should be true",
-      "Measurement precedents",
-      "Implications for the argument",
-    ].flatMap((heading) => [`## ${heading}`, "Two sources were read.", ""]),
-  ].join("\n");
-
-const review = (status = "DONE_WITH_CONCERNS", findings = ["- [F1] [major] Number provenance: no registry row."]) =>
-  [
-    ...["Citation fidelity", "Number provenance", "Overclaiming", "Abductive honesty"].flatMap((heading) => [
-      `## ${heading}`,
-      "Result: ok",
-      "Fine.",
-      "",
-    ]),
-    "## Findings",
-    ...findings,
-    "",
-    `Status: ${status}`,
-    "",
-  ].join("\n");
-
-const REVISION = "F1: taken\n";
-
-/** A fake container: writes the registry `A_01.csv` for `A_01.R`, whatever it is told. */
-function fakeContainer(options: { delayMs?: number; registry?: string; onRun?: (host: string) => void } = {}): { exec: Exec; calls: string[] } {
-  const calls: string[] = [];
-  const exec: Exec = async (args) => {
-    const mount = args.find((arg, at) => args[at - 1] === "-v" && arg.endsWith(":/work/output"));
-    const host = (mount ?? "").slice(0, -":/work/output".length);
-    const script = (args.at(-1) ?? "").replace(/^scripts\//, "");
-    calls.push(script);
-    if (options.delayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, options.delayMs));
-    write(path.join(host, "numbers", `${script.replace(/\.[^.]+$/, "")}.csv`), options.registry ?? REGISTRY);
-    options.onRun?.(host);
-    return { code: 0, stdout: "", stderr: "", timedOut: false };
-  };
-  return { exec, calls };
-}
-
-const inWorkspace = (fx: Fixture, ...parts: string[]) => path.join(fx.node, "workspace", ...parts);
 const recordFile = (fx: Fixture) => path.join(loopDir(fx.run, "E01"), "reproduction.json");
 const readRecord = (fx: Fixture) => JSON.parse(readFileSync(recordFile(fx), "utf8")) as { ok: boolean; workspaceHash: string; mismatches: string[] };
 

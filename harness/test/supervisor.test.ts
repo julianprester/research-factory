@@ -448,3 +448,62 @@ test("a phase-2 tree with an open input node is never done, and closes to done a
   const secondQuiet = decide([closed], "head-2", firstQuiet.memory);
   assert.deepEqual(secondQuiet.actions, [{ kind: "done", waitingForUnconfiguredPhases: {} }]);
 });
+
+test("a phase-3 tree: never-started, then an explanation that runs, then done with phase 4 waiting", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  // A pattern, and a puzzle under it promoted to Phase 3 and waiting for its owner.
+  createChild(run, "D01", "E03 Etiquette", "owner-p1");
+  const puzzle = createChild(run, "T01", "status quo: crowd", "owner-p2");
+  updateNode(run, puzzle.id, { phase: 3, status: "ready" }, "owner-p2");
+  updateNode(run, "T01", { status: "closed" }, "owner-p2");
+
+  const view = (owner: "idle" | "gone" | "working", started = true, phase = 3): PhaseView =>
+    viewPhase(run, phase, owner, { configured: phase !== 4, started, entry: false });
+
+  // A ready puzzle and no owner: start it.
+  assert.deepEqual(view("gone", false).ready, [puzzle.id]);
+  assert.deepEqual(decide([view("gone", false)], "head-1", memory()).actions, [
+    { kind: "start", phase: 3, reason: "never-started" },
+  ]);
+
+  // The owner takes the puzzle as its input and creates the explanation, active, with no node handoff.
+  updateNode(run, puzzle.id, { status: "input" }, "owner-p3");
+  const explanation = createChild(run, puzzle.id, "Argument", "owner-p3");
+  assert.equal(explanation.phase, 3, "an explanation stays in its puzzle's phase");
+  updateNode(run, explanation.id, { status: "active" }, "owner-p3");
+  const running = view("idle");
+  assert.deepEqual(running.inputs, [puzzle.id]);
+  assert.deepEqual(running.running, [explanation.id], "no node-level handoff.md: it is running, not finished");
+  assert.deepEqual(running.finished, []);
+
+  // Not done and not nudged while it runs, however many ticks pass.
+  let state = memory();
+  for (let tick = 0; tick < 5; tick++) {
+    const result = decide([running], "head-1", state);
+    assert.deepEqual(result.actions, [], `tick ${tick}: left alone`);
+    state = result.memory;
+  }
+
+  // A running explanation alone (its puzzle already closed) is work in flight too: still not done.
+  updateNode(run, puzzle.id, { status: "closed" }, "owner-p3");
+  const alone = view("idle");
+  assert.deepEqual([alone.inputs, alone.running], [[], [explanation.id]]);
+  for (let tick = 0; tick < 5; tick++) {
+    const result = decide([alone], "head-1", state);
+    assert.deepEqual(result.actions, [], `tick ${tick}: running work is not done and not nudged`);
+    state = result.memory;
+  }
+
+  // The explanation is submitted to Phase 4 (no skill) and the puzzle closed: two quiet ticks finish the run.
+  updateNode(run, explanation.id, { phase: 4, status: "ready" }, "owner-p3");
+  updateNode(run, puzzle.id, { status: "closed" }, "owner-p3");
+  const phase3 = view("idle");
+  const phase4 = view("idle", false, 4);
+  assert.deepEqual([phase3.ready, phase3.running, phase3.finished, phase3.inputs], [[], [], [], []]);
+  assert.deepEqual(phase4.ready, [explanation.id]);
+  const first = decide([phase3, phase4], "head-2", memory());
+  assert.deepEqual(first.actions, [], "one quiet tick is not done");
+  const second = decide([phase3, phase4], "head-2", first.memory);
+  assert.deepEqual(second.actions, [{ kind: "done", waitingForUnconfiguredPhases: { 4: 1 } }]);
+});
