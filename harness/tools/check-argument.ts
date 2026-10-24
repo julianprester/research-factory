@@ -51,9 +51,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { parseCsv, readRegistry, type Row } from "../explain/reproduce.ts";
+import { ANALYSIS_SCRIPT, parseCsv, readRegistry, type Row } from "../explain/reproduce.ts";
 import { findRunDir } from "../tree.ts";
-import { citationProblems } from "./check-puzzle.ts";
+import { citationProblems, headerValue, maskFences, normaliseHeading, SECTION_HEADING } from "./check-puzzle.ts";
 
 const ARGUMENT_HEADINGS = [
   "## Explanation",
@@ -76,13 +76,11 @@ const REVIEW_HEADINGS = ["## Citation fidelity", "## Number provenance", "## Ove
 /** The four check sections, each of which opens with a `Result:` line. */
 const CHECK_HEADINGS = REVIEW_HEADINGS.slice(0, 4);
 
-/** The analysis script names runScript accepts (as reproduce.ts): `X_nn.R|py` or `assets.R|py`. */
-const SCRIPT_NAME = /^(?:[A-Z]_\d\d|assets)\.(?:R|py)$/;
-const SECTION_HEADING = /^##\s/;
-/** An opening or closing fence: three or more backticks or tildes, indented at most three spaces. */
-const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
-/** A markdown link `[text](target)` with an optional title; the target has no spaces. */
-const LINK = /\[([^\]]*)\]\(\s*([^)\s]*)(?:\s+(?:"[^"]*"|'[^']*'))?\s*\)/g;
+/**
+ * A link reference definition, `[label]: target "optional title"`, as a whole
+ * line (at most three spaces of indent). The target may be in angle brackets.
+ */
+const DEFINITION = /^ {0,3}\[((?:[^\]\\]|\\.)+)\]:[ \t]*(<[^>]*>|\S+)(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/;
 /** A registry source `output/numbers/<file>.csv#<key>`: the file is directly in numbers/. */
 const REGISTRY_SOURCE = /^output\/numbers\/([^/#]+\.csv)#(.*)$/;
 const YAML_VARIABLE = /^([A-Za-z_][A-Za-z0-9_]*): ".*"$/;
@@ -141,7 +139,7 @@ export function parseReport(markdown: string): { findings: ReportFinding[]; stat
 
 /**
  * The problems with the owner's revision of a review: a finding with no
- * `F<n>: taken|overruled` line, and an overruled line with no reason. A taken
+ * `F<n>: taken|overruled` line, and an overruled line whose reason has no letter or digit (`--` is not a reason). A taken
  * line may say nothing more: the change is in the argument, not in this line.
  */
 export function checkRevision(findings: { id: string }[], revision: string): string[] {
@@ -152,7 +150,7 @@ export function checkRevision(findings: { id: string }[], revision: string): str
     if (ruling === null) continue;
     const id = (ruling[1] ?? "").toUpperCase();
     ruled.add(id);
-    if ((ruling[2] ?? "").toLowerCase() === "overruled" && (ruling[3] ?? "").trim() === "") {
+    if ((ruling[2] ?? "").toLowerCase() === "overruled" && !/[\p{L}\p{N}]/u.test(ruling[3] ?? "")) {
       problems.push(`revision.md: ${id} is overruled with no reason`);
     }
   }
@@ -162,15 +160,179 @@ export function checkRevision(findings: { id: string }[], revision: string): str
   return problems;
 }
 
-/** Every markdown link `[text](target)` in `argument.md`, in order; fenced and inline code are not links. */
+/** A link in `argument.md`: where its syntax sits in its line, its text as written and its target. */
+interface Link {
+  index: number;
+  start: number;
+  end: number;
+  text: string;
+  target: string;
+}
+
+/**
+ * Every link in `argument.md`, in order: inline `[text](target "title")`, where
+ * the target may be in angle brackets or hold one level of balanced
+ * parentheses; reference `[text][label]`, collapsed `[text][]` and shortcut
+ * `[label]`, each resolved through a `[label]: target` definition. A definition
+ * line is itself a link, so an unused one into `archive/` is still caught. Fenced
+ * code and code spans are not links; `text` is the text as written. A
+ * destination that does not parse is read up to its balanced `)`, so it is still
+ * checked rather than dropped.
+ */
 export function argumentLinks(markdown: string): { text: string; target: string }[] {
-  const links: { text: string; target: string }[] = [];
-  for (const line of maskFences(markdown)) {
-    for (const match of withoutInlineCode(line).matchAll(LINK)) {
-      links.push({ text: match[1] ?? "", target: (match[2] ?? "").trim() });
+  return scanLinks(maskFences(markdown)).map(({ text, target }) => ({ text, target }));
+}
+
+/** The links in the fence-masked lines; offsets are into each line as written. */
+function scanLinks(lines: string[]): Link[] {
+  const definitions = new Map<string, string>();
+  for (const line of lines) {
+    const definition = DEFINITION.exec(line);
+    if (definition === null) continue;
+    const label = normaliseLabel(definition[1] ?? "");
+    if (!definitions.has(label)) definitions.set(label, unwrap(definition[2] ?? ""));
+  }
+  const links: Link[] = [];
+  lines.forEach((line, index) => {
+    const definition = DEFINITION.exec(line);
+    if (definition !== null) {
+      links.push({ index, start: 0, end: line.length, text: definition[1] ?? "", target: unwrap(definition[2] ?? "") });
+      return;
+    }
+    // Code spans are blanked to spaces of the same length, so every offset is still the line's own.
+    const masked = maskCode(line);
+    let at = 0;
+    while (at < masked.length) {
+      const close = masked[at] === "[" ? closingBracket(masked, at) : -1;
+      if (close < 0) {
+        at += masked[at] === "\\" ? 2 : 1;
+        continue;
+      }
+      const text = line.slice(at + 1, close);
+      if (masked[close + 1] === "(") {
+        const inline = inlineLink(line, masked, close + 1);
+        links.push({ index, start: at, end: inline.end, text, target: inline.target });
+        at++;
+        continue;
+      }
+      const full = masked[close + 1] === "[" ? referenceTarget(masked, close + 1, text, definitions) : undefined;
+      if (full !== undefined) {
+        links.push({ index, start: at, end: full.end, text, target: full.target });
+        at = full.end;
+        continue;
+      }
+      const shortcut = definitions.get(normaliseLabel(text));
+      if (shortcut !== undefined) links.push({ index, start: at, end: close + 1, text, target: shortcut });
+      at++;
+    }
+  });
+  return links;
+}
+
+/** The index of the `]` that closes the `[` at `open`, honouring backslash escapes; -1 when it never closes. */
+function closingBracket(s: string, open: number): number {
+  let depth = 0;
+  for (let k = open; k < s.length; k++) {
+    if (s[k] === "\\") {
+      k++;
+      continue;
+    }
+    if (s[k] === "[") depth++;
+    else if (s[k] === "]" && --depth === 0) return k;
+  }
+  return -1;
+}
+
+/** The target of a full (`[text][label]`) or collapsed (`[text][]`) reference whose label is defined. */
+function referenceTarget(
+  masked: string,
+  open: number,
+  text: string,
+  definitions: Map<string, string>,
+): { target: string; end: number } | undefined {
+  const close = masked.indexOf("]", open + 1);
+  if (close < 0) return undefined;
+  const label = masked.slice(open + 1, close);
+  if (label.includes("[")) return undefined;
+  const target = definitions.get(normaliseLabel(label.trim() === "" ? text : label));
+  return target === undefined ? undefined : { target, end: close + 1 };
+}
+
+/** The target and end of an inline link whose `(` is at `open`. A destination that does not parse is read up to its balanced `)`. */
+function inlineLink(line: string, masked: string, open: number): { target: string; end: number } {
+  const parsed = parseDestination(masked, open);
+  if (parsed !== undefined) return { target: line.slice(parsed.from, parsed.to), end: parsed.end };
+  let depth = 0;
+  for (let k = open; k < masked.length; k++) {
+    if (masked[k] === "(") depth++;
+    else if (masked[k] === ")" && --depth === 0) {
+      return { target: line.slice(open + 1, k).trim().replace(/^<|>$/g, ""), end: k + 1 };
     }
   }
-  return links;
+  return { target: line.slice(open + 1).trim().replace(/^<|>$/g, ""), end: masked.length };
+}
+
+/** The target span of `(target "title")` whose `(` is at `open`, or undefined when the text is not that shape. */
+function parseDestination(s: string, open: number): { from: number; to: number; end: number } | undefined {
+  let k = skipBlanks(s, open + 1);
+  let from: number;
+  let to: number;
+  if (s[k] === "<") {
+    const close = s.indexOf(">", k + 1);
+    if (close < 0) return undefined;
+    from = k + 1;
+    to = close;
+    k = close + 1;
+  } else {
+    from = k;
+    let depth = 0;
+    while (k < s.length) {
+      const c = s[k] ?? "";
+      if (c === "\\") {
+        k += 2;
+        continue;
+      }
+      if (c === "(") depth++;
+      else if (c === ")") {
+        if (depth === 0) break;
+        depth--;
+      } else if (/\s/.test(c)) break;
+      k++;
+    }
+    to = Math.min(k, s.length);
+  }
+  k = skipBlanks(s, k);
+  const opener = s[k];
+  if (opener === '"' || opener === "'" || opener === "(") {
+    const close = s.indexOf(opener === "(" ? ")" : opener, k + 1);
+    if (close < 0) return undefined;
+    k = skipBlanks(s, close + 1);
+  }
+  return s[k] === ")" ? { from, to, end: k + 1 } : undefined;
+}
+
+function skipBlanks(s: string, k: number): number {
+  let at = k;
+  while (at < s.length && (s[at] === " " || s[at] === "\t")) at++;
+  return at;
+}
+
+/** A reference label as CommonMark matches it: case-folded, with runs of whitespace as one space. */
+function normaliseLabel(label: string): string {
+  return label.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/** A definition's target without its angle brackets: `<a b.md>` is `a b.md`. */
+function unwrap(target: string): string {
+  return target.startsWith("<") && target.endsWith(">") ? target.slice(1, -1) : target;
+}
+
+function percentDecoded(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
 }
 
 /**
@@ -381,10 +543,16 @@ function linkProblem(
   const key = hash < 0 ? undefined : target.slice(hash + 1);
   // An anchor within argument.md has no file to resolve.
   if (filePart === "") return undefined;
-  if (filePart.startsWith("/")) return `workspace/argument.md link is an absolute path: ${target}`;
+  if (filePart.startsWith("/") || percentDecoded(filePart).startsWith("/")) {
+    return `workspace/argument.md link is an absolute path: ${target}`;
+  }
   const rel = path.posix.normalize(filePart);
-  if (rel === ".." || rel.startsWith("../")) return `workspace/argument.md link leaves workspace/: ${target}`;
-  if (rel === "archive" || rel.startsWith("archive/")) return `workspace/argument.md links into archive/: ${target}`;
+  // A percent-encoded form names the same file, so it is checked as well.
+  const forms = [rel, path.posix.normalize(percentDecoded(filePart))];
+  if (forms.some((form) => form === ".." || form.startsWith("../"))) {
+    return `workspace/argument.md link leaves workspace/: ${target}`;
+  }
+  if (forms.some((form) => /^archive(?:\/|$)/i.test(form))) return `workspace/argument.md links into archive/: ${target}`;
 
   const found = locate(node, `workspace/${rel}`);
   if (found.kind === "refused") return found.problem;
@@ -414,7 +582,7 @@ function scriptProblems(dir: string, prefix: string): string[] {
     if (entry.isSymbolicLink()) problems.push(`${shown} is a link: refusing to read it`);
     else if (entry.isDirectory()) problems.push(...scriptProblems(path.join(dir, entry.name), rel));
     else if (!entry.isFile()) problems.push(`${shown} is not a regular file`);
-    else if (!SCRIPT_NAME.test(rel)) problems.push(`${shown} is not a script name (X_nn.R, X_nn.py, assets.R or assets.py)`);
+    else if (!ANALYSIS_SCRIPT.test(rel)) problems.push(`${shown} is not a script name (X_nn.R, X_nn.py, assets.R or assets.py)`);
   }
   return problems;
 }
@@ -546,12 +714,15 @@ function reviewProblems(node: string, citations: (file: string) => string[]): st
 /** Bare numerals in argument.md's prose (see the header for what is not prose). */
 function bareNumbers(lines: string[]): string[] {
   const warnings: string[] = [];
+  const links = scanLinks(lines);
   lines.forEach((raw, index) => {
     if (/^\s*#{1,6}\s/.test(raw)) return;
-    const prose = withoutInlineCode(raw)
-      .replace(LINK, " ")
-      .replace(/https?:\/\/\S+/g, " ")
-      .replace(/^\s*(?:[-*+]|\d+[.)])\s+/, " ");
+    let prose = maskCode(raw);
+    for (const link of links) {
+      if (link.index !== index) continue;
+      prose = prose.slice(0, link.start) + " ".repeat(link.end - link.start) + prose.slice(link.end);
+    }
+    prose = prose.replace(/https?:\/\/\S+/g, " ").replace(/^\s*(?:[-*+]|\d+[.)])\s+/, " ");
     for (const match of prose.matchAll(BARE_NUMBER)) {
       const token = match[0];
       if (/^\d{4}$/.test(token) && Number(token) >= 1900 && Number(token) <= 2100) continue;
@@ -561,53 +732,9 @@ function bareNumbers(lines: string[]): string[] {
   return warnings;
 }
 
-function withoutInlineCode(line: string): string {
-  return line.replace(/`+[^`]*`+/g, " ");
-}
-
-/**
- * The lines with fenced code blanked, keeping every other line at its index, so
- * a line number is still a line number. A fence closes on the same character, at
- * least as long; an unclosed fence runs to the end of the file, and therefore
- * fails closed (the headings after it read as missing).
- */
-function maskFences(markdown: string): string[] {
-  const masked: string[] = [];
-  let open: { char: string; length: number } | undefined;
-  for (const line of markdown.split(/\r?\n/)) {
-    const marker = FENCE.exec(line)?.[1];
-    if (open === undefined) {
-      if (marker === undefined) {
-        masked.push(line);
-        continue;
-      }
-      open = { char: marker.charAt(0), length: marker.length };
-      masked.push("");
-      continue;
-    }
-    if (marker !== undefined && marker.charAt(0) === open.char && marker.length >= open.length) open = undefined;
-    masked.push("");
-  }
-  return masked;
-}
-
-/**
- * `## findings`, `## FINDINGS`, `## Findings:` and `## **Findings**` are the same
- * heading: the text after the hashes is lower-cased with emphasis, a trailing
- * colon or full stop and stray whitespace removed (as `check-puzzle.ts`).
- */
-function normaliseHeading(text: string): string {
-  let body = text.replace(/^##\s+/, "");
-  let previous: string;
-  do {
-    previous = body;
-    body = body
-      .replace(/^[*_`\s]+/, "")
-      .replace(/[*_`\s]+$/, "")
-      .replace(/[:.,;!?]+\s*$/, "")
-      .trim();
-  } while (body !== previous);
-  return body.toLowerCase().replace(/\s+/g, " ");
+/** The line with its code spans blanked to spaces of the same length, so offsets into the line still hold. */
+function maskCode(line: string): string {
+  return line.replace(/(`+)[\s\S]*?\1(?!`)/g, (span) => " ".repeat(span.length));
 }
 
 /** The body lines of each known section, by canonical heading; a repeated heading keeps both bodies. Unknown sections are ignored. */
@@ -624,18 +751,6 @@ function sectionsOf(lines: string[], headings: string[]): Map<string, string[]> 
     if (current !== undefined) found.get(current)?.push(line);
   }
   return found;
-}
-
-/** The value of a `<key>:` line in the preamble (before the first `## ` section), or undefined. */
-function headerValue(lines: string[], key: string): string | undefined {
-  const end = lines.findIndex((line) => SECTION_HEADING.test(line));
-  const preamble = end < 0 ? lines : lines.slice(0, end);
-  const pattern = new RegExp(`^[\\s>*_+-]*${key}[\\s*_]*:[\\s*_]*(.*)$`, "i");
-  for (const raw of preamble) {
-    const match = pattern.exec(raw.trim());
-    if (match !== null) return (match[1] ?? "").trim();
-  }
-  return undefined;
 }
 
 function byName(a: fs.Dirent, b: fs.Dirent): number {

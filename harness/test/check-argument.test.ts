@@ -622,3 +622,133 @@ test("the default citation runner passes on prose with no citations", (t) => {
   assert.deepEqual(checkArgument(fixture.run, fixture.nodeDir).problems, []);
   assert.equal(readFileSync(argumentFile(fixture.nodeDir), "utf8").includes("[@"), false);
 });
+
+test("argumentLinks reads an angle-bracket target, including spaces", () => {
+  assert.deepEqual(argumentLinks("[a](<archive/my file.md>)"), [{ text: "a", target: "archive/my file.md" }]);
+});
+
+test("argumentLinks keeps one level of balanced parentheses in a target", () => {
+  assert.deepEqual(argumentLinks("[a](foo_(1).md) and [b](https://x/a_(b))"), [
+    { text: "a", target: "foo_(1).md" },
+    { text: "b", target: "https://x/a_(b)" },
+  ]);
+});
+
+test("argumentLinks keeps brackets in link text, and the text as written", () => {
+  assert.deepEqual(argumentLinks("[a [b] c](x.md) and [`code` text](y.md)"), [
+    { text: "a [b] c", target: "x.md" },
+    { text: "`code` text", target: "y.md" },
+  ]);
+});
+
+test("argumentLinks resolves reference links through their definitions; a definition is a link", () => {
+  const markdown = [
+    "[full][one] and [collapsed][] and [short].",
+    "",
+    "[one]: archive/one.md",
+    "[collapsed]: <output/numbers/12_model1.csv#m1>",
+    '[short]: output/tables/t.md "a title"',
+    "[unused]: archive/unused.md",
+  ].join("\n");
+  assert.deepEqual(argumentLinks(markdown), [
+    { text: "full", target: "archive/one.md" },
+    { text: "collapsed", target: "output/numbers/12_model1.csv#m1" },
+    { text: "short", target: "output/tables/t.md" },
+    { text: "one", target: "archive/one.md" },
+    { text: "collapsed", target: "output/numbers/12_model1.csv#m1" },
+    { text: "short", target: "output/tables/t.md" },
+    { text: "unused", target: "archive/unused.md" },
+  ]);
+});
+
+test("argumentLinks drops a link title from the target, whatever its quotes", () => {
+  assert.deepEqual(argumentLinks(`[a](x.md "title") [b](y.md 'title') [c](z.md (title)) [d](<w v.md> "t")`), [
+    { text: "a", target: "x.md" },
+    { text: "b", target: "y.md" },
+    { text: "c", target: "z.md" },
+    { text: "d", target: "w v.md" },
+  ]);
+});
+
+test("argumentLinks reads an unbracketed destination with a space as far as it goes, so it is still checked", () => {
+  assert.deepEqual(argumentLinks("[a](archive/old file.md)"), [{ text: "a", target: "archive/old file.md" }]);
+});
+
+test("an archive/ link is reported however it is written: reference style, angle brackets, a title, a percent escape", (t) => {
+  const fixture = nodeFixture(t);
+  for (const name of ["old.md", "my file.md", "pct.md"]) write(path.join(fixture.nodeDir, "workspace", "archive", name), "dropped\n");
+  write(
+    argumentFile(fixture.nodeDir),
+    `${argument()}Refs: [old][o], [mine](<archive/my file.md>), [p](archive/pct%2Emd "t").\n\n[o]: archive/old.md\n`,
+  );
+  assert.deepEqual(problemsOf(fixture), [
+    "workspace/argument.md links into archive/: archive/old.md",
+    "workspace/argument.md links into archive/: archive/my file.md",
+    "workspace/argument.md links into archive/: archive/pct%2Emd",
+  ]);
+});
+
+test("an unused reference definition into archive/ is still a problem", (t) => {
+  const fixture = nodeFixture(t);
+  write(path.join(fixture.nodeDir, "workspace", "archive", "gone.md"), "dropped\n");
+  write(argumentFile(fixture.nodeDir), `${argument()}\n[unused]: archive/gone.md\n`);
+  assert.deepEqual(problemsOf(fixture), ["workspace/argument.md links into archive/: archive/gone.md"]);
+});
+
+test("a link target with balanced parentheses resolves to its file, and a missing one is named in full", (t) => {
+  const fixture = nodeFixture(t);
+  write(path.join(fixture.nodeDir, "workspace", "output", "tables", "t_(1).md"), "table\n");
+  write(
+    argumentFile(fixture.nodeDir),
+    `${argument()}Table: [a [b] c](output/tables/t_(1).md) and [u](output/tables/u_(2).md).\n`,
+  );
+  assert.deepEqual(problemsOf(fixture), ["workspace/argument.md links to a missing file: output/tables/u_(2).md"]);
+});
+
+test("a reference link to a missing file is reported by the file it names", (t) => {
+  const fixture = nodeFixture(t);
+  write(argumentFile(fixture.nodeDir), `${argument()}Table: [x][r].\n\n[r]: output/tables/nope.md\n`);
+  assert.deepEqual(problemsOf(fixture), ["workspace/argument.md links to a missing file: output/tables/nope.md"]);
+});
+
+test("a registry link written with angle brackets, a title or reference style resolves", (t) => {
+  const fixture = nodeFixture(t);
+  write(
+    argumentFile(fixture.nodeDir),
+    `${argument()}Forms: [.401](<output/numbers/12_model1.csv#m1>), [.401](output/numbers/12_model1.csv#m1 "value"), [.401][r].\n\n[r]: output/numbers/12_model1.csv#m1\n`,
+  );
+  assert.deepEqual(problemsOf(fixture), []);
+});
+
+test("a registry key written with angle brackets is still counted: a repeated key is a problem", (t) => {
+  const fixture = nodeFixture(t);
+  write(path.join(fixture.nodeDir, "workspace", "output", "numbers", "12_model1.csv"), "name,value,note\nm1,0.401,\nm1,0.5,\n");
+  write(argumentFile(fixture.nodeDir), `${argument()}Again: [.401](<output/numbers/12_model1.csv#m1>).\n`);
+  assert.deepEqual(problemsOf(fixture), [
+    'workspace/argument.md\'s link output/numbers/12_model1.csv#m1 names "m1", which appears 2 times in 12_model1.csv',
+    "variable m1_or_lspec has no row whose source resolves to exactly one registry row",
+  ]);
+});
+
+test("bare numbers in reference-style link text and in reference definitions do not warn", (t) => {
+  const fixture = nodeFixture(t);
+  write(
+    argumentFile(fixture.nodeDir),
+    `${argument()}See [0.402][r] and [.403](output/numbers/12_model1.csv#m1).\n\n[r]: output/numbers/12_model1.csv#m1\n`,
+  );
+  assert.deepEqual(checkArgument(fixture.run, fixture.nodeDir, NO_CITATIONS), { problems: [], warnings: [] });
+});
+
+test("an overruled ruling needs a reason with a letter or digit in it", () => {
+  const findings = [{ id: "F1" }];
+  assert.deepEqual(checkRevision(findings, "F1: overruled —\n"), ["revision.md: F1 is overruled with no reason"]);
+  assert.deepEqual(checkRevision(findings, "F1: overruled --\n"), ["revision.md: F1 is overruled with no reason"]);
+  assert.deepEqual(checkRevision(findings, "F1: overruled — -\n"), ["revision.md: F1 is overruled with no reason"]);
+  assert.deepEqual(checkRevision(findings, "F1: overruled — 2 is a count, not a claim\n"), []);
+});
+
+test("F1 and F10 are different findings: a ruling for one does not rule the other", () => {
+  const findings = [{ id: "F1" }, { id: "F10" }];
+  assert.deepEqual(checkRevision(findings, "F10: taken — changed\n"), ["revision.md has no ruling for F1"]);
+  assert.deepEqual(checkRevision(findings, "F1: taken — changed\n"), ["revision.md has no ruling for F10"]);
+});

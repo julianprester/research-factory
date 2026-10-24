@@ -73,7 +73,7 @@ const ARTIFACT = /artefact|artifact/i;
  * heading: the text after the hashes is lower-cased with emphasis, a trailing
  * colon/full stop and stray whitespace removed. Same rule as `merge-reviews.ts`.
  */
-function normaliseHeading(text: string): string {
+export function normaliseHeading(text: string): string {
   let body = text.replace(/^##\s+/, "");
   let previous: string;
   do {
@@ -90,7 +90,7 @@ function normaliseHeading(text: string): string {
 const HEADING_BY_NAME = new Map(HEADINGS.map((heading) => [normaliseHeading(heading), heading]));
 
 /** Only an exact level-2 `## ` heading starts a section; `###` and deeper are body text. */
-const SECTION_HEADING = /^##\s/;
+export const SECTION_HEADING = /^##\s/;
 /** An opening or closing fence: three or more backticks or tildes, indented at most three spaces. */
 const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
 
@@ -105,7 +105,7 @@ const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
  * the file, as in CommonMark, and therefore fails closed (the card's headings
  * after it read as missing).
  */
-function maskFences(markdown: string): string[] {
+export function maskFences(markdown: string): string[] {
   const masked: string[] = [];
   let open: { char: string; length: number } | undefined;
   for (const line of markdown.split(/\r?\n/)) {
@@ -196,7 +196,7 @@ function preamble(lines: string[]): string[] {
  * key case-insensitively. Design §4 puts these lines "in its first lines", so
  * a `Lens:` buried in a section is not a header line.
  */
-function headerValue(lines: string[], key: string): string | undefined {
+export function headerValue(lines: string[], key: string): string | undefined {
   const pattern = new RegExp(`^[\\s>*_+-]*${key}[\\s*_]*:[\\s*_]*(.*)$`, "i");
   for (const raw of preamble(lines)) {
     const match = pattern.exec(raw.trim());

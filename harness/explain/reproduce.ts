@@ -29,7 +29,7 @@ interface Entry {
 }
 
 /** The analysis script names runScript accepts: `X_nn.R|py` or `assets.R|py`. */
-const ANALYSIS_SCRIPT = /^(?:[A-Z]_\d\d|assets)\.(?:R|py)$/;
+export const ANALYSIS_SCRIPT = /^(?:[A-Z]_\d\d|assets)\.(?:R|py)$/;
 const INTEGER = /^[+-]?\d+$/;
 const NUMBER = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
 
