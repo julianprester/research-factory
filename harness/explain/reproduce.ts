@@ -96,43 +96,61 @@ function sameValue(a: string, b: string, tol: number): boolean {
   return false;
 }
 
+/** A registry's text that cannot be parsed. The reproduction reports it as a mismatch; it is not a throw. */
+class FormatError extends Error {}
+
 /**
- * Every `numbers/*.csv` under `dir` (an output folder), parsed. A link, or a
- * `.csv` that is not a regular file, is refused by name. A missing folder has no
- * registry.
+ * Every `numbers/*.csv` under `dir` (an output folder), parsed. A file whose
+ * content cannot be parsed is listed in `malformed`, by its reason, and left out
+ * of `rows`. A link, or a `.csv` that is not a regular file, is refused by name
+ * and throws. A missing folder has no registry.
  */
-export function readRegistry(dir: string): Record<string, Row[]> {
+export function readRegistryFiles(dir: string): { rows: Record<string, Row[]>; malformed: Record<string, string> } {
   const output = path.resolve(dir);
   const numbers = path.join(output, "numbers");
-  if (!folderExists(output) || !folderExists(numbers)) return {};
-  const registry: Record<string, Row[]> = {};
+  const found = { rows: {} as Record<string, Row[]>, malformed: {} as Record<string, string> };
+  if (!folderExists(output) || !folderExists(numbers)) return found;
   for (const entry of fs.readdirSync(numbers, { withFileTypes: true })) {
     const rel = `numbers/${entry.name}`;
     if (entry.isSymbolicLink()) throw new Error(`${rel} is a link: refusing to read it`);
     if (!entry.name.endsWith(".csv")) continue;
     if (!entry.isFile()) throw new Error(`${rel} is not a regular file`);
-    registry[entry.name] = parseRegistry(rel, readRegularFile(path.join(numbers, entry.name)).toString("utf8"));
+    try {
+      found.rows[entry.name] = parseRegistry(readRegularFile(path.join(numbers, entry.name)).toString("utf8"));
+    } catch (error) {
+      if (!(error instanceof FormatError)) throw error;
+      found.malformed[entry.name] = error.message;
+    }
   }
-  return registry;
+  return found;
+}
+
+/** Every registry under `dir`, as `readRegistryFiles` reads it; a malformed file throws, naming it. */
+export function readRegistry(dir: string): Record<string, Row[]> {
+  const { rows, malformed } = readRegistryFiles(dir);
+  const first = Object.entries(malformed)[0];
+  if (first !== undefined) throw new Error(`numbers/${first[0]}: ${first[1]}`);
+  return rows;
 }
 
 /** The name and value of each row, by the header's columns; a note is not compared. */
-function parseRegistry(rel: string, text: string): Row[] {
+function parseRegistry(text: string): Row[] {
   const [header = [], ...body] = parseCsv(text);
   const nameAt = header.indexOf("name");
   const valueAt = header.indexOf("value");
-  if (nameAt === -1 || valueAt === -1) throw new Error(`${rel}: the header must have name and value columns`);
+  if (nameAt === -1 || valueAt === -1) throw new FormatError("the header must have name and value columns");
   const rows: Row[] = [];
   for (const fields of body) {
     if (fields.length === 1 && fields[0] === "") continue;
-    if (fields.length <= Math.max(nameAt, valueAt)) throw new Error(`${rel}: a row has fewer fields than the header`);
+    if (fields.length <= Math.max(nameAt, valueAt)) throw new FormatError("a row has fewer fields than the header");
     rows.push({ name: fields[nameAt] ?? "", value: fields[valueAt] ?? "" });
   }
   return rows;
 }
 
-/** RFC 4180 rows: a quoted field may hold commas, doubled quotes and newlines. */
-function parseCsv(text: string): string[][] {
+/** RFC 4180 rows: a quoted field may hold commas, doubled quotes and newlines; a leading byte-order mark is dropped. */
+function parseCsv(raw: string): string[][] {
+  const text = raw.startsWith("\uFEFF") ? raw.slice(1) : raw;
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
@@ -163,7 +181,7 @@ function parseCsv(text: string): string[][] {
       field += ch;
     }
   }
-  if (quoted) throw new Error("a quoted field is never closed");
+  if (quoted) throw new FormatError("a quoted field is never closed");
   if (field !== "" || row.length > 0) {
     row.push(field);
     rows.push(row);
@@ -206,6 +224,9 @@ function orderOf(file: string): { group: number; letter: string; number: number;
  * between scripts) resumes where it stopped. A script that exits non-zero is
  * recorded as failed and is not re-run; the reproduction is then not ok. The
  * scripts are digested: an edit between calls starts the reproduction again.
+ * A state file that is missing, unreadable or not a reproduction state is not
+ * resumed either: the reproduction starts again. A registry whose content cannot
+ * be parsed is a mismatch line naming its side; a link in a registry still throws.
  * `workspaceHash` is taken before the first script runs, so `submit` refuses any
  * edit made after the check.
  */
@@ -230,10 +251,11 @@ export async function reproduceWorkspace(o: {
   const marker = path.join(scratch, "scripts.sha256");
   const scripts = entriesIn(workspace, "scripts");
   const digestNow = digest(scripts);
-  const resuming = realFolderPath(runDir, ".analysis", "repro", id) && readMarker(marker) === digestNow;
+  const saved =
+    realFolderPath(runDir, ".analysis", "repro", id) && readMarker(marker) === digestNow ? readState(o.statePath) : undefined;
   let state: ReproState;
-  if (resuming) {
-    state = readState(o.statePath);
+  if (saved !== undefined) {
+    state = saved;
   } else {
     fs.rmSync(scratch, { recursive: true, force: true });
     fs.rmSync(o.statePath, { force: true });
@@ -275,15 +297,21 @@ export async function reproduceWorkspace(o: {
   const failedLines = Object.entries(state.failed).map(([script, reason]) => `${script}: ${reason}`);
   if (remaining().length > 0) return { complete: false, ok: false, mismatches: failedLines, workspaceHash: hash };
 
-  const owner = readRegistry(path.join(workspace, "output"));
-  const reproduced = readRegistry(path.join(scratchWorkspace, "output"));
-  const differences = compareRegistries(owner, reproduced);
-  return {
-    complete: true,
-    ok: failedLines.length === 0 && differences.length === 0,
-    mismatches: [...failedLines, ...differences],
-    workspaceHash: hash,
-  };
+  const owner = readRegistryFiles(path.join(workspace, "output"));
+  const reproduced = readRegistryFiles(path.join(scratchWorkspace, "output"));
+  const malformedLines = [
+    ...Object.entries(owner.malformed).map(([file, reason]) => `workspace ${file}: ${reason}`),
+    ...Object.entries(reproduced.malformed).map(([file, reason]) => `reproduced ${file}: ${reason}`),
+  ];
+  // A file that is malformed on either side is left out of the comparison on both, so it is reported once.
+  const skipped = new Set([...Object.keys(owner.malformed), ...Object.keys(reproduced.malformed)]);
+  const differences = compareRegistries(withoutFiles(owner.rows, skipped), withoutFiles(reproduced.rows, skipped));
+  const mismatches = [...failedLines, ...malformedLines, ...differences];
+  return { complete: true, ok: mismatches.length === 0, mismatches, workspaceHash: hash };
+}
+
+function withoutFiles(registry: Record<string, Row[]>, files: Set<string>): Record<string, Row[]> {
+  return Object.fromEntries(Object.entries(registry).filter(([file]) => !files.has(file)));
 }
 
 /** The digest of a set of workspace files: each path, its length and its bytes, in path order. */
@@ -365,15 +393,27 @@ function readRegularFile(file: string): Buffer {
   }
 }
 
+/** The digest the scratch was built from, or undefined when it is absent or unreadable. */
 function readMarker(marker: string): string | undefined {
-  return fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : undefined;
+  try {
+    return readRegularFile(marker).toString("utf8");
+  } catch {
+    return undefined;
+  }
 }
 
-function readState(file: string): ReproState {
-  if (!fs.existsSync(file)) return { done: [], failed: {} };
-  const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (!isState(parsed)) throw new Error(`${file} is not a reproduction state`);
-  return parsed;
+/**
+ * The saved state, or undefined when the file is absent, unreadable (a link
+ * included) or not a reproduction state. An undefined state is not resumed: the
+ * caller starts the reproduction again.
+ */
+function readState(file: string): ReproState | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readRegularFile(file).toString("utf8"));
+    return isState(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function isState(value: unknown): value is ReproState {

@@ -111,15 +111,20 @@ interface FakeRuns {
  * into `<host>/numbers/`, and exits with `exitCode(script)` (default 0). `delayMs`
  * makes each run take that long, for the budget tests.
  */
+/** The host folder mounted at /work/output in a `docker run` argv. */
+function outputHostOf(args: string[]): string {
+  const mount = args.flatMap((arg, i) => (args[i - 1] === "-v" && arg.endsWith(":/work/output") ? [arg] : []))[0];
+  if (mount === undefined) throw new Error("no output mount");
+  return mount.slice(0, -":/work/output".length);
+}
+
 function fakeRuns(
   produce: (script: string, n: number) => Record<string, string>,
   options: { exitCode?: (script: string) => number; delayMs?: number } = {},
 ): FakeRuns {
   const calls: FakeRuns["calls"] = [];
   const exec: Exec = async (args) => {
-    const mount = args.flatMap((arg, i) => (args[i - 1] === "-v" && arg.endsWith(":/work/output") ? [arg] : []))[0];
-    if (mount === undefined) throw new Error("no output mount");
-    const host = mount.slice(0, -":/work/output".length);
+    const host = outputHostOf(args);
     const script = (args.at(-1) ?? "").replace(/^scripts\//, "");
     calls.push({ script, host });
     if (options.delayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, options.delayMs));
@@ -418,4 +423,171 @@ test("reproduceWorkspace refuses a workspace whose output folder is a link", asy
     }),
     /output.*real folder/,
   );
+});
+
+/** A finished reproduction of two deterministic scripts, and the options that resume it. */
+async function finishedReproduction(t: TestContext) {
+  const runDir = makeRun(t);
+  const nodeDir = makeNode(runDir, ["A_01.R", "B_01.R"], { "A.csv": DETERMINISTIC_A, "B.csv": DETERMINISTIC_B });
+  const common = {
+    runDir,
+    nodeDir,
+    image: "ctc-analysis:1",
+    timeoutMs: 5000,
+    budgetMs: 60_000,
+    statePath: statePathOf(runDir),
+  };
+  const first = await reproduceWorkspace({ ...common, exec: fakeRuns(deterministic).exec });
+  assert.equal(first.ok, true, "the reproduction that writes the state finishes ok");
+  return common;
+}
+
+const BOTH = ["A_01.R", "B_01.R"];
+const FINISHED = { done: BOTH, failed: {} };
+
+test("a corrupt state file (bad JSON) is not resumed: the reproduction starts again and rewrites the state", async (t) => {
+  const common = await finishedReproduction(t);
+  writeFileSync(common.statePath, "{not json");
+  const again = fakeRuns(deterministic);
+  const result = await reproduceWorkspace({ ...common, exec: again.exec });
+  assert.equal(result.complete, true);
+  assert.equal(result.ok, true);
+  assert.deepEqual(again.calls.map((call) => call.script), BOTH, "every script runs again");
+  assert.deepEqual(JSON.parse(readFileSync(common.statePath, "utf8")), FINISHED);
+});
+
+test("a state file of the wrong shape is not resumed: the reproduction starts again", async (t) => {
+  const common = await finishedReproduction(t);
+  writeFileSync(common.statePath, JSON.stringify({ done: "A_01.R", failed: {} }));
+  const again = fakeRuns(deterministic);
+  const result = await reproduceWorkspace({ ...common, exec: again.exec });
+  assert.equal(result.ok, true);
+  assert.deepEqual(again.calls.map((call) => call.script), BOTH);
+  assert.deepEqual(JSON.parse(readFileSync(common.statePath, "utf8")), FINISHED);
+});
+
+test("a state file with a non-string failure reason is not resumed", async (t) => {
+  const common = await finishedReproduction(t);
+  writeFileSync(common.statePath, JSON.stringify({ done: [], failed: { "B_01.R": 2 } }));
+  const again = fakeRuns(deterministic);
+  const result = await reproduceWorkspace({ ...common, exec: again.exec });
+  assert.equal(result.ok, true, "the old failure is not carried over");
+  assert.deepEqual(again.calls.map((call) => call.script), BOTH);
+});
+
+test("a matching marker with the state file missing starts the reproduction again", async (t) => {
+  const common = await finishedReproduction(t);
+  rmSync(common.statePath);
+  const again = fakeRuns(deterministic);
+  const result = await reproduceWorkspace({ ...common, exec: again.exec });
+  assert.equal(result.complete, true);
+  assert.equal(result.ok, true);
+  assert.deepEqual(again.calls.map((call) => call.script), BOTH);
+});
+
+test("a malformed owner registry is a workspace mismatch line, not a throw", async (t) => {
+  const runDir = makeRun(t);
+  const nodeDir = makeNode(runDir, ["A_01.R"], { "A.csv": "name,val\nn,1,\n" });
+  const result = await reproduceWorkspace({
+    runDir,
+    nodeDir,
+    image: "ctc-analysis:1",
+    timeoutMs: 5000,
+    budgetMs: 60_000,
+    exec: fakeRuns(deterministic).exec,
+    statePath: statePathOf(runDir),
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.mismatches, ["workspace A.csv: the header must have name and value columns"]);
+});
+
+test("a malformed reproduced registry is a reproduced mismatch line, not a throw", async (t) => {
+  const runDir = makeRun(t);
+  const nodeDir = makeNode(runDir, ["A_01.R"], { "A.csv": DETERMINISTIC_A });
+  const result = await reproduceWorkspace({
+    runDir,
+    nodeDir,
+    image: "ctc-analysis:1",
+    timeoutMs: 5000,
+    budgetMs: 60_000,
+    exec: fakeRuns(() => ({ "A.csv": 'name,value,note\ncount,"1234,\n' })).exec,
+    statePath: statePathOf(runDir),
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.mismatches, ["reproduced A.csv: a quoted field is never closed"]);
+});
+
+test("a planted symlink in the owner's registry still throws", async (t) => {
+  const runDir = makeRun(t);
+  const nodeDir = makeNode(runDir, ["A_01.R"], { "A.csv": DETERMINISTIC_A });
+  const numbers = path.join(nodeDir, "workspace", "output", "numbers");
+  symlinkSync(path.join(numbers, "A.csv"), path.join(numbers, "L.csv"));
+  await assert.rejects(
+    reproduceWorkspace({
+      runDir,
+      nodeDir,
+      image: "ctc-analysis:1",
+      timeoutMs: 5000,
+      budgetMs: 60_000,
+      exec: fakeRuns(deterministic).exec,
+      statePath: statePathOf(runDir),
+    }),
+    /L\.csv.*link/,
+  );
+});
+
+test("a symlink a script plants in the reproduced registry still throws", async (t) => {
+  const runDir = makeRun(t);
+  const nodeDir = makeNode(runDir, ["A_01.R"], { "A.csv": DETERMINISTIC_A });
+  const exec: Exec = async (args) => {
+    const host = outputHostOf(args);
+    writeRegistry(host, { "A.csv": DETERMINISTIC_A });
+    symlinkSync(path.join(host, "numbers", "A.csv"), path.join(host, "numbers", "L.csv"));
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
+  };
+  await assert.rejects(
+    reproduceWorkspace({
+      runDir,
+      nodeDir,
+      image: "ctc-analysis:1",
+      timeoutMs: 5000,
+      budgetMs: 60_000,
+      exec,
+      statePath: statePathOf(runDir),
+    }),
+    /L\.csv.*link/,
+  );
+});
+
+test("readRegistry names the file in a malformed registry: a bad header, a short row, an unclosed quote", (t) => {
+  const output = path.join(makeRun(t), "scratch-output");
+  const cases: Array<[string, string]> = [
+    ["name,val\nn,1,\n", "the header must have name and value columns"],
+    ["name,value,note\nshort\n", "a row has fewer fields than the header"],
+    ['name,value,note\nn,"1\n', "a quoted field is never closed"],
+  ];
+  for (const [text, reason] of cases) {
+    writeRegistry(output, { "A.csv": text });
+    assert.throws(
+      () => readRegistry(output),
+      (error: unknown) => error instanceof Error && error.message === `numbers/A.csv: ${reason}`,
+    );
+  }
+});
+
+test("readRegistry strips a leading UTF-8 byte-order mark from the header", (t) => {
+  const output = path.join(makeRun(t), "scratch-output");
+  writeRegistry(output, { "A.csv": "\uFEFFname,value,note\nn,1,\n" });
+  assert.deepEqual(readRegistry(output), { "A.csv": [{ name: "n", value: "1" }] });
+});
+
+test("readRegistry reads CRLF line endings the same as LF", (t) => {
+  const output = path.join(makeRun(t), "scratch-output");
+  writeRegistry(output, { "A.csv": 'name,value,note\r\n"a, b",1,"x"\r\nm,2.5,\r\n' });
+  const crlf = readRegistry(output);
+  writeRegistry(output, { "A.csv": 'name,value,note\n"a, b",1,"x"\nm,2.5,\n' });
+  assert.deepEqual(crlf, readRegistry(output));
+  assert.deepEqual(crlf, { "A.csv": [{ name: "a, b", value: "1" }, { name: "m", value: "2.5" }] });
 });
