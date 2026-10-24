@@ -185,6 +185,65 @@ test("a complete node has no problems and no warnings", (t) => {
   assert.deepEqual(checkArgument(fixture.run, fixture.nodeDir, NO_CITATIONS), { problems: [], warnings: [] });
 });
 
+// §10.1 "no unreferenced scripts under a retired letter": a warning, never a problem.
+
+test("a lettered script whose registry is linked from neither argument.md nor variables_sources.csv draws a warning that names it, and the check still passes", (t) => {
+  const fixture = nodeFixture(t);
+  write(path.join(fixture.nodeDir, "workspace/scripts/B_02.R"), "# a dead end\n");
+  write(path.join(fixture.nodeDir, "workspace/output/numbers/B_02.csv"), "name,value,note\nx,5,\n");
+  const result = checkArgument(fixture.run, fixture.nodeDir, NO_CITATIONS);
+  assert.deepEqual(result.problems, [], "a warning is not a problem");
+  assert.equal(result.warnings.length, 1, result.warnings.join("\n"));
+  assert.match(result.warnings[0] ?? "", /workspace\/scripts\/B_02\.R/);
+  assert.match(result.warnings[0] ?? "", /output\/numbers\/B_02\.csv/);
+  assert.match(result.warnings[0] ?? "", /archive_script/);
+});
+
+test("a script is not warned about when its registry is linked from the argument, with or without a key", (t) => {
+  const fixture = nodeFixture(t);
+  write(path.join(fixture.nodeDir, "workspace/scripts/B_02.R"), "# kept\n");
+  write(path.join(fixture.nodeDir, "workspace/output/numbers/B_02.csv"), "name,value,note\nx,5,\n");
+  write(path.join(fixture.nodeDir, "workspace/scripts/C_01.R"), "# kept\n");
+  write(path.join(fixture.nodeDir, "workspace/output/numbers/C_01.csv"), "name,value,note\ny,6,\n");
+  write(argumentFile(fixture.nodeDir), withExplanation("The extra count is [five](output/numbers/B_02.csv#x), see also [all of C](output/numbers/C_01.csv)."));
+  assert.deepEqual(checkArgument(fixture.run, fixture.nodeDir, NO_CITATIONS), { problems: [], warnings: [] });
+});
+
+test("a script is not warned about when its registry is a source in variables_sources.csv", (t) => {
+  const fixture = nodeFixture(t);
+  write(path.join(fixture.nodeDir, "workspace/scripts/B_02.R"), "# kept\n");
+  write(path.join(fixture.nodeDir, "workspace/output/numbers/B_02.csv"), "name,value,note\nx,5,\n");
+  write(path.join(fixture.nodeDir, "workspace/output/assets/_variables.yml"), 'm1_or_lspec: ".401"\nn_pages: "1234"\nextra: "5"\n');
+  write(
+    path.join(fixture.nodeDir, "workspace/output/assets/variables_sources.csv"),
+    "variable,value,rendered,source\n" +
+      "m1_or_lspec,0.401,.401,output/numbers/12_model1.csv#m1\n" +
+      "n_pages,1234,1234,output/numbers/01_counts.csv#n\n" +
+      "extra,5,5,output/numbers/B_02.csv#x\n",
+  );
+  assert.deepEqual(checkArgument(fixture.run, fixture.nodeDir, NO_CITATIONS), { problems: [], warnings: [] });
+});
+
+test("an archived script is not warned about, nor a script without a registry file, nor the assets script", (t) => {
+  const fixture = nodeFixture(t);
+  // archived: the move leaves the script, registry and log under archive/<stem>/ and none in scripts/ or numbers/
+  write(path.join(fixture.nodeDir, "workspace/archive/B_02/B_02.R"), "# dropped\n");
+  write(path.join(fixture.nodeDir, "workspace/archive/B_02/B_02.csv"), "name,value,note\nx,5,\n");
+  write(path.join(fixture.nodeDir, "workspace/archive/B_02/README.md"), "Reason: dead end\n");
+  // A_01.R has no registry file at all, assets.R has none by that name
+  assert.deepEqual(checkArgument(fixture.run, fixture.nodeDir, NO_CITATIONS), { problems: [], warnings: [] });
+});
+
+test("the retired-script warning is printed by the CLI and the exit stays 0", (t) => {
+  const fixture = nodeFixture(t);
+  write(path.join(fixture.nodeDir, "workspace/scripts/B_02.R"), "# a dead end\n");
+  write(path.join(fixture.nodeDir, "workspace/output/numbers/B_02.csv"), "name,value,note\nx,5,\n");
+  const run = spawnSync(process.execPath, [CHECK_ARGUMENT, fixture.nodeDir], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(run.stdout, /^warning: .*B_02\.R/m);
+  assert.match(run.stdout, /^ok$/m);
+});
+
 test("a node outside the run is a usage error, not a finding", (t) => {
   const fixture = nodeFixture(t);
   const outside = mkdtempSync(path.join(tmpdir(), "ctc-check-argument-outside-"));

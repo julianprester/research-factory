@@ -1251,6 +1251,13 @@ test("the Phase 3 skill tells the owner it never reads the dataset, and the guar
   assert.match(skill, /\*\*You never read the dataset:\*\* your `read` and `bash` are refused for any path under the dataset root and for any command that names it or the hold-out in any spelling/);
 });
 
+test("the Phase 3 skill says an unlinked registry number warns and dead ends are archived with a reason", () => {
+  const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
+  assert.match(skill, /is allowed, but it will draw a `check-argument` warning \(its script's registry is linked from neither `argument\.md` nor `variables_sources\.csv`\)/);
+  assert.match(skill, /archive the dead ends with a reason, and link what you keep/);
+  assert.doesNotMatch(skill, /is not a dead end; keep it/);
+});
+
 test("the assets task keeps earlier variables across rounds, in one language", () => {
   const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
   assert.match(skill, /reads the existing assets script first and keeps every earlier variable and table fragment/);

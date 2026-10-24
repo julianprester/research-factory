@@ -30,10 +30,12 @@
 // with `Result:`, or failing its citations. The code does not judge the content
 // of any section: one sentence is an alternative.
 //
-// Warnings: a bare number (two or more digits, or a decimal) in `argument.md`'s
+// Warnings: a lettered script whose registry file `output/numbers/<stem>.csv`
+// is linked from neither `argument.md` nor `variables_sources.csv` (a dead end
+// to be archived, spec §10.1), and a bare number (two or more digits, or a decimal) in `argument.md`'s
 // prose, outside link text, inline code, headings and URLs, and not a four-digit
-// year between 1900 and 2100. A bare number is a softer finding: the code cannot
-// tell a result from a count or a year.
+// year between 1900 and 2100. A warning is a softer finding: the code cannot
+// tell a result from a count or a year, nor a dead end from a number kept on purpose.
 //
 // The review report's format (Task 10's reviewer role teaches it):
 //
@@ -397,6 +399,9 @@ export function checkArgument(
   // 5. the assets the manuscript reads: every variable has a source row that resolves once.
   problems.push(...variableProblems(node, registry));
 
+  // 5b. retired scripts (§10.1): a lettered script whose registry nothing links to is a warning.
+  if (argument.kind === "text") warnings.push(...unlinkedScriptWarnings(node, scripts, argumentLinks(argument.text)));
+
   // 6. the literature reports: one round line and every heading each.
   const reportTexts: { shown: string; file: string; text: string }[] = [];
   for (const name of reportNames(node, problems)) {
@@ -639,6 +644,48 @@ function variableProblems(node: string, registry: Record<string, Row[]> | undefi
     }
   }
   return problems;
+}
+
+/**
+ * Warnings for each lettered script (`X_nn.R|py`, not assets) whose registry
+ * file `output/numbers/<stem>.csv` exists but is linked from neither
+ * `argument.md` nor any row of `variables_sources.csv`. A script that is archived
+ * has left `scripts/`, so it is not listed. Spec §10.1 asks for "no unreferenced
+ * scripts under a retired letter"; a dead end the owner has not archived yet is a
+ * finding for the reviewer, not a failure, so this never makes a problem.
+ */
+function unlinkedScriptWarnings(node: string, scripts: Found, links: { target: string }[]): string[] {
+  if (scripts.kind !== "folder") return [];
+  const stems = fs
+    .readdirSync(scripts.dir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /^[A-Z]_\d\d\.(?:R|py)$/.test(entry.name))
+    .sort(byName)
+    .map((entry) => ({ script: entry.name, stem: entry.name.replace(/\.[^.]+$/, "") }))
+    .filter(({ stem }) => locate(node, `workspace/output/numbers/${stem}.csv`).kind === "file");
+  if (stems.length === 0) return [];
+
+  const linked = new Set<string>();
+  const add = (target: string): void => {
+    const file = target.split(/[#?]/, 1)[0] ?? "";
+    for (const form of [file, percentDecoded(file)]) linked.add(path.posix.normalize(form));
+  };
+  for (const { target } of links) add(target);
+  const sources = readText(node, "workspace/output/assets/variables_sources.csv");
+  if (sources.kind === "text") {
+    try {
+      const [header = [], ...body] = parseCsv(sources.text);
+      const at = header.indexOf("source");
+      if (at >= 0) for (const fields of body) add(fields[at] ?? "");
+    } catch {
+      /* an unreadable sources file is already a problem */
+    }
+  }
+  return stems
+    .filter(({ stem }) => !linked.has(`output/numbers/${stem}.csv`))
+    .map(
+      ({ script, stem }) =>
+        `workspace/scripts/${script}: its registry output/numbers/${stem}.csv is linked from neither argument.md nor variables_sources.csv; link a number from it, or archive_script it with a reason if it is a dead end`,
+    );
 }
 
 function resolvesOnce(source: string, registry: Record<string, Row[]>): boolean {

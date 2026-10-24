@@ -238,7 +238,10 @@ handoff's prose. Then:
   It moves the script, its registry file and its log to
   `workspace/archive/<stem>/` with your reason, and refuses an empty reason and
   anything `argument.md` still links to (unlink first). A number that stays in
-  the registry but is not in the argument is not a dead end; keep it.
+  the registry but is not in the argument is allowed, but it will draw a
+  `check-argument` warning (its script's registry is linked from neither
+  `argument.md` nor `variables_sources.csv`) that the reviewer reads: archive the
+  dead ends with a reason, and link what you keep.
 - **Data requests.** See §4.
 
 ### Literature workers
@@ -366,7 +369,8 @@ After STOP, in this order. Ledger line before each tool call.
 
 1. **Code checks.** From anywhere:
    `node ./harness/tools/check-argument.ts <node dir>`
-   It prints `warning:` lines (bare numbers; a softer finding), then `ok` (exit 0)
+   It prints `warning:` lines (bare numbers, and a lettered script whose registry
+   nothing links to: a softer finding), then `ok` (exit 0)
    or one problem per line (exit 1; exit 2 is a usage error). It checks every
    link and registry key, the headings and `Contribution:` line, the non-empty
    *Alternatives considered*, that `workspace/scripts/` holds only analysis
