@@ -287,7 +287,7 @@ test("reproduceWorkspace: a deterministic workspace reproduces (ok true) and run
   assert.deepEqual(calls.map((call) => call.script), scripts);
   const scratch = path.join(runDir, ".analysis", "repro", NODE, "workspace", "output");
   assert.ok(calls.every((call) => call.host === scratch), "every run writes to the scratch output, not the real one");
-  assert.equal(existsSync(path.join(scratch, "numbers", "A.csv")), true);
+  assert.equal(existsSync(path.join(runDir, ".analysis", "repro", NODE)), false, "the scratch is cleared once the run completes");
 });
 
 test("reproduceWorkspace: a seeded workspace reproduces when every run draws from the same seed", async (t) => {
@@ -341,9 +341,12 @@ test("reproduceWorkspace: budget 0 runs nothing and is incomplete; a second call
   assert.equal(second.ok, true);
   assert.deepEqual(calls.map((call) => call.script), scripts);
 
+  assert.equal(existsSync(statePathOf(runDir)), false, "a completed run leaves no resume state");
+  assert.equal(existsSync(path.join(runDir, ".analysis", "repro", NODE)), false, "and no scratch folder");
+
   const third = await reproduceWorkspace({ ...common, budgetMs: 60_000 });
   assert.equal(third.ok, true);
-  assert.equal(calls.length, 2, "a finished reproduction does not run anything again");
+  assert.deepEqual(calls.map((call) => call.script), [...scripts, ...scripts], "a completed run is not resumed: the next call runs every script again");
 });
 
 test("reproduceWorkspace: a budget spent after one script resumes at the next and does not re-run the first", async (t) => {
@@ -365,27 +368,45 @@ test("reproduceWorkspace: a budget spent after one script resumes at the next an
   assert.deepEqual(fast.calls.map((call) => call.script), ["B_01.R"]);
 });
 
-test("reproduceWorkspace: a failed script stays failed on resume, is not re-run, and keeps ok false", async (t) => {
+test("reproduceWorkspace: a failed script stays failed when a PARTIAL run resumes, and is not re-run", async (t) => {
   const runDir = makeRun(t);
   const scripts = ["A_01.R", "B_01.R"];
   const nodeDir = makeNode(runDir, scripts, { "A.csv": DETERMINISTIC_A, "B.csv": DETERMINISTIC_B });
-  const failing = fakeRuns(deterministic, { exitCode: (script) => (script === "B_01.R" ? 2 : 0) });
+  const failing = fakeRuns(deterministic, { exitCode: (script) => (script === "A_01.R" ? 2 : 0), delayMs: 250 });
+  const common = { runDir, nodeDir, image: "ctc-analysis:1", timeoutMs: 5000, statePath: statePathOf(runDir) };
+
+  const first = await reproduceWorkspace({ ...common, budgetMs: 100, exec: failing.exec });
+  assert.equal(first.complete, false);
+  assert.deepEqual(failing.calls.map((call) => call.script), ["A_01.R"]);
+  assert.deepEqual(JSON.parse(readFileSync(statePathOf(runDir), "utf8")), { done: [], failed: { "A_01.R": "exit code 2" } });
+
+  const again = fakeRuns(deterministic);
+  const second = await reproduceWorkspace({ ...common, budgetMs: 60_000, exec: again.exec });
+  assert.equal(second.complete, true);
+  assert.equal(second.ok, false, "a failed script keeps the resumed reproduction failed");
+  assert.match(second.mismatches.join("\n"), /A_01\.R.*exit code 2/);
+  assert.deepEqual(again.calls.map((call) => call.script), ["B_01.R"], "the failed script is not re-run, the remaining one is");
+});
+
+test("reproduceWorkspace: a completed ok:false run is not resumed: the next call re-runs every script and can succeed", async (t) => {
+  const runDir = makeRun(t);
+  const scripts = ["A_01.R", "B_01.R"];
+  const nodeDir = makeNode(runDir, scripts, { "A.csv": DETERMINISTIC_A, "B.csv": DETERMINISTIC_B });
+  const failing = fakeRuns(deterministic, { exitCode: (script) => (script === "B_01.R" ? 137 : 0) });
   const common = { runDir, nodeDir, image: "ctc-analysis:1", timeoutMs: 5000, budgetMs: 60_000, statePath: statePathOf(runDir) };
 
   const first = await reproduceWorkspace({ ...common, exec: failing.exec });
   assert.equal(first.complete, true);
   assert.equal(first.ok, false);
-  assert.match(first.mismatches.join("\n"), /B_01\.R.*exit code 2/);
-  assert.deepEqual(JSON.parse(readFileSync(statePathOf(runDir), "utf8")), {
-    done: ["A_01.R"],
-    failed: { "B_01.R": "exit code 2" },
-  });
+  assert.match(first.mismatches.join("\n"), /B_01\.R.*exit code 137/);
+  assert.equal(existsSync(statePathOf(runDir)), false, "the state is cleared once the run completes");
+  assert.equal(existsSync(path.join(runDir, ".analysis", "repro", NODE)), false, "and so is the scratch folder");
 
   const again = fakeRuns(deterministic);
   const second = await reproduceWorkspace({ ...common, exec: again.exec });
   assert.equal(second.complete, true);
-  assert.equal(second.ok, false, "a failed script keeps the reproduction failed");
-  assert.deepEqual(again.calls.map((call) => call.script), [], "neither script is re-run");
+  assert.equal(second.ok, true, second.mismatches.join("\n"));
+  assert.deepEqual(again.calls.map((call) => call.script), scripts, "every script ran again");
 });
 
 test("reproduceWorkspace: a script edited between calls starts the reproduction again", async (t) => {
@@ -425,8 +446,8 @@ test("reproduceWorkspace refuses a workspace whose output folder is a link", asy
   );
 });
 
-/** A finished reproduction of two deterministic scripts, and the options that resume it. */
-async function finishedReproduction(t: TestContext) {
+/** A PARTIAL reproduction of two deterministic scripts (the budget stops it after the first), and the options that resume it. */
+async function partialReproduction(t: TestContext) {
   const runDir = makeRun(t);
   const nodeDir = makeNode(runDir, ["A_01.R", "B_01.R"], { "A.csv": DETERMINISTIC_A, "B.csv": DETERMINISTIC_B });
   const common = {
@@ -437,37 +458,35 @@ async function finishedReproduction(t: TestContext) {
     budgetMs: 60_000,
     statePath: statePathOf(runDir),
   };
-  const first = await reproduceWorkspace({ ...common, exec: fakeRuns(deterministic).exec });
-  assert.equal(first.ok, true, "the reproduction that writes the state finishes ok");
+  const first = await reproduceWorkspace({ ...common, budgetMs: 100, exec: fakeRuns(deterministic, { delayMs: 250 }).exec });
+  assert.equal(first.complete, false, "the reproduction that writes the state is stopped by the budget");
+  assert.deepEqual(JSON.parse(readFileSync(common.statePath, "utf8")), { done: ["A_01.R"], failed: {} });
   return common;
 }
 
 const BOTH = ["A_01.R", "B_01.R"];
-const FINISHED = { done: BOTH, failed: {} };
 
 test("a corrupt state file (bad JSON) is not resumed: the reproduction starts again and rewrites the state", async (t) => {
-  const common = await finishedReproduction(t);
+  const common = await partialReproduction(t);
   writeFileSync(common.statePath, "{not json");
-  const again = fakeRuns(deterministic);
-  const result = await reproduceWorkspace({ ...common, exec: again.exec });
-  assert.equal(result.complete, true);
-  assert.equal(result.ok, true);
-  assert.deepEqual(again.calls.map((call) => call.script), BOTH, "every script runs again");
-  assert.deepEqual(JSON.parse(readFileSync(common.statePath, "utf8")), FINISHED);
+  const again = fakeRuns(deterministic, { delayMs: 250 });
+  const result = await reproduceWorkspace({ ...common, budgetMs: 100, exec: again.exec });
+  assert.equal(result.complete, false);
+  assert.deepEqual(again.calls.map((call) => call.script), ["A_01.R"], "it starts from the first script, not where the bad state said");
+  assert.deepEqual(JSON.parse(readFileSync(common.statePath, "utf8")), { done: ["A_01.R"], failed: {} });
 });
 
 test("a state file of the wrong shape is not resumed: the reproduction starts again", async (t) => {
-  const common = await finishedReproduction(t);
+  const common = await partialReproduction(t);
   writeFileSync(common.statePath, JSON.stringify({ done: "A_01.R", failed: {} }));
   const again = fakeRuns(deterministic);
   const result = await reproduceWorkspace({ ...common, exec: again.exec });
   assert.equal(result.ok, true);
   assert.deepEqual(again.calls.map((call) => call.script), BOTH);
-  assert.deepEqual(JSON.parse(readFileSync(common.statePath, "utf8")), FINISHED);
 });
 
 test("a state file with a non-string failure reason is not resumed", async (t) => {
-  const common = await finishedReproduction(t);
+  const common = await partialReproduction(t);
   writeFileSync(common.statePath, JSON.stringify({ done: [], failed: { "B_01.R": 2 } }));
   const again = fakeRuns(deterministic);
   const result = await reproduceWorkspace({ ...common, exec: again.exec });
@@ -476,7 +495,7 @@ test("a state file with a non-string failure reason is not resumed", async (t) =
 });
 
 test("a matching marker with the state file missing starts the reproduction again", async (t) => {
-  const common = await finishedReproduction(t);
+  const common = await partialReproduction(t);
   rmSync(common.statePath);
   const again = fakeRuns(deterministic);
   const result = await reproduceWorkspace({ ...common, exec: again.exec });

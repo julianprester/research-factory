@@ -377,8 +377,9 @@ After STOP, in this order. Ledger line before each tool call.
    for text and integers, relative `1e-6` for floats). A call is bounded to about
    8 minutes: **PARTIAL means call it again** with the same argument until it
    completes. A mismatch or a failed script is recorded `ok: false`; fix the
-   cause (resume the worker) and call `reproduce` again. If a worker or script
-   planted a link and the record says `ok: false`, the next call starts fresh. An
+   cause (resume the worker) and call `reproduce` again. A call that completes,
+   `ok` or not, is final for that call: the next `reproduce` is a fresh full run
+   (a one-off failure such as an out-of-memory kill is simply tried again). An
    edit to a script or a number **after** `reproduce` invalidates it: reproduce
    again. `submit` also refuses a node with no scripts.
 3. **One review.** Write `<node dir>/brief-review.md` (five sections):

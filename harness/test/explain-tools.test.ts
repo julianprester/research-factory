@@ -775,6 +775,23 @@ test("reproduce records ok:false with the mismatches, and prints them", async (t
   assert.equal(subjects(fx.run)[0], "[P3:reproduce] E01");
 });
 
+test("reproduce: a completed ok:false run does not wedge the node: the next call re-runs the scripts and can succeed", async (t) => {
+  const fx = await closedOut(t);
+  const flaky = fakeContainer({ registry: "name,value,note\nn,1235,\n" });
+  assert.match(await reproduce(fx.run, { nodeId: "E01" }, { exec: flaky.exec }), /did NOT reproduce/);
+  assert.deepEqual(flaky.calls, ["A_01.R"]);
+  assert.equal(readRecord(fx).ok, false);
+  assert.match(await reproduce(fx.run, { nodeId: "E01" }, { exec: flaky.exec }), /did NOT reproduce/);
+  assert.deepEqual(flaky.calls, ["A_01.R", "A_01.R"], "the second call ran the script again instead of repeating the old answer");
+
+  const good = fakeContainer();
+  assert.match(await reproduce(fx.run, { nodeId: "E01" }, { exec: good.exec }), /reproduced/);
+  assert.deepEqual(good.calls, ["A_01.R"]);
+  assert.equal(readRecord(fx).ok, true);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+  await submitOk(fx);
+});
+
 test("reproduce records the hash taken before the scripts ran", async (t) => {
   const fx = await closedOut(t);
   const before = workspaceHash(fx.node);

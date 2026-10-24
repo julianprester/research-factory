@@ -222,7 +222,9 @@ function orderOf(file: string): { group: number; letter: string; number: number;
  * `<runDir>/.analysis/repro/<node>/`, whose output starts empty. Each finished
  * script is recorded in `statePath`, so a call stopped by `budgetMs` (checked
  * between scripts) resumes where it stopped. A script that exits non-zero is
- * recorded as failed and is not re-run; the reproduction is then not ok. The
+ * recorded as failed and is not re-run by a call that resumes the same partial
+ * run; the reproduction is then not ok. A run that completes (ok or not) clears
+ * its state and scratch, so the next call is a fresh full run. The
  * scripts are digested: an edit between calls starts the reproduction again.
  * A state file that is missing, unreadable or not a reproduction state is not
  * resumed either: the reproduction starts again. A registry whose content cannot
@@ -307,6 +309,11 @@ export async function reproduceWorkspace(o: {
   const skipped = new Set([...Object.keys(owner.malformed), ...Object.keys(reproduced.malformed)]);
   const differences = compareRegistries(withoutFiles(owner.rows, skipped), withoutFiles(reproduced.rows, skipped));
   const mismatches = [...failedLines, ...malformedLines, ...differences];
+  // The run is complete, ok or not: its answer is the caller's to record. Clear the resume state and the
+  // scratch so the next call is a fresh full run (a one-off failure, an OOM kill or a docker restart,
+  // must not repeat itself for ever). Only a PARTIAL run is resumed.
+  fs.rmSync(scratch, { recursive: true, force: true });
+  fs.rmSync(o.statePath, { force: true });
   return { complete: true, ok: mismatches.length === 0, mismatches, workspaceHash: hash };
 }
 
