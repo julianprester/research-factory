@@ -11,7 +11,12 @@
 // recorded history has stopped (a STOP is a latch; the cap comes from the run's
 // config). It writes `rounds/NN/plan.md` itself - the owner's write tool cannot -
 // and on round 1 snapshots the parent puzzle's `workspace/puzzle.md` and its
-// `## Phase 3 must check` list, so workers never read the ancestor puzzle.
+// `## Phase 3 must check` list, so workers never read the ancestor puzzle, and
+// prepares the exploration split (a missing or invalid split is refused here).
+// Letters only go up: a letter that is not above every letter already recorded or
+// present in `tasks/` is refused, because the assets task owns the highest letter
+// and the reproduction runs scripts in letter order. A `tasks/<L>/` folder with
+// nothing but the owner's `brief.md` does not count as a use of `<L>`.
 //
 // **`closeRound`** is the verdict gate (design §6.3). It refuses unless every
 // task of the round left a handoff whose first line is a non-BLOCKED `Status:`,
@@ -59,7 +64,7 @@ import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { ignoreScratch, type Exec } from "../analysis/run.ts";
+import { ignoreScratch, prepareExploration, type Exec } from "../analysis/run.ts";
 import { readConfig } from "../launch.ts";
 import { commitFiles, findNode, updateNode, type NodeRef } from "../tree.ts";
 import { argumentLinks, checkArgument, checkRevision, parseReport } from "../tools/check-argument.ts";
@@ -188,6 +193,13 @@ function sectionOf(markdown: string, heading: string): string | undefined {
   return body?.join("\n").trim();
 }
 
+/** Whether `tasks/<name>` is a real folder that is empty or holds only a regular `brief.md` (the owner may write briefs first). */
+function isBriefOnly(nodeDir: string, name: string): boolean {
+  if (locate(nodeDir, `tasks/${name}`).kind !== "folder") return false;
+  const entries = fs.readdirSync(path.join(nodeDir, "tasks", name), { withFileTypes: true });
+  return entries.length === 0 || (entries.length === 1 && entries[0]!.name === "brief.md" && entries[0]!.isFile());
+}
+
 /** The parent puzzle's two snapshots for round 1, read before anything is written. */
 function puzzleSnapshots(runDir: string, node: NodeRef): { puzzle: Buffer; mustCheck: string } {
   const parent = node.parent === null ? undefined : findNode(runDir, node.parent);
@@ -237,14 +249,22 @@ export async function openRound(runDir: string, input: OpenRoundInput): Promise<
   requireFolderOrAbsent(node.dir, "rounds");
   requireFolderOrAbsent(node.dir, "workspace");
   const tasks = requireFolderOrAbsent(node.dir, "tasks");
-  const present = tasks === "absent" ? [] : fs.readdirSync(path.join(node.dir, "tasks"));
+  // A folder that holds nothing but the owner's `brief.md` was made before the round: it is not a use of the letter.
+  const used = tasks === "absent" ? [] : fs.readdirSync(path.join(node.dir, "tasks")).filter((name) => !isBriefOnly(node.dir, name));
+  const greatest = [...history.flatMap((record) => record.letters), ...used.filter((name) => /^[A-Z]$/.test(name))].sort().pop();
   for (const { letter } of plan.tasks) {
     const earlier = history.find((record) => record.letters.includes(letter));
     if (earlier !== undefined) throw new Error(`letter ${letter} was used in round ${earlier.round}: a letter is never reused`);
-    if (present.includes(letter)) throw new Error(`letter ${letter} already has a folder in tasks/: a letter is never reused`);
+    if (used.includes(letter)) throw new Error(`letter ${letter} already has a folder in tasks/: a letter is never reused`);
+    if (greatest !== undefined && letter <= greatest) {
+      throw new Error(`letter ${letter} is not above the greatest letter already used (${greatest}): letters only go up, so the assets task keeps the highest`);
+    }
   }
 
   const snapshots = round === 1 ? puzzleSnapshots(runDir, node) : undefined;
+  // Round 1 also prepares the exploration split, so a missing or invalid split is refused here, at the owner,
+  // with a clear message, before any worker is dispatched against it.
+  if (round === 1) prepareExploration(runDir);
 
   if (snapshots !== undefined) {
     writeAtomic(path.join(node.dir, "workspace", "puzzle.md"), snapshots.puzzle);

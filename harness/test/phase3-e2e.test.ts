@@ -205,10 +205,16 @@ test("the Phase 3 chain runs end to end", async (t) => {
   assert.match(opened1, /round 1\b/);
   assert.equal(subjects(run)[0], "[P3:plan] E01 round 01");
   assert.deepEqual(
-    tools.committed,
+    git(run, "show", "--name-only", "--format=", "HEAD").split("\n").filter((line) => line !== "").sort(),
     [`${base}/rounds/01/plan.md`, `${base}/workspace/must-check.md`, `${base}/workspace/puzzle.md`],
     "the plan commit holds the plan and the snapshots, nothing else",
   );
+  assert.deepEqual(
+    tools.committed,
+    [".gitignore", `${base}/rounds/01/plan.md`, `${base}/workspace/must-check.md`, `${base}/workspace/puzzle.md`],
+    "round 1 also prepared the exploration split, whose one commit is the ignore file (the copy itself is ignored)",
+  );
+  assert.equal(subjects(run)[1], "chore: ignore analysis data in the run");
   assert.deepEqual(dirty(run), [], "nothing is pending yet");
   assert.match(await rejectMessage(tools.call("close_round", { nodeId: "E01", changed: "substantial", summary: "too early" })), /handoff/);
   workersFinish(node, 1, ["A", "B"], ARGUMENT_FULL);

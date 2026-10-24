@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fsDefault, {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -142,6 +143,23 @@ test("prepareExploration adds each ignore line once and keeps the existing lines
   assert.equal(lines.filter((line) => line === "analysis-data/").length, 1);
   assert.equal(lines.filter((line) => line === ".analysis/").length, 1);
   assert.equal(lines.filter((line) => line === "node_modules/").length, 1);
+});
+
+test("prepareExploration ignores analysis-data before it copies the first file", (t) => {
+  const { runDir, dataset } = makeRun(t);
+  // The second listed file cannot be read, so the copy dies after the first: whatever it left must already be ignored.
+  chmodSync(path.join(dataset, "data", "sub", "b.csv"), 0o000);
+  t.after(() => {
+    try {
+      chmodSync(path.join(dataset, "data", "sub", "b.csv"), 0o644);
+    } catch {
+      /* the temp folder is already gone */
+    }
+  });
+  assert.throws(() => prepareExploration(runDir), /EACCES|permission/i);
+  assert.equal(existsSync(path.join(runDir, "analysis-data", "exploration", "data", "a.csv")), true, "the first file was copied");
+  assert.match(readFileSync(path.join(runDir, ".gitignore"), "utf8"), /^analysis-data\/$/m, "the ignore line was written first");
+  assert.equal(git(runDir, "status", "--porcelain"), "", "so a sweeping commit in the window would not take the dataset");
 });
 
 test("prepareExploration leaves the run's git status clean", (t) => {

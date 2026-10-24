@@ -130,11 +130,15 @@ Inputs: <registry files and scripts it builds on>. Definition of Done: <what exi
 ```
 
 Each task heading is `### Task <L>: <aim>` with `<L>` one capital letter. The
-tool refuses a plan it cannot read, a letter listed twice and a letter that was
-ever used.
+tool refuses a plan it cannot read, a letter listed twice, a letter that was
+ever used and a letter that is not above the greatest letter already used. You
+may write `tasks/<L>/brief.md` before you call `open_round`: a task folder
+holding nothing but its `brief.md` does not count as used. On round 1 the tool
+also prepares the exploration split: if it refuses with a message about the
+split lists, stop and tell the researcher; do not dispatch anything.
 
 **Letters.** A letter is unique across the node's whole life; round 2 continues
-from the next unused letter, upward, never a lower one. There are only 26 for
+from the next unused letter, upward, never a lower one (the tool refuses it). There are only 26 for
 all rounds, so plan **at most 4 lettered tasks per round, the assets task
 included** (2–3 analysis tasks plus the assets task): six rounds then fit in 26
 letters. Count what is left before you plan. Make each task one coherent line of

@@ -1238,6 +1238,14 @@ test("the Phase 3 skill says the assets are reproduced and hashed", () => {
   assert.match(skill, /if you touched a script, a number or an asset, reproduce again/);
 });
 
+test("the Phase 3 skill states the letter rule, brief-first folders and the round-1 split check", () => {
+  const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
+  assert.match(skill, /a letter that was ever used and a letter that is not above the greatest letter already used/);
+  assert.match(skill, /never a lower one \(the tool refuses it\)/);
+  assert.match(skill, /a task folder holding nothing but its `brief\.md` does not count as used/);
+  assert.match(skill, /On round 1 the tool also prepares the exploration split: if it refuses with a message about the split lists, stop and tell the researcher/);
+});
+
 test("the assets task keeps earlier variables across rounds, in one language", () => {
   const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
   assert.match(skill, /reads the existing assets script first and keeps every earlier variable and table fragment/);

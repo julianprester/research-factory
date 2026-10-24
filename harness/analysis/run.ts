@@ -212,7 +212,7 @@ function copyIntoPlace(from: string, to: string): void {
  * are missing, and any listed path that is a hold-out file (by name or by the
  * file a link resolves to), that is not a regular file, or that resolves
  * outside the dataset. Every entry is checked before the first copy, so a
- * refusal copies nothing.
+ * refusal copies nothing; the ignore lines are written before the first copy.
  */
 export function prepareExploration(runDir: string): string {
   const dir = path.resolve(runDir);
@@ -237,9 +237,10 @@ export function prepareExploration(runDir: string): string {
     return { rel, from };
   });
 
+  // Ignore the copy before the first file lands: a tree commit in the window would otherwise take the dataset.
+  ignoreScratch(dir);
   const target = path.join(dir, "analysis-data", "exploration");
   for (const { rel, from } of sources) copyIntoPlace(from, path.join(target, rel));
-  ignoreScratch(dir);
   return target;
 }
 

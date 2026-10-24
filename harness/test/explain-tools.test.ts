@@ -101,10 +101,92 @@ test("open_round refuses a letter used in an earlier round and a letter already 
   await runRound(fx, 1, ["A", "B"], "substantial");
   assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("B", "C") })), /letter B was used in round 1/);
   assert.equal(existsSync(path.join(fx.node, "rounds", "02")), false, "a refused round writes nothing");
-  mkdirSync(path.join(fx.node, "tasks", "C"));
+  write(path.join(fx.node, "tasks", "C", "handoff.md"), "Status: DONE\n");
   assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("C") })), /letter C already has a folder in tasks\//);
   const text = await openRound(fx.run, { nodeId: "E01", plan: plan("D") });
   assert.match(text, /round 2\b/);
+});
+
+test("open_round refuses a letter that is not above every letter used, and names the letter and the greatest used", async (t) => {
+  const fx = fixture(t);
+  await runRound(fx, 1, ["C", "D"], "substantial");
+  const message = await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("B") }));
+  assert.match(message, /letter B/);
+  assert.match(message, /greatest letter already used \(D\)/);
+  assert.equal(existsSync(path.join(fx.node, "rounds", "02")), false, "a refused round writes nothing");
+  assert.equal(existsSync(path.join(fx.node, "tasks", "B")), false);
+
+  // One low letter among higher ones refuses the whole plan; a letter equal to the greatest was reused (its own message).
+  assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("E", "A") })), /letter A.*greatest letter already used \(D\)/);
+  assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("D") })), /letter D was used in round 1/);
+  assert.match(await openRound(fx.run, { nodeId: "E01", plan: plan("E", "F") }), /round 2\b/);
+});
+
+test("open_round counts a tasks/ folder with content as used, so a lower letter is refused even without a record", async (t) => {
+  const fx = fixture(t);
+  write(path.join(fx.node, "tasks", "G", "handoff.md"), "Status: DONE\n");
+  const message = await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("C") }));
+  assert.match(message, /letter C.*greatest letter already used \(G\)/);
+  assert.match(await openRound(fx.run, { nodeId: "E01", plan: plan("H") }), /round 1\b/);
+});
+
+test("open_round tolerates a task folder that holds only brief.md (briefs written first), and does not count it as used", async (t) => {
+  const fx = fixture(t);
+  write(path.join(fx.node, "tasks", "A", "brief.md"), "# brief A\n");
+  write(path.join(fx.node, "tasks", "B", "brief.md"), "# brief B\n");
+  mkdirSync(path.join(fx.node, "tasks", "C"), { recursive: true });
+  assert.match(await openRound(fx.run, { nodeId: "E01", plan: plan("A", "B", "C") }), /round 1\b/);
+  assert.equal(readFileSync(path.join(fx.node, "tasks", "A", "brief.md"), "utf8"), "# brief A\n", "the owner's brief is kept");
+});
+
+test("open_round still refuses a task folder that holds anything besides brief.md", async (t) => {
+  const fx = fixture(t);
+  write(path.join(fx.node, "tasks", "A", "brief.md"), "# brief\n");
+  write(path.join(fx.node, "tasks", "A", "handoff.md"), "Status: DONE\n");
+  assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("A") })), /letter A already has a folder in tasks\//);
+  rmSync(path.join(fx.node, "tasks", "A"), { recursive: true });
+  write(path.join(fx.node, "tasks", "B", "brief.md"), "# brief\n");
+  mkdirSync(path.join(fx.node, "tasks", "B", "workspace"));
+  assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("B") })), /letter B already has a folder in tasks\//);
+  // A brief that is a link is not a brief.
+  rmSync(path.join(fx.node, "tasks", "B"), { recursive: true });
+  mkdirSync(path.join(fx.node, "tasks", "C"));
+  write(path.join(fx.run, "elsewhere.md"), "x");
+  symlinkSync(path.join(fx.run, "elsewhere.md"), path.join(fx.node, "tasks", "C", "brief.md"));
+  assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("C") })), /letter C already has a folder in tasks\//);
+  assert.equal(existsSync(path.join(fx.node, "rounds")), false, "nothing was written");
+});
+
+test("open_round counts a brief-only folder for a later letter as unused: the lower plan letters go through", async (t) => {
+  const fx = fixture(t);
+  write(path.join(fx.node, "tasks", "D", "brief.md"), "# brief D\n");
+  assert.match(await openRound(fx.run, { nodeId: "E01", plan: plan("B", "D") }), /round 1\b/);
+});
+
+test("open_round on round 1 prepares the exploration split, so a missing split is refused at the owner with nothing written", async (t) => {
+  const fx = fixture(t);
+  rmSync(path.join(fx.run, "prep", "Z01-profile", "workspace", "split", "exploration.txt"));
+  settle(fx.run);
+  const before = subjects(fx.run).length;
+  const message = await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("A") }));
+  assert.match(message, /exploration\.txt is missing: the run has no split to analyse/);
+  assert.equal(existsSync(path.join(fx.node, "rounds")), false);
+  assert.equal(existsSync(path.join(fx.node, "tasks")), false);
+  assert.equal(existsSync(path.join(fx.node, "workspace", "puzzle.md")), false);
+  assert.equal(subjects(fx.run).length, before, "no commit");
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+});
+
+test("open_round on round 1 copies the exploration files and keeps them out of git; round 2 does not need the split", async (t) => {
+  const fx = fixture(t);
+  await openRound(fx.run, { nodeId: "E01", plan: plan("A") });
+  assert.equal(readFileSync(path.join(fx.run, "analysis-data", "exploration", "a.csv"), "utf8"), "a,1\n");
+  assert.match(readFileSync(path.join(fx.run, ".gitignore"), "utf8"), /^analysis-data\/$/m);
+  assert.equal(git(fx.run, "status", "--porcelain"), "", "the copy is ignored and the tree stays clean");
+  finish(fx, 1, ["A"], ARGUMENT("v1"));
+  await closeRound(fx.run, { nodeId: "E01", changed: "substantial", summary: "s" });
+  rmSync(path.join(fx.run, "prep", "Z01-profile", "workspace", "split", "exploration.txt"));
+  assert.match(await openRound(fx.run, { nodeId: "E01", plan: plan("B") }), /round 2\b/);
 });
 
 test("open_round refuses any round after STOP (the latch)", async (t) => {
