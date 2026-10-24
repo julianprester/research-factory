@@ -9,6 +9,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { DEFAULT_CONFIG } from "../factory.ts";
+import { checkRevision, parseReport } from "../tools/check-argument.ts";
 import { parseReview, reviewProblems } from "../tools/merge-reviews.ts";
 
 const HARNESS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -445,11 +446,12 @@ test("phase-1 and its roles only point at harness/tools files that exist", () =>
   for (const file of named) assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
 });
 
-test("DEFAULT_CONFIG configures Phases 0, 1 and 2", () => {
+test("DEFAULT_CONFIG configures Phases 0 to 3", () => {
   assert.deepEqual(DEFAULT_CONFIG.phases, {
     "0": "harness/skills/phase-0",
     "1": "harness/skills/phase-1",
     "2": "harness/skills/phase-2",
+    "3": "harness/skills/phase-3",
   });
   for (const [phase, skill] of Object.entries(DEFAULT_CONFIG.phases)) {
     assert.ok(existsSync(path.join(HARNESS_ROOT, skill, "SKILL.md")), `phase ${phase}'s skill ${skill} exists`);
@@ -890,4 +892,276 @@ test("every subagent dispatch in the skills names the model it runs on", () => {
   for (const dispatch of dispatches) {
     assert.match(dispatch, /\bmodel: "/, `names a model: ${dispatch}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3: the explanation loop's skill and its three role files.
+
+const PHASE3_ROLES = ["explain-analysis", "explain-literature", "explain-review"];
+
+/** The literal strings of a `const NAME = [ ... ];` array in a source file. */
+function sourceStrings(file: string, name: string): string[] {
+  const match = new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`).exec(read(file));
+  assert.ok(match, `${file} declares ${name}`);
+  return [...(match[1] as string).matchAll(/"([^"]+)"/g)].map((m) => m[1] as string);
+}
+
+test("phase-3 has the phase-3 frontmatter and describes the explanation loop", () => {
+  const file = "harness/skills/phase-3/SKILL.md";
+  assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
+  const markdown = read(file);
+  const fields = frontmatter(markdown);
+  assert.equal(fields.name, "phase-3");
+  assert.match(fields.description ?? "", /Phase 3/);
+  assert.match(fields.description ?? "", /explanation/);
+
+  const body = markdown.slice(markdown.indexOf("\n---\n") + 5);
+  for (const needed of [
+    "tree_list",
+    "tree_create",
+    "tree_update",
+    "open_round",
+    "close_round",
+    "archive_script",
+    "reproduce",
+    "submit",
+    "check-argument.ts",
+    "tasks/lit-",
+    "input",
+    "Ruling:",
+    "two consecutive",
+    "cwd",
+    "ctc-reviewer",
+    "ctc-worker",
+    "brief-review.md",
+    "revision.md",
+    "data-requests.md",
+    "rounds.json",
+    "roundCap",
+    "must-check.md",
+    "## Questions",
+    "### Task <L>: <aim>",
+    "Alternatives considered",
+    "Contribution:",
+    "Predictions",
+    "preregistration",
+    "assets.R",
+  ]) {
+    assert.ok(body.includes(needed), `the body mentions ${needed}`);
+  }
+  const prose = normalise(body);
+  assert.match(prose, /literature workers? (run|are dispatched) \*\*after\*\* the analysis workers/i, "literature runs after analysis");
+  assert.match(prose, /never in parallel with them/i, "literature is never parallel with analysis");
+  assert.match(prose, /nothing is fetched|never fetch/i, "nothing is fetched");
+  assert.match(prose, /never dispatched/i, "the explanation node is never dispatched");
+  assert.match(prose, /absolute paths/i, "workers are told to use absolute paths");
+  assert.match(prose, /greatest letter|highest letter|last letter/i, "the assets job gets the last letter");
+  assert.match(prose, /records no STOP/i, "an early stop by ruling records no STOP");
+  assert.match(prose, /call it again|call `reproduce` again/i, "reproduce PARTIAL is repeated");
+});
+
+test("every Phase 3 role file exists and is named by absolute path in the skill", () => {
+  const body = read("harness/skills/phase-3/SKILL.md");
+  for (const role of PHASE3_ROLES) {
+    const file = path.join(SKILLS, "roles", `${role}.md`);
+    assert.ok(existsSync(file), `${file} exists`);
+    const markdown = readFileSync(file, "utf8");
+    assert.match(frontmatter(markdown).name ?? "", new RegExp(role), `${role}.md names itself`);
+    assert.ok(body.includes(file), `phase-3's Skill lines use the absolute path ${file}`);
+  }
+});
+
+test("the Phase 3 skills only name tool and skill paths that exist", () => {
+  const files = ["harness/skills/phase-3/SKILL.md", ...PHASE3_ROLES.map((role) => `harness/skills/roles/${role}.md`)];
+  const named = new Set<string>();
+  for (const file of files) {
+    for (const match of read(file).matchAll(/harness\/(?:tools|skills)\/[\w./-]+\.(?:ts|md)/g)) named.add(match[0]);
+  }
+  for (const file of ["harness/tools/check-argument.ts", "harness/tools/check-citations.ts", "harness/skills/roles/deepis.md"]) {
+    assert.ok(named.has(file), `a Phase 3 skill names ${file}`);
+  }
+  for (const file of named) assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
+});
+
+test("every tool the Phase 3 skill calls is registered by the owner extension", () => {
+  const registered = new Set([...read("harness/owner-extension.ts").matchAll(/registerTool\(\{\s*name: "(\w+)"/g)].map((m) => m[1] as string));
+  for (const tool of ["open_round", "close_round", "archive_script", "reproduce", "submit", "tree_list", "tree_create", "tree_update"]) {
+    assert.ok(registered.has(tool), `owner-extension registers ${tool}`);
+  }
+  const body = read("harness/skills/phase-3/SKILL.md");
+  for (const tool of ["open_round", "close_round", "archive_script", "reproduce", "submit"]) {
+    assert.ok(new RegExp(`\\b${tool}\\(\\{`).test(body), `the skill shows a ${tool}({ ... }) call`);
+  }
+  // Every `name({` call in the skill that looks like a tool is a registered one (subagent is pi's own).
+  for (const match of body.matchAll(/\b([a-z]+(?:_[a-z]+)+)\(\{/g)) {
+    const tool = match[1] as string;
+    assert.ok(registered.has(tool), `${tool} is a registered owner tool`);
+  }
+  // The worker's tool is registered by the worker extension.
+  const worker = read("harness/worker-extension.ts");
+  assert.match(worker, /name: "run_analysis"/);
+  for (const role of ["explain-analysis"]) assert.ok(read(`harness/skills/roles/${role}.md`).includes("run_analysis"), `${role}.md names run_analysis`);
+});
+
+test("the Phase 3 owner calls use the parameter names the tools declare", () => {
+  const source = read("harness/owner-extension.ts");
+  const params = (name: string): string[] => {
+    const block = new RegExp(`const ${name} = Type\\.Object\\(\\{([\\s\\S]*?)\\n\\}\\);`).exec(source);
+    assert.ok(block, `${name} is declared`);
+    return [...(block[1] as string).matchAll(/^  (\w+): /gm)].map((m) => m[1] as string);
+  };
+  const body = read("harness/skills/phase-3/SKILL.md");
+  const calls: Record<string, string> = {
+    open_round: "OpenRoundParams",
+    close_round: "CloseRoundParams",
+    archive_script: "ArchiveScriptParams",
+    reproduce: "ReproduceParams",
+    submit: "SubmitParams",
+  };
+  for (const [tool, declared] of Object.entries(calls)) {
+    const call = new RegExp(`${tool}\\(\\{([^}]*)\\}\\)`).exec(body);
+    assert.ok(call, `the skill shows ${tool}({ ... })`);
+    const used = [...(call[1] as string).matchAll(/(\w+):/g)].map((m) => m[1] as string);
+    for (const name of used) assert.ok(params(declared).includes(name), `${tool} has a parameter ${name}`);
+    for (const name of params(declared).filter((p) => p !== "note")) assert.ok(used.includes(name), `the ${tool} example passes ${name}`);
+  }
+});
+
+test("the argument and report headings the roles name are the ones check-argument.ts checks", () => {
+  const argumentHeadings = sourceStrings("harness/tools/check-argument.ts", "ARGUMENT_HEADINGS");
+  const reportHeadings = sourceStrings("harness/tools/check-argument.ts", "REPORT_HEADINGS");
+  const reviewHeadings = sourceStrings("harness/tools/check-argument.ts", "REVIEW_HEADINGS");
+  assert.equal(argumentHeadings.length, 7);
+  assert.equal(reportHeadings.length, 6);
+  assert.equal(reviewHeadings.length, 5);
+
+  const skill = read("harness/skills/phase-3/SKILL.md");
+  for (const heading of argumentHeadings) assert.ok(skill.includes(heading), `phase-3 names the argument heading ${heading}`);
+  for (const heading of reportHeadings) {
+    assert.ok(read("harness/skills/roles/explain-literature.md").includes(heading), `explain-literature.md names ${heading}`);
+  }
+  for (const heading of reviewHeadings) {
+    assert.ok(read("harness/skills/roles/explain-review.md").includes(heading), `explain-review.md names ${heading}`);
+  }
+  // Every `## ` heading a role file shows in a format block is one check-argument knows.
+  const known = new Set([...argumentHeadings, ...reportHeadings, ...reviewHeadings]);
+  for (const role of ["explain-literature", "explain-review"]) {
+    for (const match of read(`harness/skills/roles/${role}.md`).matchAll(/^## .+$/gm)) {
+      const heading = match[0];
+      if (/^## (Definition of Done|Citations|Rules|Never|\d+\.)/.test(heading)) continue;
+      if (/^## \d/.test(heading)) continue;
+      assert.ok(known.has(heading) || /^## [A-Z]/.test(heading), `${role}.md heading ${heading}`);
+    }
+  }
+});
+
+test("explain-analysis teaches one task, one letter, the helpers and the data-request heading", () => {
+  const prose = normalise(read("harness/skills/roles/explain-analysis.md"));
+  for (const needed of [
+    "run_analysis",
+    "save_numbers",
+    "Data requests:",
+    "source(\"/opt/ctc/ctc.R\")",
+    "import ctc",
+    "put_var",
+    "write_variables",
+    "assets.R",
+    "absolute path",
+    "never overwrite",
+    "set.seed",
+    "output/numbers/<section>.csv#<key>",
+    "bare file name",
+    "no network",
+    "hold-out",
+    "dead end",
+  ]) {
+    assert.ok(prose.includes(needed), `explain-analysis.md says ${needed}`);
+  }
+  assert.match(prose, /never (name|read|write)[^.]*dataset/i, "the dataset root is off limits");
+});
+
+test("explain-literature writes the round report and asks for rivals and artifacts", () => {
+  const prose = normalise(read("harness/skills/roles/explain-literature.md"));
+  for (const needed of [
+    "Round:",
+    "workspace/reports/",
+    "check-citations",
+    "chunk id",
+    "verbatim",
+    "rival",
+    "artifact",
+    "precedent",
+    "roles/deepis.md",
+    "Status:",
+  ]) {
+    assert.ok(prose.includes(needed), `explain-literature.md says ${needed}`);
+  }
+});
+
+test("explain-review is a report, not a score, with the finding and status formats", () => {
+  const prose = normalise(read("harness/skills/roles/explain-review.md"));
+  for (const needed of [
+    "Result: ok|concerns",
+    "- [F<n>] [blocking|major|minor]",
+    "Status: DONE",
+    "workspace/reviews/report.md",
+    "not a score",
+    "no analysis",
+    "never read",
+    "owners/",
+    "check-citations",
+    "output/numbers/",
+    "Result:",
+  ]) {
+    assert.ok(prose.includes(needed), `explain-review.md says ${needed}`);
+  }
+});
+
+test("the design spec follows the Phase 3 design's §12 edits", () => {
+  const spec = read("docs/superpowers/specs/2026-10-12-ctc-research-factory-design.md");
+  const phase3 = spec.slice(spec.indexOf("### Phase 3: Explanations"), spec.indexOf("### Phase 4: Writing"));
+  assert.ok(phase3.length > 100, "found the Phase 3 section");
+  assert.doesNotMatch(phase3, /Explanation tournament/i, "no explanation tournament");
+  assert.doesNotMatch(phase3, /proposal tournament/i, "no proposal tournament");
+  assert.doesNotMatch(phase3, /Propose rivals/i, "no rival proposals");
+  assert.doesNotMatch(phase3, /unlock the hold-out for this node only/i, "no per-node unlock");
+  assert.match(phase3, /Phase 5/, "Phase 3 names the single Phase 5 hold-out unlock");
+  assert.match(phase3, /two consecutive/i, "Phase 3 names the stop rule");
+  assert.match(phase3, /check-argument/, "Phase 3 names the end gate");
+
+  const phase5 = spec.slice(spec.indexOf("### Phase 5: Review and evaluation"), spec.indexOf("## 7. Tournaments"));
+  assert.match(phase5, /hold-out/i, "Phase 5 holds the single hold-out unlock");
+
+  const pools = spec.slice(spec.indexOf("- **Pools:**"), spec.indexOf("- **Ratings:**"));
+  assert.doesNotMatch(pools, /explanation proposals within a puzzle/);
+  assert.doesNotMatch(pools, /explanations within a puzzle/);
+  assert.doesNotMatch(spec, /\*Explanations:\* plausibility, coherence/);
+
+  const integrity = spec.slice(spec.indexOf("## 8. Integrity checks"), spec.indexOf("## 9. Integrating"));
+  assert.doesNotMatch(integrity, /per node and logged/i, "hold-out discipline is no longer per node");
+  assert.match(integrity, /Phase 5/, "hold-out discipline names Phase 5");
+  assert.match(integrity, /analysis container/i, "sandboxing names the analysis container");
+});
+
+test("explain-review's worked example is a report the code accepts, and its findings can be ruled on", () => {
+  const markdown = read("harness/skills/roles/explain-review.md");
+  const start = markdown.indexOf("BEGIN REPORT EXAMPLE\n");
+  const end = markdown.indexOf("END REPORT EXAMPLE", start);
+  assert.ok(start >= 0 && end > start, "the role marks its worked example with BEGIN/END");
+  const example = markdown.slice(start + "BEGIN REPORT EXAMPLE\n".length, end).trim();
+
+  const parsed = parseReport(example);
+  assert.ok(parsed !== null, "parseReport accepts the worked example");
+  assert.equal(parsed.status, "DONE");
+  assert.deepEqual(parsed.findings.map((finding) => finding.id), ["F1", "F2", "F3"]);
+  assert.deepEqual(parsed.findings.map((finding) => finding.severity), ["major", "blocking", "minor"]);
+  // Each of the four checks opens with a Result: line.
+  for (const heading of ["Citation fidelity", "Number provenance", "Overclaiming", "Abductive honesty"]) {
+    const body = example.slice(example.indexOf(`## ${heading}`)).split("\n").slice(1).find((line) => line.trim() !== "");
+    assert.match(body ?? "", /^Result: (ok|concerns)\b/, `${heading} opens with Result:`);
+  }
+  const revision = "F1: taken — cited a chunk about the same platform\nF2: overruled — the boundary is already stated in Limitations\nF3: taken — reworded\n";
+  assert.deepEqual(checkRevision(parsed.findings, revision), []);
+  assert.deepEqual(checkRevision(parsed.findings, "F1: taken — x\n"), ["revision.md has no ruling for F2", "revision.md has no ruling for F3"]);
+  assert.match(normalise(read("harness/skills/phase-3/SKILL.md")), /F<n>: taken — <what changed>.*F<n>: overruled — <reason>/);
 });

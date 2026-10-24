@@ -140,6 +140,7 @@ const DEFAULT_CONFIG = {
     "0": "harness/skills/phase-0",
     "1": "harness/skills/phase-1",
     "2": "harness/skills/phase-2",
+    "3": "harness/skills/phase-3",
   },
 };
 

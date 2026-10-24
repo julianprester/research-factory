@@ -28,7 +28,12 @@ import { initRun, listNodes } from "./tree.ts";
  */
 export const DEFAULT_CONFIG: RunConfig = {
   model: "claude-bridge/claude-haiku-5-5",
-  phases: { "0": "harness/skills/phase-0", "1": "harness/skills/phase-1", "2": "harness/skills/phase-2" },
+  phases: {
+    "0": "harness/skills/phase-0",
+    "1": "harness/skills/phase-1",
+    "2": "harness/skills/phase-2",
+    "3": "harness/skills/phase-3",
+  },
 };
 
 /**
