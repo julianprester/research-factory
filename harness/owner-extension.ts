@@ -10,7 +10,18 @@
 import * as path from "node:path";
 import { Type } from "typebox";
 
-import { archiveScript, closeRound, openRound, type ArchiveScriptInput, type CloseRoundInput, type OpenRoundInput } from "./explain/tools.ts";
+import {
+  archiveScript,
+  closeRound,
+  openRound,
+  reproduce,
+  submit,
+  type ArchiveScriptInput,
+  type CloseRoundInput,
+  type OpenRoundInput,
+  type ReproduceInput,
+  type SubmitInput,
+} from "./explain/tools.ts";
 import { ownerMayWrite } from "./guard.ts";
 import {
   checkDuplicates,
@@ -102,6 +113,15 @@ const ArchiveScriptParams = Type.Object({
   nodeId: Type.String({ description: "The explanation node, e.g. E01" }),
   script: Type.String({ description: "The script file name in workspace/scripts, e.g. A_01.R" }),
   reason: Type.String({ description: "Why this analysis is dropped; recorded in archive/<stem>/README.md" }),
+});
+
+const ReproduceParams = Type.Object({
+  nodeId: Type.String({ description: "The explanation node, e.g. E01" }),
+});
+
+const SubmitParams = Type.Object({
+  nodeId: Type.String({ description: "The explanation node, e.g. E01" }),
+  note: Type.Optional(Type.String({ description: "Why it is ready: recorded in the commit message, not on the node" })),
 });
 
 interface TreeListInput {
@@ -224,6 +244,10 @@ export default function ownerExtension(pi: PiLike): void {
       const parent = findNode(dir, params.parentId);
       const nodePhase = createPhase(parent, params.type);
       if (nodePhase !== phase) throw refuseNotYourPhase(nodePhase, phase);
+      // An explanation belongs to a promoted puzzle: a puzzle still in Phase 2 has not passed `promote`'s gates.
+      if (parent.type === "puzzle" && (params.type ?? CHILD_TYPE[parent.type]) === "explanation" && parent.phase !== 3) {
+        throw new Error(`${parent.id} is in Phase ${parent.phase}, not Phase 3: explanations are created only under puzzles that promote has moved to Phase 3`);
+      }
       // The child's resolved type decides whether this is evolution; only a
       // puzzle with a derivedFrom is a child of the tournament.
       const childType = params.type ?? CHILD_TYPE[parent.type];
@@ -253,6 +277,13 @@ export default function ownerExtension(pi: PiLike): void {
         (params.status === "promoted" || (params.phase !== undefined && params.phase !== found.phase))
       ) {
         throw new Error("use promote: puzzles reach Phase 3 only through the gated promote tool");
+      }
+      // The same for an explanation: it reaches Phase 4 only through `submit`, which runs the end gate.
+      if (
+        found.type === "explanation" &&
+        (params.status === "submitted" || (params.phase !== undefined && params.phase !== found.phase))
+      ) {
+        throw new Error("use submit: an explanation reaches Phase 4 only through the gated submit tool");
       }
       const node = updateNode(dir, params.nodeId, { status: params.status, phase: params.phase }, actor(phase), params.note);
       return result(`updated ${line(node)}`);
@@ -328,6 +359,30 @@ export default function ownerExtension(pi: PiLike): void {
     async execute(_toolCallId: string, params: ArchiveScriptInput) {
       requirePhase3("archive_script");
       return result(await archiveScript(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "reproduce",
+    label: "Reproduce the analyses",
+    description:
+      "After the loop has STOPped, re-run every script of an explanation node in the container into an empty output and compare the registry with yours (exact for text and integers, relative 1e-6 for floats). A call is bounded to about 8 minutes, checked between scripts: a PARTIAL answer means call reproduce again to resume. A complete one writes and commits owners/phase-3/loop/<E>/reproduction.json. Editing a script or a number afterwards invalidates it.",
+    parameters: ReproduceParams,
+    async execute(_toolCallId: string, params: ReproduceInput) {
+      requirePhase3("reproduce");
+      return result(await reproduce(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "submit",
+    label: "Submit an explanation",
+    description:
+      "Submit an explanation node to Phase 4. Refuses, naming the gate, unless: a STOP is recorded; the node has scripts; check-argument (with its review checks) has no problems; the last reproduction is ok and the scripts and numbers still hash the same; the review report is not BLOCKED; and every finding has a ruling in reviews/revision.md. Then one commit sets the node ready in Phase 4; its sha is the argument's preregistration for Phase 5.",
+    parameters: SubmitParams,
+    async execute(_toolCallId: string, params: SubmitInput) {
+      requirePhase3("submit");
+      return result(await submit(runDir(), params));
     },
   });
 

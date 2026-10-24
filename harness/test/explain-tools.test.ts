@@ -15,8 +15,19 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { archiveScript, closeRound, openRound } from "../explain/tools.ts";
+import type { Exec } from "../analysis/run.ts";
+import { workspaceHash } from "../explain/reproduce.ts";
 import { loopDir, readRounds } from "../explain/rounds.ts";
+import {
+  archiveScript,
+  closeRound,
+  openRound,
+  reproduce,
+  setBudgetForTests,
+  setCitationsForTests,
+  setExecForTests,
+  submit,
+} from "../explain/tools.ts";
 import { ownerMayWrite } from "../guard.ts";
 import ownerExtension from "../owner-extension.ts";
 import { createChild, initRun, updateNode } from "../tree.ts";
@@ -98,7 +109,12 @@ function config(run: string, extra: Record<string, unknown> = {}): void {
 /** A run with a puzzle in Phase 3 (with its snapshot sources) and an explanation node under it. */
 function fixture(t: TestContext, extra: Record<string, unknown> = {}): Fixture {
   const run = tempDir(t);
-  initRun(run, "data", "interest");
+  // A real dataset and split lists, so `reproduce` can mount an exploration split.
+  const dataset = tempDir(t);
+  write(path.join(dataset, "a.csv"), "a,1\n");
+  initRun(run, dataset, "interest");
+  write(path.join(run, "prep", "Z01-profile", "workspace", "split", "exploration.txt"), "a.csv\n");
+  write(path.join(run, "prep", "Z01-profile", "workspace", "split", "holdout.txt"), "");
   createChild(run, "D01", "Etiquette", "owner-p1");
   const puzzle = createChild(run, "T01", "Rules by example", "owner-p2");
   updateNode(run, puzzle.id, { phase: 3 }, "owner-p2");
@@ -755,4 +771,460 @@ test("close_round at round 6 with roundCap 6: two quiet rounds report two-quiet,
   const last = await runRound(fx, 6, ["F"], "none");
   assert.match(last, /STOP \(two-quiet\)/);
   assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("G") })), /STOP recorded \(two-quiet\)/);
+});
+
+// ---------------------------------------------------------------------------
+// reproduce and submit (design §9, §10)
+// ---------------------------------------------------------------------------
+
+const NODE_BASE = "patterns/T01-etiquette/puzzles/P01-rules-by-example/explanations/E01-argument";
+const REGISTRY = "name,value,note\nn,1234,\n";
+
+const ARGUMENT_FULL = [
+  "Contribution: theoretical",
+  "",
+  "## Explanation",
+  "Etiquette rules travel by example rather than by statement.",
+  "",
+  "## Mechanism and scope",
+  "Readers copy the first example they meet.",
+  "",
+  "## What would count against it",
+  "Rules stated in full on the opening pages.",
+  "",
+  "## Alternatives considered",
+  "The timing account is ruled out.",
+  "",
+  "## Evidence",
+  "The sample is [1234](output/numbers/A_01.csv#n) pages long.",
+  "The literature is in [report one](reports/01.md).",
+  "",
+  "## Limitations",
+  "The snapshot cannot show causality.",
+  "",
+  "## Predictions",
+  "The hold-out sample should show the same ordering.",
+  "",
+].join("\n");
+
+const REPORT_FULL = (round: number) =>
+  [
+    `Round: ${round}`,
+    "",
+    ...[
+      "What the results are",
+      "Literature on these results",
+      "Rival and artifact accounts",
+      "What else should be true",
+      "Measurement precedents",
+      "Implications for the argument",
+    ].flatMap((heading) => [`## ${heading}`, "Two sources were read.", ""]),
+  ].join("\n");
+
+const review = (status = "DONE_WITH_CONCERNS", findings = ["- [F1] [major] Number provenance: no registry row."]) =>
+  [
+    ...["Citation fidelity", "Number provenance", "Overclaiming", "Abductive honesty"].flatMap((heading) => [
+      `## ${heading}`,
+      "Result: ok",
+      "Fine.",
+      "",
+    ]),
+    "## Findings",
+    ...findings,
+    "",
+    `Status: ${status}`,
+    "",
+  ].join("\n");
+
+const REVISION = "F1: taken\n";
+
+/** A fake container: writes the registry `A_01.csv` for `A_01.R`, whatever it is told. */
+function fakeContainer(options: { delayMs?: number; registry?: string; onRun?: (host: string) => void } = {}): { exec: Exec; calls: string[] } {
+  const calls: string[] = [];
+  const exec: Exec = async (args) => {
+    const mount = args.find((arg, at) => args[at - 1] === "-v" && arg.endsWith(":/work/output"));
+    const host = (mount ?? "").slice(0, -":/work/output".length);
+    const script = (args.at(-1) ?? "").replace(/^scripts\//, "");
+    calls.push(script);
+    if (options.delayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+    write(path.join(host, "numbers", `${script.replace(/\.[^.]+$/, "")}.csv`), options.registry ?? REGISTRY);
+    options.onRun?.(host);
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
+  };
+  return { exec, calls };
+}
+
+const inWorkspace = (fx: Fixture, ...parts: string[]) => path.join(fx.node, "workspace", ...parts);
+const recordFile = (fx: Fixture) => path.join(loopDir(fx.run, "E01"), "reproduction.json");
+const readRecord = (fx: Fixture) => JSON.parse(readFileSync(recordFile(fx), "utf8")) as { ok: boolean; workspaceHash: string; mismatches: string[] };
+
+/** A node whose rounds have stopped, with a script, its registry, the argument, the reports and a review. */
+async function closedOut(t: TestContext, rounds: Array<"substantial" | "none"> = ["substantial", "none", "none"]): Promise<Fixture> {
+  const fx = fixture(t);
+  write(inWorkspace(fx, "scripts", "A_01.R"), "# A\n");
+  write(inWorkspace(fx, "output", "numbers", "A_01.csv"), REGISTRY);
+  for (const [at, changed] of rounds.entries()) await runRound(fx, at + 1, [String.fromCharCode(65 + at)], changed);
+  write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL);
+  for (let round = 1; round <= rounds.length; round++) write(inWorkspace(fx, "reports", `${String(round).padStart(2, "0")}.md`), REPORT_FULL(round));
+  write(inWorkspace(fx, "output", "assets", "_variables.yml"), 'n_pages: "1234"\n');
+  write(inWorkspace(fx, "output", "assets", "variables_sources.csv"), "variable,value,rendered,source\nn_pages,1234,1234,output/numbers/A_01.csv#n\n");
+  write(inWorkspace(fx, "reviews", "report.md"), review());
+  write(inWorkspace(fx, "reviews", "revision.md"), REVISION);
+  settle(fx.run);
+  return fx;
+}
+
+/** A closed-out node that has been reproduced (ok) and passes every gate. */
+async function reproduced(t: TestContext): Promise<Fixture> {
+  const fx = await closedOut(t);
+  const text = await reproduce(fx.run, { nodeId: "E01" }, { exec: fakeContainer().exec });
+  assert.match(text, /reproduced/);
+  assert.equal(readRecord(fx).ok, true);
+  return fx;
+}
+
+const passCitations = () => [] as string[];
+const submitOk = (fx: Fixture, note?: string) => submit(fx.run, { nodeId: "E01", note }, { citations: passCitations });
+const submitMessage = (fx: Fixture) => rejectMessage(submit(fx.run, { nodeId: "E01" }, { citations: passCitations }));
+
+test("reproduce is refused until a STOP is recorded, and writes nothing", async (t) => {
+  const fx = await closedOut(t, ["substantial", "none"]);
+  const before = subjects(fx.run).length;
+  const fake = fakeContainer();
+  assert.match(await rejectMessage(reproduce(fx.run, { nodeId: "E01" }, { exec: fake.exec })), /no STOP is recorded/);
+  assert.equal(existsSync(recordFile(fx)), false);
+  assert.deepEqual(fake.calls, [], "no script ran");
+  assert.equal(subjects(fx.run).length, before);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+});
+
+test("reproduce refuses a node that is not an explanation in Phase 3", async (t) => {
+  const fx = await closedOut(t);
+  assert.match(await rejectMessage(reproduce(fx.run, { nodeId: "T01" }, { exec: fakeContainer().exec })), /not an explanation node/);
+});
+
+test("reproduce: a partial call says to call again, the next completes, and the record is committed", async (t) => {
+  const fx = await closedOut(t);
+  write(inWorkspace(fx, "scripts", "B_01.R"), "# B\n");
+  write(inWorkspace(fx, "output", "numbers", "B_01.csv"), REGISTRY);
+  settle(fx.run);
+  const fake = fakeContainer({ delayMs: 60 });
+  const first = await reproduce(fx.run, { nodeId: "E01" }, { exec: fake.exec, budgetMs: 30 });
+  assert.match(first, /PARTIAL/);
+  assert.match(first, /call reproduce again/);
+  assert.equal(existsSync(recordFile(fx)), false, "a partial run records nothing");
+  assert.equal(git(fx.run, "status", "--porcelain"), "", "the resume state does not dirty the tree");
+
+  const second = await reproduce(fx.run, { nodeId: "E01" }, { exec: fake.exec, budgetMs: 30_000 });
+  assert.match(second, /reproduced/);
+  assert.deepEqual(fake.calls, ["A_01.R", "B_01.R"], "each script ran once: the second call resumed");
+  const record = readRecord(fx);
+  assert.deepEqual(record, { ok: true, workspaceHash: workspaceHash(fx.node), mismatches: [] });
+  assert.equal(subjects(fx.run)[0], "[P3:reproduce] E01");
+  assert.deepEqual(lastFiles(fx.run), ["A\towners/phase-3/loop/E01/reproduction.json"]);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+});
+
+test("reproduce records ok:false with the mismatches, and prints them", async (t) => {
+  const fx = await closedOut(t);
+  const drift = fakeContainer({ registry: "name,value,note\nn,1235,\n" });
+  const text = await reproduce(fx.run, { nodeId: "E01" }, { exec: drift.exec });
+  assert.match(text, /did NOT reproduce/);
+  assert.match(text, /A_01\.csv "n": 1234 vs 1235/);
+  const record = readRecord(fx);
+  assert.equal(record.ok, false);
+  assert.equal(record.mismatches.length, 1);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+  assert.equal(subjects(fx.run)[0], "[P3:reproduce] E01");
+});
+
+test("reproduce records the hash taken before the scripts ran", async (t) => {
+  const fx = await closedOut(t);
+  const before = workspaceHash(fx.node);
+  // An edit to the owner's registry while the scripts run is an edit after the check began.
+  const racing = fakeContainer({ onRun: () => write(inWorkspace(fx, "output", "numbers", "A_01.csv"), "name,value,note\nn,1234,edited\n") });
+  await reproduce(fx.run, { nodeId: "E01" }, { exec: racing.exec });
+  assert.equal(readRecord(fx).workspaceHash, before);
+  assert.notEqual(workspaceHash(fx.node), before);
+  assert.match(await submitMessage(fx), /changed since the reproduction/);
+});
+
+test("reproduce reports a link planted in the reproduced registry, cleans up, and the next call starts fresh", async (t) => {
+  const fx = await closedOut(t);
+  const planting = fakeContainer({
+    onRun: (host) => symlinkSync(path.join(host, "numbers", "A_01.csv"), path.join(host, "numbers", "L.csv")),
+  });
+  const text = await reproduce(fx.run, { nodeId: "E01" }, { exec: planting.exec });
+  assert.match(text, /did NOT reproduce/);
+  assert.match(text, /L\.csv.*link/);
+  const record = readRecord(fx);
+  assert.equal(record.ok, false);
+  assert.match(record.mismatches.join("\n"), /L\.csv.*link/);
+  assert.equal(readdirSync(path.join(fx.run, ".analysis", "repro")).length, 0, "the scratch folder is gone");
+  assert.equal(existsSync(path.join(fx.run, ".analysis", "repro-state")) && readdirSync(path.join(fx.run, ".analysis", "repro-state")).length > 0, false, "the state file is gone");
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+
+  const again = fakeContainer();
+  assert.match(await reproduce(fx.run, { nodeId: "E01" }, { exec: again.exec }), /reproduced/);
+  assert.deepEqual(again.calls, ["A_01.R"], "the scripts ran again from the start");
+  assert.equal(readRecord(fx).ok, true);
+});
+
+test("reproduce does not follow a link where it cleans up", async (t) => {
+  const fx = await closedOut(t);
+  const outside = tempDir(t);
+  write(path.join(outside, "keep.txt"), "keep");
+  const planting = fakeContainer({
+    onRun: (host) => {
+      symlinkSync(path.join(host, "numbers", "A_01.csv"), path.join(host, "numbers", "L.csv"));
+      symlinkSync(outside, path.join(host, "numbers", "out"));
+    },
+  });
+  await reproduce(fx.run, { nodeId: "E01" }, { exec: planting.exec });
+  assert.equal(readFileSync(path.join(outside, "keep.txt"), "utf8"), "keep");
+});
+
+test("reproduce and submit are registered for Phase 3 only", async (t) => {
+  const fx = await closedOut(t);
+  const phase3 = captureTools(t, fx.run, 3);
+  setExecForTests(fakeContainer().exec);
+  setCitationsForTests(passCitations);
+  t.after(() => {
+    setExecForTests(undefined);
+    setCitationsForTests(undefined);
+  });
+  const done = await phase3.get("reproduce")!.execute("c1", { nodeId: "E01" });
+  assert.match(done.content[0]!.text, /reproduced/);
+  const submitted = await phase3.get("submit")!.execute("c2", { nodeId: "E01", note: "ready" });
+  assert.match(submitted.content[0]!.text, /submitted E01/);
+  for (const phase of [1, 2]) {
+    const tools = captureTools(t, fx.run, phase);
+    for (const name of ["reproduce", "submit"]) {
+      assert.equal(await rejectMessage(tools.get(name)!.execute("c", { nodeId: "E01" })), `Not your phase: ${name} is a phase-3 tool and you own P${phase}`);
+    }
+  }
+});
+
+test("the extension's reproduce uses the budget hook", async (t) => {
+  const fx = await closedOut(t);
+  const phase3 = captureTools(t, fx.run, 3);
+  setExecForTests(fakeContainer().exec);
+  setBudgetForTests(0);
+  t.after(() => {
+    setExecForTests(undefined);
+    setBudgetForTests(undefined);
+  });
+  const partial = await phase3.get("reproduce")!.execute("c1", { nodeId: "E01" });
+  assert.match(partial.content[0]!.text, /PARTIAL/);
+});
+
+// --- submit: every gate in turn -------------------------------------------
+
+test("submit succeeds when every gate holds: phase 4 ready, one commit named in the reply", async (t) => {
+  const fx = await reproduced(t);
+  const before = subjects(fx.run).length;
+  const text = await submitOk(fx, "the argument is settled");
+  const sha = git(fx.run, "rev-parse", "--short", "HEAD").trim();
+  assert.match(text, /submitted E01/);
+  assert.ok(text.includes(sha), `the reply names ${sha}: ${text}`);
+  assert.match(text, /preregist/i);
+  assert.equal(subjects(fx.run).length, before + 1, "one commit");
+  assert.equal(subjects(fx.run)[0], "[P4:updateNode] E01 — status ready, phase 4, note");
+  assert.match(git(fx.run, "log", "-1", "--format=%b").trim(), /the argument is settled/);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+  const state = JSON.parse(readFileSync(path.join(fx.node, "node.json"), "utf8")) as { phase: number; status: string };
+  assert.deepEqual([state.phase, state.status], [4, "ready"]);
+});
+
+test("submit still passes after an edit to argument.md, and the commit carries the edit", async (t) => {
+  const fx = await reproduced(t);
+  write(inWorkspace(fx, "argument.md"), `${ARGUMENT_FULL}\nA late sentence.\n`);
+  await submitOk(fx);
+  assert.match(git(fx.run, "show", "HEAD:" + `${NODE_BASE}/workspace/argument.md`), /A late sentence/);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+});
+
+test("submit refuses without a STOP", async (t) => {
+  const fx = await closedOut(t, ["substantial", "none"]);
+  assert.match(await submitMessage(fx), /gate "STOP"/);
+});
+
+test("submit refuses a node with no scripts (a vacuous reproduction must not pass)", async (t) => {
+  const fx = await closedOut(t);
+  // A reproduction of nothing: the record is ok, for the hash of the empty workspace.
+  rmSync(inWorkspace(fx, "scripts", "A_01.R"));
+  rmSync(inWorkspace(fx, "output", "numbers", "A_01.csv"));
+  write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL.replace(/\n.*A_01\.csv.*\n/, "\nNo numbers.\n"));
+  settle(fx.run);
+  await reproduce(fx.run, { nodeId: "E01" }, { exec: fakeContainer().exec });
+  assert.equal(readRecord(fx).ok, true, "the vacuous reproduction is ok, which is why submit must refuse it");
+  assert.match(await submitMessage(fx), /gate "no scripts"/);
+});
+
+test("submit refuses on a check-argument problem", async (t) => {
+  const fx = await reproduced(t);
+  write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL.replace("## Limitations", "Limitations"));
+  const message = await submitMessage(fx);
+  assert.match(message, /gate "check-argument"/);
+  assert.match(message, /lacks the heading "## Limitations"/);
+});
+
+test("submit uses the injected citation check, and a citation problem refuses", async (t) => {
+  const fx = await reproduced(t);
+  const message = await rejectMessage(submit(fx.run, { nodeId: "E01" }, { citations: () => ["quote not found"] }));
+  assert.match(message, /gate "check-argument"/);
+  assert.match(message, /quote not found/);
+});
+
+test("submit takes its citation check from the test hook when none is passed", async (t) => {
+  const fx = await reproduced(t);
+  setCitationsForTests(() => ["hooked problem"]);
+  t.after(() => setCitationsForTests(undefined));
+  assert.match(await rejectMessage(submit(fx.run, { nodeId: "E01" })), /hooked problem/);
+});
+
+test("submit refuses without a reproduction record", async (t) => {
+  const fx = await closedOut(t);
+  const message = await submitMessage(fx);
+  assert.match(message, /gate "reproduction"/);
+  assert.match(message, /no reproduction record/);
+});
+
+test("submit refuses a failed reproduction", async (t) => {
+  const fx = await closedOut(t);
+  await reproduce(fx.run, { nodeId: "E01" }, { exec: fakeContainer({ registry: "name,value,note\nn,9,\n" }).exec });
+  const message = await submitMessage(fx);
+  assert.match(message, /gate "reproduction"/);
+  assert.match(message, /did not reproduce/);
+});
+
+test("submit refuses a record it cannot read, whatever the reason (fail closed)", async (t) => {
+  const fx = await reproduced(t);
+  writeFileSync(recordFile(fx), "{not json");
+  assert.match(await submitMessage(fx), /gate "reproduction".*unreadable/s);
+  writeFileSync(recordFile(fx), JSON.stringify({ ok: true }));
+  assert.match(await submitMessage(fx), /gate "reproduction".*unreadable/s);
+  const real = readFileSync(recordFile(fx));
+  rmSync(recordFile(fx));
+  writeFileSync(path.join(fx.run, "elsewhere.json"), real);
+  symlinkSync(path.join(fx.run, "elsewhere.json"), recordFile(fx));
+  assert.match(await submitMessage(fx), /gate "reproduction".*link/s);
+});
+
+test("submit refuses a script edited after reproduce, and a number edited after it (Review Focus 4)", async (t) => {
+  const fx = await reproduced(t);
+  write(inWorkspace(fx, "scripts", "A_01.R"), "# A, edited after the check\n");
+  const message = await submitMessage(fx);
+  assert.match(message, /gate "reproduction"/);
+  assert.match(message, /changed since the reproduction/);
+  assert.notEqual(workspaceHash(fx.node), readRecord(fx).workspaceHash);
+
+  write(inWorkspace(fx, "scripts", "A_01.R"), "# A\n");
+  await submitOk(fx).catch(() => assert.fail("restoring the script restores the hash"));
+});
+
+test("submit refuses a registry number edited after reproduce", async (t) => {
+  const fx = await reproduced(t);
+  write(inWorkspace(fx, "output", "numbers", "A_01.csv"), "name,value,note\nn,1234,a new note\n");
+  assert.match(await submitMessage(fx), /changed since the reproduction/);
+});
+
+test("submit refuses without a review report", async (t) => {
+  const fx = await reproduced(t);
+  rmSync(inWorkspace(fx, "reviews", "report.md"));
+  assert.match(await submitMessage(fx), /reviews\/report\.md is missing/);
+});
+
+test("submit refuses a BLOCKED review", async (t) => {
+  const fx = await reproduced(t);
+  write(inWorkspace(fx, "reviews", "report.md"), review("BLOCKED"));
+  const message = await submitMessage(fx);
+  assert.match(message, /gate "review"/);
+  assert.match(message, /BLOCKED/);
+});
+
+test("submit refuses a finding with no revision line, and an overruled one with no reason", async (t) => {
+  const fx = await reproduced(t);
+  write(inWorkspace(fx, "reviews", "revision.md"), "nothing here\n");
+  const missing = await submitMessage(fx);
+  assert.match(missing, /gate "revision"/);
+  assert.match(missing, /no ruling for F1/);
+  rmSync(inWorkspace(fx, "reviews", "revision.md"));
+  assert.match(await submitMessage(fx), /no ruling for F1/, "an absent revision.md rules on nothing");
+  write(inWorkspace(fx, "reviews", "revision.md"), "F1: overruled --\n");
+  assert.match(await submitMessage(fx), /F1 is overruled with no reason/);
+  write(inWorkspace(fx, "reviews", "revision.md"), "F1: overruled - the registry row is in the reproduction\n");
+  await submitOk(fx);
+});
+
+test("submit passes a review with no findings without a revision file", async (t) => {
+  const fx = await reproduced(t);
+  write(inWorkspace(fx, "reviews", "report.md"), review("DONE", ["None."]));
+  rmSync(inWorkspace(fx, "reviews", "revision.md"));
+  await submitOk(fx);
+});
+
+test("submit reads the review, the revision and the record without following a link", async (t) => {
+  const fx = await reproduced(t);
+  for (const name of ["report.md", "revision.md"]) {
+    const file = inWorkspace(fx, "reviews", name);
+    const bytes = readFileSync(file);
+    rmSync(file);
+    write(path.join(fx.run, `${name}.real`), bytes.toString("utf8"));
+    symlinkSync(path.join(fx.run, `${name}.real`), file);
+    assert.match(await submitMessage(fx), /is a link/, `${name} as a link`);
+    unlinkSync(file);
+    writeFileSync(file, bytes);
+  }
+  await submitOk(fx);
+});
+
+test("a refused submit makes no commit and leaves the node where it was", async (t) => {
+  const fx = await reproduced(t);
+  write(inWorkspace(fx, "reviews", "report.md"), review("BLOCKED"));
+  settle(fx.run);
+  const before = subjects(fx.run).length;
+  await rejectMessage(submit(fx.run, { nodeId: "E01" }, { citations: passCitations }));
+  assert.equal(subjects(fx.run).length, before);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+  const state = JSON.parse(readFileSync(path.join(fx.node, "node.json"), "utf8")) as { phase: number; status: string };
+  assert.deepEqual([state.phase, state.status], [3, "ready"]);
+});
+
+test("submit refuses a second time: the node is no longer in Phase 3", async (t) => {
+  const fx = await reproduced(t);
+  await submitOk(fx);
+  assert.match(await submitMessage(fx), /Not your phase/);
+});
+
+// --- tree_update and tree_create ------------------------------------------
+
+test("tree_update refuses submitted and a phase change on an explanation, but not other statuses", async (t) => {
+  const fx = fixture(t);
+  const tools = captureTools(t, fx.run, 3);
+  const update = (params: Record<string, unknown>) => tools.get("tree_update")!.execute("c", { nodeId: "E01", ...params });
+  assert.match(await rejectMessage(update({ status: "submitted" })), /use submit/);
+  assert.match(await rejectMessage(update({ phase: 4 })), /use submit/);
+  assert.match(await rejectMessage(update({ status: "ready", phase: 4 })), /use submit/);
+  const active = await update({ status: "active" });
+  assert.match(active.content[0]!.text, /E01 explanation 3 active/);
+  const same = await update({ phase: 3, note: "no change" });
+  assert.match(same.content[0]!.text, /E01 explanation 3/);
+});
+
+test("tree_create refuses an explanation under a puzzle that is not in Phase 3", async (t) => {
+  const fx = fixture(t);
+  const second = createChild(fx.run, "T01", "Another puzzle", "owner-p2");
+  updateNode(fx.run, second.id, { phase: 2 }, "owner-p2");
+  settle(fx.run);
+  const before = subjects(fx.run).length;
+  const phase2 = captureTools(t, fx.run, 2);
+  const message = await rejectMessage(phase2.get("tree_create")!.execute("c", { parentId: second.id, title: "Too early" }));
+  assert.match(message, /promote/);
+  assert.match(message, /Phase 3/);
+  assert.equal(subjects(fx.run).length, before);
+
+  const phase3 = captureTools(t, fx.run, 3);
+  const made = await phase3.get("tree_create")!.execute("c", { parentId: "P01", title: "Second take" });
+  assert.match(made.content[0]!.text, /created E02 explanation 3 ready/);
 });
