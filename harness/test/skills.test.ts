@@ -1248,7 +1248,10 @@ test("the Phase 3 skill states the letter rule, brief-first folders and the roun
 
 test("the Phase 3 skill tells the owner it never reads the dataset, and the guard refuses it", () => {
   const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
-  assert.match(skill, /\*\*You never read the dataset:\*\* your `read` and `bash` are refused for any path under the dataset root and for any command that names it or the hold-out in any spelling/);
+  assert.match(skill, /\*\*You never read the dataset:\*\* your `read` and `bash` are refused for any path under the dataset root and for any command that names it or the held-out-data term in any spelling/);
+  assert.match(skill, /In Phases 3–4, bash commands containing the held-out-data term in any spelling are refused, including ledger appends and commit messages/);
+  assert.match(skill, /use `the held-back split` in shell-written ledger\/ruling text and commit messages, or use `write`\/`edit` for text that needs the restricted phrase/);
+  assert.doesNotMatch(skill, /your ledger and files are not affected/);
 });
 
 test("the Phase 3 skill says an unlinked registry number warns and dead ends are archived with a reason", () => {
