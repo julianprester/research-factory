@@ -59,6 +59,7 @@ type Handler = (event: { toolName: string; input: { path: string } }) => unknown
 
 const dirty = (run: string): string[] => git(run, "status", "--porcelain", "-uall").split("\n").filter((line) => line !== "").sort();
 const head = (run: string): string => git(run, "rev-parse", "HEAD").trim();
+/** The calls that are whole-tree operations (`commit()`/`updateNode`): they take the workers' pending files with them. Every other tool commits its own paths only. */
 const SWEEPS = new Set(["tree_create", "tree_update", "submit"]);
 
 /** The real extension, registered with `CTC_RUN_DIR`/`CTC_PHASE=3` as a launched owner session sees them. */
@@ -101,10 +102,9 @@ function owner(t: TestContext, run: string): Owner {
       self.committed =
         headAfter === headBefore ? [] : git(run, "diff", "--name-only", headBefore, headAfter).split("\n").filter((line) => line !== "").sort();
       if (!SWEEPS.has(name)) {
-        // A tool that commits its own paths leaves every other pending file (the workers') untracked or modified.
-        const dirtyAfter = dirty(run);
-        const stillPending = dirtyBefore.filter((line) => !self.committed.includes(line.slice(3)));
-        assert.deepEqual(dirtyAfter, stillPending, `${name}: no new dirty path, and nothing committed beyond its own files`);
+        // A tool that commits its own paths leaves the workers' pending files exactly as they were: no new
+        // dirty path, and none swept into its commit. (Its own files are written and committed within the call.)
+        assert.deepEqual(dirty(run), dirtyBefore, `${name}: the pending set is identical before and after`);
       }
       return answer.content.map((part) => part.text).join("\n");
     },
@@ -306,8 +306,13 @@ test("the Phase 3 chain runs end to end", async (t) => {
 
   // 12. The supervisor: with the puzzle still `input` Phase 3 is not done; closed, two quiet ticks finish
   // the run with Phase 4 (no skill) reported as waiting.
-  const waiting = decide([view(), view(4)], "h2", memory());
-  assert.ok(waiting.actions.every((action) => action.kind !== "done"), "the open puzzle input keeps the run alive");
+  // Submitted, the explanation is in Phase 4; the puzzle is still `input`, so an idle owner is nudged to close it,
+  // and two consecutive ticks (the length of the done rule) give no `done`.
+  const waiting1 = decide([view(), view(4)], "h2", memory());
+  const waiting2 = decide([view(), view(4)], "h2", waiting1.memory);
+  for (const [tick, result] of [waiting1, waiting2].entries()) {
+    assert.deepEqual(result.actions.map((action) => action.kind), ["nudge"], `tick ${tick + 1}: the open puzzle input keeps the run alive`);
+  }
   await tools.call("tree_update", { nodeId: "P01", status: "closed" });
   const first = decide([view(), view(4)], "h3", memory());
   assert.deepEqual(first.actions, []);
