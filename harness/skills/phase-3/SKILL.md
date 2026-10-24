@@ -374,14 +374,16 @@ After STOP, in this order. Ledger line before each tool call.
    calls `deepis`, so it is slow.
 2. **Reproduce.** `reproduce({ nodeId: "<E..>" })` re-runs every script in
    order into an empty output in the container and compares the registry (exact
-   for text and integers, relative `1e-6` for floats). A call is bounded to about
+   for text and integers, relative `1e-6` for floats) and the assets
+   `output/assets/_variables.yml` and `variables_sources.csv` (byte for byte: a
+   stale `rendered` value fails it). A call is bounded to about
    8 minutes: **PARTIAL means call it again** with the same argument until it
    completes. A mismatch or a failed script is recorded `ok: false`; fix the
    cause (resume the worker) and call `reproduce` again. A call that completes,
    `ok` or not, is final for that call: the next `reproduce` is a fresh full run
    (a one-off failure such as an out-of-memory kill is simply tried again). An
-   edit to a script or a number **after** `reproduce` invalidates it: reproduce
-   again. `submit` also refuses a node with no scripts.
+   edit to a script, a number or anything in `output/assets/` **after**
+   `reproduce` invalidates it: reproduce again. `submit` also refuses a node with no scripts.
 3. **One review.** Write `<node dir>/brief-review.md` (five sections):
    **Role:** end-gate reviewer of `<E..>`; **Skill:**
    `./harness/skills/roles/explain-review.md`;
@@ -408,8 +410,8 @@ After STOP, in this order. Ledger line before each tool call.
    `F<n>: overruled — <reason>`. A finding you do not take needs a real reason;
    a finding that needs a new analysis is overruled with that reason and the gap
    goes into *Limitations* (the loop is closed). Keep the report either way. Run
-   `check-argument.ts <node dir> --report` again; if you touched a script or a
-   number, reproduce again.
+   `check-argument.ts <node dir> --report` again; if you touched a script, a
+   number or an asset, reproduce again.
 5. **Submit.** `submit({ nodeId: "<E..>", note: "<why it is ready>" })`. It
    refuses, naming the gate (STOP, scripts, check-argument, reproduction still
    matching the scripts and numbers, review, revision), until every condition

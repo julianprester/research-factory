@@ -27,6 +27,8 @@ import { checkArgument } from "../tools/check-argument.ts";
 import { findNode } from "../tree.ts";
 import {
   ARGUMENT_FULL,
+  ASSET_SOURCES,
+  ASSET_VARIABLES,
   NODE_BASE,
   REGISTRY,
   REPORT_FULL,
@@ -261,11 +263,9 @@ test("the Phase 3 chain runs end to end", async (t) => {
   assert.equal(existsSync(path.join(node, "rounds", "05")), false);
 
   // 6. check-argument passes once the registry, the assets and the links are in place.
-  write(path.join(node, "workspace", "output", "assets", "_variables.yml"), 'n_pages: "1234"\n');
-  write(
-    path.join(node, "workspace", "output", "assets", "variables_sources.csv"),
-    "variable,value,rendered,source\nn_pages,1234,1234,output/numbers/A_01.csv#n\n",
-  );
+  write(path.join(node, "workspace", "scripts", "assets.R"), "# assets\n");
+  write(path.join(node, "workspace", "output", "assets", "_variables.yml"), ASSET_VARIABLES);
+  write(path.join(node, "workspace", "output", "assets", "variables_sources.csv"), ASSET_SOURCES);
   assert.deepEqual(checkArgument(run, node, { citations: () => [] }).problems, []);
 
   // 7. Submit is refused at each gate not yet met, and each refusal changes nothing. The review comes
@@ -286,7 +286,7 @@ test("the Phase 3 chain runs end to end", async (t) => {
   setBudgetForTests(undefined);
   const complete = await tools.call("reproduce", { nodeId: "E01" });
   assert.match(complete, /reproduced/);
-  assert.deepEqual([...exec.calls].sort(), ["A_01.R", "B_01.R", "C_01.R"], "every script ran once, in the container");
+  assert.deepEqual([...exec.calls].sort(), ["A_01.R", "B_01.R", "C_01.R", "assets.R"], "every script ran once, in the container");
   const record = JSON.parse(readFileSync(path.join(loopDir(run, "E01"), "reproduction.json"), "utf8")) as { ok: boolean };
   assert.equal(record.ok, true);
   assert.equal(subjects(run)[0], "[P3:reproduce] E01");

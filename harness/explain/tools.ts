@@ -43,7 +43,7 @@
 // **`submit`** is the end gate (design §10): one `updateNode` hands the node to
 // Phase 4, and only when every gate holds - a STOP, at least one script, a clean
 // `check-argument` (with its review checks), a reproduction that is ok and whose
-// hash still matches the scripts and numbers now, a review that is not BLOCKED
+// hash (scripts, numbers and assets) still matches now, a review that is not BLOCKED
 // and a ruling on every finding. Nothing is committed before `updateNode`, whose
 // tree commit is the argument's preregistration for Phase 5 (design §9): the
 // reply names it. An edit to `argument.md` after the review is allowed (and is in
@@ -580,7 +580,7 @@ export async function reproduce(runDir: string, input: ReproduceInput, deps: Rep
   }
   recordReproduction(runDir, node, { ok: result.ok, workspaceHash: result.workspaceHash, mismatches: result.mismatches });
   if (result.ok) {
-    return `${node.id} reproduced: the registry the scripts write matches workspace/output/numbers. Recorded in owners/phase-3/loop/${node.id}/reproduction.json (ok: true).`;
+    return `${node.id} reproduced: the registry the scripts write matches workspace/output/numbers, and the assets match byte for byte. Recorded in owners/phase-3/loop/${node.id}/reproduction.json (ok: true).`;
   }
   return [
     `${node.id} did NOT reproduce (${result.mismatches.length} mismatch(es)):`,
@@ -685,7 +685,7 @@ export async function submit(runDir: string, input: SubmitInput, deps: SubmitDep
     throw refusal("reproduction", `the scripts and numbers cannot be hashed: ${message(error)}`);
   }
   if (hash !== record.workspaceHash) {
-    throw refusal("reproduction", "workspace/scripts or workspace/output/numbers changed since the reproduction: call reproduce again");
+    throw refusal("reproduction", "workspace/scripts, workspace/output/numbers or workspace/output/assets changed since the reproduction: call reproduce again");
   }
 
   // 5. the review is not BLOCKED, and every finding has a ruling.

@@ -263,6 +263,34 @@ test("workspaceHash refuses a link in the registry folder rather than reading th
   assert.throws(() => workspaceHash(nodeDir), /L\.csv.*link/);
 });
 
+test("workspaceHash covers output/assets/**, and a workspace without an assets folder still hashes", (t) => {
+  const runDir = makeRun(t);
+  const nodeDir = makeNode(runDir, ["A_01.R"], { "A.csv": "name,value,note\nn,1,\n" });
+  const before = workspaceHash(nodeDir);
+  const assets = path.join(nodeDir, "workspace", "output", "assets");
+  mkdirSync(path.join(assets, "fragments"), { recursive: true });
+  writeFileSync(path.join(assets, "_variables.yml"), 'n: "1"\n');
+  const withAssets = workspaceHash(nodeDir);
+  assert.notEqual(withAssets, before, "adding an assets file changes the hash");
+
+  writeFileSync(path.join(assets, "_variables.yml"), 'n: "2"\n');
+  const edited = workspaceHash(nodeDir);
+  assert.notEqual(edited, withAssets, "editing one changes it");
+
+  writeFileSync(path.join(assets, "fragments", "t1.md"), "| a |\n");
+  assert.notEqual(workspaceHash(nodeDir), edited, "a file in a subfolder counts");
+});
+
+test("workspaceHash refuses a link under output/assets rather than reading through it", (t) => {
+  const runDir = makeRun(t);
+  const nodeDir = makeNode(runDir, ["A_01.R"], { "A.csv": "name,value,note\nn,1,\n" });
+  const assets = path.join(nodeDir, "workspace", "output", "assets");
+  mkdirSync(assets, { recursive: true });
+  writeFileSync(path.join(assets, "_variables.yml"), 'n: "1"\n');
+  symlinkSync(path.join(assets, "_variables.yml"), path.join(assets, "L.yml"));
+  assert.throws(() => workspaceHash(nodeDir), /L\.yml.*link/);
+});
+
 test("scriptOrder sorts by letter, then number, with assets last", () => {
   assert.deepEqual(scriptOrder(["B_01.R", "A_02.py", "assets.R", "A_01.R"]), ["A_01.R", "A_02.py", "B_01.R", "assets.R"]);
 });
@@ -609,4 +637,109 @@ test("readRegistry reads CRLF line endings the same as LF", (t) => {
   writeRegistry(output, { "A.csv": 'name,value,note\n"a, b",1,"x"\nm,2.5,\n' });
   assert.deepEqual(crlf, readRegistry(output));
   assert.deepEqual(crlf, { "A.csv": [{ name: "a, b", value: "1" }, { name: "m", value: "2.5" }] });
+});
+
+// ---------------------------------------------------------------------------
+// output/assets: the manuscript variables are part of the reproduction
+// ---------------------------------------------------------------------------
+
+const VARIABLES = (rendered: string) => `n_pages:\n  value: 1234\n  rendered: "${rendered}"\n`;
+const SOURCES = (rendered: string) => `variable,value,rendered,source\nn_pages,1234,${rendered},output/numbers/A.csv#count\n`;
+
+/** A fake container that writes the registry for a numbered script and, for `assets.R`, the two assets files `assets` gives. */
+function assetsRuns(assets: { variables: string; sources: string }): FakeRuns {
+  const calls: FakeRuns["calls"] = [];
+  const exec: Exec = async (args) => {
+    const host = outputHostOf(args);
+    const script = (args.at(-1) ?? "").replace(/^scripts\//, "");
+    calls.push({ script, host });
+    if (script === "assets.R") {
+      mkdirSync(path.join(host, "assets"), { recursive: true });
+      writeFileSync(path.join(host, "assets", "_variables.yml"), assets.variables);
+      writeFileSync(path.join(host, "assets", "variables_sources.csv"), assets.sources);
+    } else {
+      writeRegistry(host, deterministic(script));
+    }
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
+  };
+  return { exec, calls };
+}
+
+function assetsNode(runDir: string, real: { variables?: string; sources?: string }): string {
+  const nodeDir = makeNode(runDir, ["A_01.R", "assets.R"], { "A.csv": DETERMINISTIC_A });
+  const dir = path.join(nodeDir, "workspace", "output", "assets");
+  mkdirSync(dir, { recursive: true });
+  if (real.variables !== undefined) writeFileSync(path.join(dir, "_variables.yml"), real.variables);
+  if (real.sources !== undefined) writeFileSync(path.join(dir, "variables_sources.csv"), real.sources);
+  return nodeDir;
+}
+
+async function reproduceAssets(runDir: string, nodeDir: string, exec: Exec) {
+  return reproduceWorkspace({ runDir, nodeDir, image: "ctc-analysis:1", timeoutMs: 5000, budgetMs: 60_000, exec, statePath: statePathOf(runDir) });
+}
+
+test("reproduceWorkspace: assets that the scripts reproduce byte for byte are ok", async (t) => {
+  const runDir = makeRun(t);
+  const nodeDir = assetsNode(runDir, { variables: VARIABLES("1,234"), sources: SOURCES("1,234") });
+  const { exec, calls } = assetsRuns({ variables: VARIABLES("1,234"), sources: SOURCES("1,234") });
+  const result = await reproduceAssets(runDir, nodeDir, exec);
+  assert.deepEqual(result.mismatches, []);
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls.map((call) => call.script), ["A_01.R", "assets.R"], "assets runs last");
+});
+
+test("reproduceWorkspace: a stale rendered value in _variables.yml fails the reproduction, naming the file", async (t) => {
+  const runDir = makeRun(t);
+  const nodeDir = assetsNode(runDir, { variables: VARIABLES("1,235"), sources: SOURCES("1,234") });
+  const result = await reproduceAssets(runDir, nodeDir, assetsRuns({ variables: VARIABLES("1,234"), sources: SOURCES("1,234") }).exec);
+  assert.equal(result.complete, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.mismatches.length, 1, result.mismatches.join("\n"));
+  assert.match(result.mismatches[0] ?? "", /output\/assets\/_variables\.yml/);
+});
+
+test("reproduceWorkspace: a variables_sources.csv that differs fails the reproduction, naming the file", async (t) => {
+  const runDir = makeRun(t);
+  const nodeDir = assetsNode(runDir, { variables: VARIABLES("1,234"), sources: SOURCES("9") });
+  const result = await reproduceAssets(runDir, nodeDir, assetsRuns({ variables: VARIABLES("1,234"), sources: SOURCES("1,234") }).exec);
+  assert.equal(result.ok, false);
+  assert.equal(result.mismatches.length, 1, result.mismatches.join("\n"));
+  assert.match(result.mismatches[0] ?? "", /output\/assets\/variables_sources\.csv/);
+});
+
+test("reproduceWorkspace: an assets file on one side only is a mismatch", async (t) => {
+  const runDir = makeRun(t);
+  // The owner has the files, but no script produces them.
+  const nodeDir = makeNode(runDir, ["A_01.R"], { "A.csv": DETERMINISTIC_A });
+  const dir = path.join(nodeDir, "workspace", "output", "assets");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, "_variables.yml"), VARIABLES("1,234"));
+  const missing = await reproduceAssets(runDir, nodeDir, fakeRuns(deterministic).exec);
+  assert.equal(missing.ok, false);
+  assert.match(missing.mismatches.join("\n"), /output\/assets\/_variables\.yml.*not produced/);
+
+  // The scripts produce files the owner does not have.
+  const other = makeRun(t);
+  const bare = assetsNode(other, {});
+  const extra = await reproduceAssets(other, bare, assetsRuns({ variables: VARIABLES("1"), sources: SOURCES("1") }).exec);
+  assert.equal(extra.ok, false);
+  assert.match(extra.mismatches.join("\n"), /output\/assets\/_variables\.yml.*missing/);
+  assert.match(extra.mismatches.join("\n"), /output\/assets\/variables_sources\.csv.*missing/);
+});
+
+test("reproduceWorkspace: a workspace with no assets folder on either side still reproduces", async (t) => {
+  const runDir = makeRun(t);
+  const nodeDir = makeNode(runDir, ["A_01.R"], { "A.csv": DETERMINISTIC_A });
+  const result = await reproduceAssets(runDir, nodeDir, fakeRuns(deterministic).exec);
+  assert.deepEqual(result.mismatches, []);
+  assert.equal(result.ok, true);
+});
+
+test("reproduceWorkspace: a link where an assets file belongs throws, naming it", async (t) => {
+  const runDir = makeRun(t);
+  const nodeDir = assetsNode(runDir, { variables: VARIABLES("1,234"), sources: SOURCES("1,234") });
+  const dir = path.join(nodeDir, "workspace", "output", "assets");
+  rmSync(path.join(dir, "_variables.yml"));
+  symlinkSync(path.join(dir, "variables_sources.csv"), path.join(dir, "_variables.yml"));
+  await assert.rejects(reproduceAssets(runDir, nodeDir, assetsRuns({ variables: VARIABLES("1,234"), sources: SOURCES("1,234") }).exec), /_variables\.yml.*link/);
 });

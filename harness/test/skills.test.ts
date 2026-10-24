@@ -1231,6 +1231,13 @@ test("the Phase 3 skill moves every queued puzzle to input at the start and work
   assert.match(skill, /the cap of 4 active workers still holds/);
 });
 
+test("the Phase 3 skill says the assets are reproduced and hashed", () => {
+  const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
+  assert.match(skill, /`output\/assets\/_variables\.yml` and `variables_sources\.csv` \(byte for byte: a stale `rendered` value fails it\)/);
+  assert.match(skill, /An edit to a script, a number or anything in `output\/assets\/` \*\*after\*\* `reproduce` invalidates it/);
+  assert.match(skill, /if you touched a script, a number or an asset, reproduce again/);
+});
+
 test("the assets task keeps earlier variables across rounds, in one language", () => {
   const skill = normalise(read("harness/skills/phase-3/SKILL.md"));
   assert.match(skill, /reads the existing assets script first and keeps every earlier variable and table fragment/);

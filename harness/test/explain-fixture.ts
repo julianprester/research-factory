@@ -224,7 +224,11 @@ export const review = (status = "DONE_WITH_CONCERNS", findings = ["- [F1] [major
 
 export const REVISION = "F1: taken\n";
 
-/** A fake container: writes the registry `A_01.csv` for `A_01.R`, whatever it is told. */
+/** The assets a finished node holds, and what the fake container writes for `assets.R`: they reproduce byte for byte. */
+export const ASSET_VARIABLES = 'n_pages: "1234"\n';
+export const ASSET_SOURCES = "variable,value,rendered,source\nn_pages,1234,1234,output/numbers/A_01.csv#n\n";
+
+/** A fake container: writes the registry `<stem>.csv` for a numbered script, and the two assets files for `assets.R`, whatever it is told. */
 export function fakeContainer(options: { delayMs?: number; registry?: string; onRun?: (host: string) => void } = {}): { exec: Exec; calls: string[] } {
   const calls: string[] = [];
   const exec: Exec = async (args) => {
@@ -233,7 +237,12 @@ export function fakeContainer(options: { delayMs?: number; registry?: string; on
     const script = (args.at(-1) ?? "").replace(/^scripts\//, "");
     calls.push(script);
     if (options.delayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, options.delayMs));
-    write(path.join(host, "numbers", `${script.replace(/\.[^.]+$/, "")}.csv`), options.registry ?? REGISTRY);
+    if (script.startsWith("assets.")) {
+      write(path.join(host, "assets", "_variables.yml"), ASSET_VARIABLES);
+      write(path.join(host, "assets", "variables_sources.csv"), ASSET_SOURCES);
+    } else {
+      write(path.join(host, "numbers", `${script.replace(/\.[^.]+$/, "")}.csv`), options.registry ?? REGISTRY);
+    }
     options.onRun?.(host);
     return { code: 0, stdout: "", stderr: "", timedOut: false };
   };

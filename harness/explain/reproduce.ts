@@ -1,7 +1,8 @@
 // The reproduction check for an explanation node's analysis workspace. The
 // container re-runs every script in order into an empty scratch output, and the
 // registry it writes must match the owner's: exactly for text and integers,
-// within a relative tolerance for floats. The host reads `output/` after the
+// within a relative tolerance for floats; so must the assets Phase 4 reads
+// (`_variables.yml`, `variables_sources.csv`), byte for byte. The host reads `output/` after the
 // analysis scripts and workers have written to it, so nothing here follows a
 // link: a link, or a file that is not regular, is refused by name.
 import { createHash } from "node:crypto";
@@ -191,13 +192,52 @@ export function parseCsv(raw: string): string[][] {
 
 /**
  * A hash over the sorted relative paths and contents of the node's
- * `workspace/scripts/**` and `workspace/output/numbers/**`. `submit` compares it
- * with the one `reproduce` recorded, so an edit to either after the check
- * invalidates the check. `argument.md` and the rest are not hashed.
+ * `workspace/scripts/**`, `workspace/output/numbers/**` and
+ * `workspace/output/assets/**` (Phase 4 uses the assets as they are). `submit`
+ * compares it with the one `reproduce` recorded, so an edit to any of them after
+ * the check invalidates the check. `argument.md` and the rest are not hashed.
  */
 export function workspaceHash(nodeDir: string): string {
   const workspace = workspaceOf(path.resolve(nodeDir));
-  return digest([...entriesIn(workspace, "scripts"), ...entriesIn(workspace, "output/numbers")]);
+  return digest([...entriesIn(workspace, "scripts"), ...entriesIn(workspace, "output/numbers"), ...entriesIn(workspace, "output/assets")]);
+}
+
+/** The two assets files the reproduction compares byte for byte: what Phase 4 reads. */
+const COMPARED_ASSETS = ["_variables.yml", "variables_sources.csv"];
+
+/**
+ * The lines where the reproduced assets differ from the owner's: each compared
+ * file must be present on both sides or neither, and equal byte for byte. A link
+ * or a non-regular file at either is refused by name (it throws).
+ */
+function compareAssets(ownerOutput: string, reproducedOutput: string): string[] {
+  const mismatches: string[] = [];
+  for (const name of COMPARED_ASSETS) {
+    const owner = readAsset(ownerOutput, name);
+    const reproduced = readAsset(reproducedOutput, name);
+    const rel = `output/assets/${name}`;
+    if (owner === undefined && reproduced === undefined) continue;
+    if (reproduced === undefined) mismatches.push(`${rel}: not produced by the scripts (the workspace has one)`);
+    else if (owner === undefined) mismatches.push(`${rel}: missing from the workspace (the scripts produce one)`);
+    else if (!owner.equals(reproduced)) mismatches.push(`${rel}: differs from the file the scripts reproduce`);
+  }
+  return mismatches;
+}
+
+/** `<output>/assets/<name>` as bytes, or undefined when the file (or the assets folder) is absent; never through a link. */
+function readAsset(output: string, name: string): Buffer | undefined {
+  if (!folderExists(output) || !folderExists(path.join(output, "assets"))) return undefined;
+  const file = path.join(output, "assets", name);
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  if (stat.isSymbolicLink()) throw new Error(`output/assets/${name} is a link: refusing to read it`);
+  if (!stat.isFile()) throw new Error(`output/assets/${name} is not a regular file`);
+  return readRegularFile(file);
 }
 
 /** The order scripts run in: letter, then number, with `assets.*` last. */
@@ -218,7 +258,8 @@ function orderOf(file: string): { group: number; letter: string; number: number;
 
 /**
  * Re-run the node's scripts in the container and compare the registry they
- * write with the owner's. The scripts run in a scratch workspace under
+ * write, and the assets files `_variables.yml` and `variables_sources.csv`
+ * (byte for byte), with the owner's. The scripts run in a scratch workspace under
  * `<runDir>/.analysis/repro/<node>/`, whose output starts empty. Each finished
  * script is recorded in `statePath`, so a call stopped by `budgetMs` (checked
  * between scripts) resumes where it stopped. A script that exits non-zero is
@@ -308,7 +349,8 @@ export async function reproduceWorkspace(o: {
   // A file that is malformed on either side is left out of the comparison on both, so it is reported once.
   const skipped = new Set([...Object.keys(owner.malformed), ...Object.keys(reproduced.malformed)]);
   const differences = compareRegistries(withoutFiles(owner.rows, skipped), withoutFiles(reproduced.rows, skipped));
-  const mismatches = [...failedLines, ...malformedLines, ...differences];
+  const assetLines = compareAssets(path.join(workspace, "output"), path.join(scratchWorkspace, "output"));
+  const mismatches = [...failedLines, ...malformedLines, ...differences, ...assetLines];
   // The run is complete, ok or not: its answer is the caller's to record. Clear the resume state and the
   // scratch so the next call is a fresh full run (a one-off failure, an OOM kill or a docker restart,
   // must not repeat itself for ever). Only a PARTIAL run is resumed.

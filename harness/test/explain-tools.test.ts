@@ -30,6 +30,8 @@ import { createChild, updateNode } from "../tree.ts";
 import {
   ARGUMENT,
   ARGUMENT_FULL,
+  ASSET_SOURCES,
+  ASSET_VARIABLES,
   NODE_BASE,
   REGISTRY,
   REPORT_FULL,
@@ -703,8 +705,9 @@ async function closedOut(t: TestContext, rounds: Array<"substantial" | "none"> =
   for (const [at, changed] of rounds.entries()) await runRound(fx, at + 1, [String.fromCharCode(65 + at)], changed);
   write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL);
   for (let round = 1; round <= rounds.length; round++) write(inWorkspace(fx, "reports", `${String(round).padStart(2, "0")}.md`), REPORT_FULL(round));
-  write(inWorkspace(fx, "output", "assets", "_variables.yml"), 'n_pages: "1234"\n');
-  write(inWorkspace(fx, "output", "assets", "variables_sources.csv"), "variable,value,rendered,source\nn_pages,1234,1234,output/numbers/A_01.csv#n\n");
+  write(inWorkspace(fx, "scripts", "assets.R"), "# assets\n");
+  write(inWorkspace(fx, "output", "assets", "_variables.yml"), ASSET_VARIABLES);
+  write(inWorkspace(fx, "output", "assets", "variables_sources.csv"), ASSET_SOURCES);
   write(inWorkspace(fx, "reviews", "report.md"), review());
   write(inWorkspace(fx, "reviews", "revision.md"), REVISION);
   settle(fx.run);
@@ -754,7 +757,7 @@ test("reproduce: a partial call says to call again, the next completes, and the 
 
   const second = await reproduce(fx.run, { nodeId: "E01" }, { exec: fake.exec, budgetMs: 30_000 });
   assert.match(second, /reproduced/);
-  assert.deepEqual(fake.calls, ["A_01.R", "B_01.R"], "each script ran once: the second call resumed");
+  assert.deepEqual(fake.calls, ["A_01.R", "B_01.R", "assets.R"], "each script ran once: the second call resumed");
   const record = readRecord(fx);
   assert.deepEqual(record, { ok: true, workspaceHash: workspaceHash(fx.node), mismatches: [] });
   assert.equal(subjects(fx.run)[0], "[P3:reproduce] E01");
@@ -779,14 +782,14 @@ test("reproduce: a completed ok:false run does not wedge the node: the next call
   const fx = await closedOut(t);
   const flaky = fakeContainer({ registry: "name,value,note\nn,1235,\n" });
   assert.match(await reproduce(fx.run, { nodeId: "E01" }, { exec: flaky.exec }), /did NOT reproduce/);
-  assert.deepEqual(flaky.calls, ["A_01.R"]);
+  assert.deepEqual(flaky.calls, ["A_01.R", "assets.R"]);
   assert.equal(readRecord(fx).ok, false);
   assert.match(await reproduce(fx.run, { nodeId: "E01" }, { exec: flaky.exec }), /did NOT reproduce/);
-  assert.deepEqual(flaky.calls, ["A_01.R", "A_01.R"], "the second call ran the script again instead of repeating the old answer");
+  assert.deepEqual(flaky.calls, ["A_01.R", "assets.R", "A_01.R", "assets.R"], "the second call ran the scripts again instead of repeating the old answer");
 
   const good = fakeContainer();
   assert.match(await reproduce(fx.run, { nodeId: "E01" }, { exec: good.exec }), /reproduced/);
-  assert.deepEqual(good.calls, ["A_01.R"]);
+  assert.deepEqual(good.calls, ["A_01.R", "assets.R"]);
   assert.equal(readRecord(fx).ok, true);
   assert.equal(git(fx.run, "status", "--porcelain"), "");
   await submitOk(fx);
@@ -806,7 +809,9 @@ test("reproduce records the hash taken before the scripts ran", async (t) => {
 test("reproduce reports a link planted in the reproduced registry, cleans up, and the next call starts fresh", async (t) => {
   const fx = await closedOut(t);
   const planting = fakeContainer({
-    onRun: (host) => symlinkSync(path.join(host, "numbers", "A_01.csv"), path.join(host, "numbers", "L.csv")),
+    onRun: (host) => {
+      if (!existsSync(path.join(host, "numbers", "L.csv"))) symlinkSync(path.join(host, "numbers", "A_01.csv"), path.join(host, "numbers", "L.csv"));
+    },
   });
   const text = await reproduce(fx.run, { nodeId: "E01" }, { exec: planting.exec });
   assert.match(text, /did NOT reproduce/);
@@ -820,7 +825,7 @@ test("reproduce reports a link planted in the reproduced registry, cleans up, an
 
   const again = fakeContainer();
   assert.match(await reproduce(fx.run, { nodeId: "E01" }, { exec: again.exec }), /reproduced/);
-  assert.deepEqual(again.calls, ["A_01.R"], "the scripts ran again from the start");
+  assert.deepEqual(again.calls, ["A_01.R", "assets.R"], "the scripts ran again from the start");
   assert.equal(readRecord(fx).ok, true);
 });
 
@@ -990,7 +995,9 @@ test("submit refuses a node with no scripts (a vacuous reproduction must not pas
   const fx = await closedOut(t);
   // A reproduction of nothing: the record is ok, for the hash of the empty workspace.
   rmSync(inWorkspace(fx, "scripts", "A_01.R"));
+  rmSync(inWorkspace(fx, "scripts", "assets.R"));
   rmSync(inWorkspace(fx, "output", "numbers", "A_01.csv"));
+  rmSync(inWorkspace(fx, "output", "assets"), { recursive: true });
   write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL.replace(/\n.*A_01\.csv.*\n/, "\nNo numbers.\n"));
   settle(fx.run);
   await reproduce(fx.run, { nodeId: "E01" }, { exec: fakeContainer().exec });
@@ -1064,6 +1071,40 @@ test("submit refuses a registry number edited after reproduce", async (t) => {
   const fx = await reproduced(t);
   write(inWorkspace(fx, "output", "numbers", "A_01.csv"), "name,value,note\nn,1234,a new note\n");
   assert.match(await submitMessage(fx), /changed since the reproduction/);
+});
+
+test("submit refuses an assets file edited after reproduce, and the edit is caught by the hash", async (t) => {
+  const fx = await reproduced(t);
+  const before = workspaceHash(fx.node);
+  write(inWorkspace(fx, "output", "assets", "_variables.yml"), 'n_pages: "9999"\n');
+  assert.notEqual(workspaceHash(fx.node), before);
+  const message = await submitMessage(fx);
+  assert.match(message, /gate "reproduction"/);
+  assert.match(message, /changed since the reproduction/);
+  assert.match(message, /output\/assets/, "the refusal names the assets among what is hashed");
+
+  write(inWorkspace(fx, "output", "assets", "_variables.yml"), ASSET_VARIABLES);
+  await submitOk(fx).catch(() => assert.fail("restoring the file restores the hash"));
+});
+
+test("reproduce fails on a stale rendered value in _variables.yml, and submit refuses it", async (t) => {
+  const fx = await closedOut(t);
+  // The owner's assets were rendered from an older registry value; the assets script now writes the current one.
+  write(inWorkspace(fx, "output", "assets", "_variables.yml"), 'n_pages: "1233"\n');
+  const text = await reproduce(fx.run, { nodeId: "E01" }, { exec: fakeContainer().exec });
+  assert.match(text, /did NOT reproduce/);
+  assert.match(text, /output\/assets\/_variables\.yml/);
+  assert.equal(readRecord(fx).ok, false);
+  assert.match(await submitMessage(fx), /gate "reproduction".*output\/assets\/_variables\.yml/s);
+});
+
+test("reproduce and submit work for a workspace with no assets folder", async (t) => {
+  const fx = await closedOut(t);
+  rmSync(inWorkspace(fx, "scripts", "assets.R"));
+  rmSync(inWorkspace(fx, "output", "assets"), { recursive: true });
+  // check-argument wants the assets pair, so only reproduce is checked here.
+  assert.match(await reproduce(fx.run, { nodeId: "E01" }, { exec: fakeContainer().exec }), /reproduced/);
+  assert.equal(readRecord(fx).ok, true);
 });
 
 test("submit refuses without a review report", async (t) => {
