@@ -90,3 +90,10 @@ test("plain R and R_01.R are still the plain letter R; R10A is a valid reopen ta
   assert.equal(scriptTask("R10A_01.R"), "R10A");
   assert.ok(compareTasks("R9Z", "R10A") < 0, "reopen 9 sorts below reopen 10, whatever the letters");
 });
+
+test("the script names end at the extension: a suffix after .R or .py, a second extension, or a trailing newline is not a script name", () => {
+  for (const name of ["A_01.Rx", "A_01.py.sh", "A_01.R.R", "A_001.R", "A_01.R\n"]) {
+    assert.equal(ANALYSIS_SCRIPT.test(name), false, JSON.stringify(name));
+    assert.equal(scriptTask(name), undefined, JSON.stringify(name));
+  }
+});

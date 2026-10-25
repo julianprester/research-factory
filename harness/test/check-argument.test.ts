@@ -843,3 +843,11 @@ test("check-argument still refuses a reopen-looking name with one digit", (t) =>
   write(path.join(fixture.nodeDir, "workspace/scripts/R1A_1.R"), "# bad\n");
   assert.deepEqual(problemsOf(fixture), ["workspace/scripts/R1A_1.R is not a script name (X_nn.R, X_nn.py, assets.R or assets.py)"]);
 });
+
+test("a script with a suffix after its extension, such as A_01.Rx, is reported as not a script name", (t) => {
+  const fixture = nodeFixture(t);
+  write(path.join(fixture.nodeDir, "workspace", "scripts", "A_01.Rx"), "# suffixed\n");
+  assert.deepEqual(problemsOf(fixture), [
+    "workspace/scripts/A_01.Rx is not a script name (X_nn.R, X_nn.py, assets.R or assets.py)",
+  ]);
+});

@@ -1343,3 +1343,12 @@ test("a worker in a task folder named R0A is not an explanation task: nothing un
   assert.equal(explanationWorkerMayWrite(explanation, "R0A", path.join(explanation, "tasks", "R0A", "handoff.md")), false);
   assert.equal(explanationWorkerMayWrite(explanation, "R0A", path.join(explanation, "workspace", "scripts", "R0A_01.R")), false);
 });
+
+test("the explanation worker's script names end at the extension: A_01.Rx and A_01.py.sh are not hers", (t) => {
+  const { explanation } = explanationRun(t);
+  mkdirSync(path.join(explanation, "tasks", "A"), { recursive: true });
+  const may = (relPath: string) => explanationWorkerMayWrite(explanation, "A", path.join(explanation, relPath));
+  assert.equal(may("workspace/scripts/A_01.R"), true, "the control: a real script name");
+  assert.equal(may("workspace/scripts/A_01.Rx"), false);
+  assert.equal(may("workspace/scripts/A_01.py.sh"), false);
+});

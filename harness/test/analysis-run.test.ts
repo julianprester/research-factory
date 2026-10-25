@@ -566,3 +566,11 @@ test("an interrupted copy leaves no partial destination file, and a re-run copie
   prepareExploration(runDir);
   assert.equal(readFileSync(path.join(data, "a.csv"), "utf8"), "a,1\n");
 });
+
+test("runScript refuses a script name with a suffix after the extension, and starts no container", async (t) => {
+  const { runDir } = makeRun(t);
+  const nodeDir = makeNode(runDir, ["A_01.Rx"]);
+  const { exec, calls } = fakeExec();
+  await assert.rejects(runScript({ runDir, nodeDir, script: "A_01.Rx", image: "img", timeoutMs: 1000, exec }), /not an analysis script name/);
+  assert.equal(calls.length, 0, "exec is never reached");
+});
