@@ -33,7 +33,8 @@ import {
   holdoutRefusal,
   isExplanationNode,
   isPaperNode,
-  paperWorkerMayWrite,
+  ownersRefusal,
+  paperWorkerMayWriteReal,
   siblingRefusal,
   taskOf,
   workerMayWrite,
@@ -249,6 +250,7 @@ export default function workerExtension(pi: PiLike): void {
       const phase = nodePhase(nodeDir);
       const reason =
         (holdoutLocked(phase) ? holdoutRefusal(event.toolName, event.input) : undefined) ??
+        (isPaperNode(nodeDir) ? ownersRefusal(event.toolName, event.input) : undefined) ??
         (phase === 2 || isExplanationNode(nodeDir) || isPaperNode(nodeDir)
           ? siblingRefusal(nodeDir, event.toolName, event.input)
           : undefined) ??
@@ -269,7 +271,7 @@ export default function workerExtension(pi: PiLike): void {
       };
     }
     if (isPaperNode(nodeDir)) {
-      if (!paperWorkerMayWrite(nodeDir, path.resolve(filePath))) {
+      if (!paperWorkerMayWriteReal(nodeDir, filePath)) {
         return {
           block: true,
           reason: `Paper workers may only write workspace/paper.qmd, outline.md, reopen-request.md, workspace/embeds/diagrams/<name>.yml, rounds.md and handoff.md inside ${nodeDir}, not ${filePath}`,

@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -270,6 +270,42 @@ test("a paper worker writes its lane only, and no node.json anywhere under its w
   }
   assert.equal(write("../W02-x/workspace/paper.qmd")?.block, true, "a sibling paper");
   assert.equal(write("../../workspace/argument.md")?.block, true, "the parent explanation's argument, reached through ..");
+});
+
+test("a paper writer's write through a symlinked folder or file is refused when its real location leaves the lane", (t) => {
+  const paper = paperNode(t);
+  const outside = mkdtempSync(path.join(tmpdir(), "ctc-paper-outside-"));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  const embeds = path.join(paper, "workspace", "embeds");
+  mkdirSync(path.join(embeds, "quotes"), { recursive: true });
+  const handlers = new Map<string, (event: { toolName: string; input?: { path?: unknown } }) => { block?: boolean; reason?: string } | undefined>();
+  workerExtension({
+    registerTool() {},
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+  });
+  const guard = handlers.get("tool_call");
+  assert.ok(guard, "the worker registers a tool_call handler");
+  const write = (filePath: string) => guard({ toolName: "write", input: { path: filePath } });
+
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+  process.chdir(paper);
+  symlinkSync(path.join(embeds, "quotes"), path.join(embeds, "diagrams"));
+  assert.equal(write("workspace/embeds/diagrams/x.yml")?.block, true, "diagrams -> quotes/");
+  unlinkSync(path.join(embeds, "diagrams"));
+  symlinkSync(outside, path.join(embeds, "diagrams"));
+  assert.equal(write("workspace/embeds/diagrams/x.yml")?.block, true, "diagrams -> an outside folder");
+  unlinkSync(path.join(embeds, "diagrams"));
+  mkdirSync(path.join(embeds, "diagrams"));
+  assert.equal(write("workspace/embeds/diagrams/x.yml"), undefined, "a plain diagram spec is still allowed");
+
+  const outsideFile = path.join(outside, "paper.qmd");
+  writeFileSync(outsideFile, "outside\n");
+  symlinkSync(outsideFile, path.join(paper, "workspace", "paper.qmd"));
+  assert.equal(write("workspace/paper.qmd")?.block, true, "paper.qmd linked outside the node");
+  assert.match(write("workspace/paper.qmd")?.reason ?? "", /Paper workers may only write/);
 });
 
 test("findNodeDir passes over a paper's workspace, so a stray node.json there cannot redirect the guards", (t) => {

@@ -271,19 +271,20 @@ export default function ownerExtension(pi: PiLike): void {
       const dir = runDir();
       const phase = ownerPhase();
       const parent = findNode(dir, params.parentId);
-      const nodePhase = createPhase(parent, params.type);
-      if (nodePhase !== phase) throw refuseNotYourPhase(nodePhase, phase);
-      // An explanation belongs to a promoted puzzle: a puzzle still in Phase 2 has not passed `promote`'s gates.
       const childType = params.type ?? CHILD_TYPE[parent.type];
-      if (parent.type === "puzzle" && childType === "explanation" && parent.phase !== 3) {
-        throw new Error(`${parent.id} is in Phase ${parent.phase}, not Phase 3: explanations are created only under puzzles that promote has moved to Phase 3`);
-      }
-      // A paper is the Phase 4 writer's node: only the phase-4 owner makes one, under an explanation that submit has handed on.
+      // A paper is the Phase 4 writer's node. These gates come before the phase compare, so each names its own rule.
       if (childType === "paper") {
+        if (parent.type !== "explanation") throw new Error(`${parent.id} is a ${parent.type}: a paper goes under an explanation`);
         if (phase !== 4) throw new Error(`Not your phase: a paper is made by the phase-4 owner, and you own P${phase}`);
         if (parent.phase !== 4) {
           throw new Error(`${parent.id} is in Phase ${parent.phase}, not Phase 4: papers are created only under explanations that submit has moved to Phase 4`);
         }
+      }
+      const nodePhase = createPhase(parent, params.type);
+      if (nodePhase !== phase) throw refuseNotYourPhase(nodePhase, phase);
+      // An explanation belongs to a promoted puzzle: a puzzle still in Phase 2 has not passed `promote`'s gates.
+      if (parent.type === "puzzle" && childType === "explanation" && parent.phase !== 3) {
+        throw new Error(`${parent.id} is in Phase ${parent.phase}, not Phase 3: explanations are created only under puzzles that promote has moved to Phase 3`);
       }
       // The child's resolved type decides whether this is evolution; only a
       // puzzle with a derivedFrom is a child of the tournament.

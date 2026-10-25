@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -15,6 +15,7 @@ import {
   ownerMayWrite,
   ownersRefusal,
   paperWorkerMayWrite,
+  paperWorkerMayWriteReal,
   reviewerMayWrite,
   reviewsRefusal,
   siblingRefusal,
@@ -1429,6 +1430,46 @@ test("paperWorkerMayWrite refuses every tool-written file, every other workspace
   assert.equal(paperWorkerMayWrite(paper, path.join(paper, "..", "..", "..", "..", "..", "x")), false, "a path that climbs out");
 });
 
+test("paperWorkerMayWriteReal applies the lane to the real location: a symlinked folder or file cannot reach outside it", (t) => {
+  const { paper } = paperRun(t);
+  const outside = makeTempDir(t);
+  const workspace = path.join(paper, "workspace");
+  const embeds = path.join(workspace, "embeds");
+  const writable = (relPath: string) => paperWorkerMayWriteReal(paper, path.join(paper, relPath));
+  mkdirSync(path.join(embeds, "diagrams"), { recursive: true });
+  mkdirSync(path.join(embeds, "quotes"), { recursive: true });
+  assert.equal(writable("workspace/embeds/diagrams/x.yml"), true, "a plain diagram folder is in the lane");
+  assert.equal(
+    paperWorkerMayWriteReal(paper, `${paper}/workspace/embeds/diagrams/../diagrams/x.yml`),
+    false,
+    "a .. segment is refused whatever it resolves to",
+  );
+
+  rmSync(path.join(embeds, "diagrams"), { recursive: true });
+  symlinkSync(path.join(embeds, "quotes"), path.join(embeds, "diagrams"));
+  assert.equal(writable("workspace/embeds/diagrams/x.yml"), false, "diagrams -> quotes/ is the quotation folder, not the lane");
+
+  unlinkSync(path.join(embeds, "diagrams"));
+  symlinkSync(outside, path.join(embeds, "diagrams"));
+  assert.equal(writable("workspace/embeds/diagrams/x.yml"), false, "diagrams -> an outside folder");
+
+  unlinkSync(path.join(embeds, "diagrams"));
+  assert.equal(writable("workspace/embeds/diagrams/x.yml"), true, "a diagram folder not created yet resolves to its existing parent");
+
+  const outsideFile = path.join(outside, "paper.qmd");
+  writeFileSync(outsideFile, "outside\n");
+  symlinkSync(outsideFile, path.join(workspace, "paper.qmd"));
+  assert.equal(writable("workspace/paper.qmd"), false, "a paper.qmd that links outside the node");
+
+  unlinkSync(path.join(workspace, "paper.qmd"));
+  symlinkSync(path.join(outside, "nowhere.md"), path.join(workspace, "outline.md"));
+  assert.equal(writable("workspace/outline.md"), false, "a dangling link cannot be checked, so it is refused");
+
+  unlinkSync(path.join(workspace, "outline.md"));
+  assert.equal(writable("workspace/outline.md"), true, "a plain outline is still in the lane");
+  assert.equal(writable("workspace/paper.qmd"), true, "a plain paper.qmd is still in the lane");
+});
+
 test("ownerMayWrite lets the owner write a paper node's brief, and not its manuscript", (t) => {
   const { run, paper } = paperRun(t);
   assert.equal(ownerMayWrite(run, 4, path.join(paper, "brief.md")), true, "the paper's own brief");
@@ -1448,7 +1489,7 @@ test("a paper worker reads its own folder, its explanation's outputs and the exp
 });
 
 test("a paper worker reads no dataset root, hold-out, other puzzle, other explanation or ancestor puzzle outside its explanation", (t) => {
-  const { paper, otherExplanation, p1, p2, dataset, run } = paperRun(t);
+  const { paper, explanation, otherExplanation, p1, p2, dataset, run } = paperRun(t);
   const call = workerGuard(t, paper);
   assert.equal(call("read", { path: path.join(p2, "workspace", "puzzle.md") })?.block, true, "another puzzle");
   assert.equal(call("read", { path: path.join(p1, "workspace", "puzzle.md") })?.block, true, "the ancestor puzzle's card, outside the explanation");
@@ -1460,8 +1501,14 @@ test("a paper worker reads no dataset root, hold-out, other puzzle, other explan
   assert.equal(call("bash", { command: `cat ${path.join(p2, "workspace", "puzzle.md")}` })?.block, true, "another puzzle by bash");
   assert.equal(call("bash", { command: `cat ${path.join(otherExplanation, "workspace", "argument.md")}` })?.block, true, "another explanation by bash");
   assert.equal(call("bash", { command: `cat ${path.join(p1, "workspace", "reviews", "merged.md")}` })?.block, true, "the ancestor's review by bash");
+  assert.equal(call("bash", { command: `cat ${path.join(p1, "workspace", "puzzle.md")}` })?.block, true, "the ancestor's card by bash");
+  assert.equal(call("read", { path: path.join(run, "owners", "phase-3", "ledger.md") })?.block, true, "the owners' folder by read");
+  assert.equal(call("bash", { command: "cat owners/phase-3/ledger.md" })?.block, true, "the owners' folder by bash");
   assert.equal(call("bash", { command: `head ${dataset}/a.csv` })?.block, true, "the dataset root by bash");
   assert.equal(call("bash", { command: "cat holdout.csv" })?.block, true, "a hold-out by bash");
   assert.equal(call("bash", { command: "docker ps" })?.block, true, "docker is refused for a phase-4 worker");
   assert.equal(call("bash", { command: `node harness/tools/check-paper.ts ${paper}` }), undefined, "its own node folder and ancestors by bash");
+  const ownExplanation = path.join(p1, "explanations", path.basename(explanation));
+  assert.equal(call("bash", { command: `cat ${path.join(ownExplanation, "workspace", "output", "numbers", "x.csv")}` }), undefined, "the own explanation, named through the ancestor's folder");
+  assert.equal(call("bash", { command: `cat ${path.join(ownExplanation, "workspace", "reviews", "revision.md")}` }), undefined, "the own explanation's own review by bash");
 });

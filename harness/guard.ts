@@ -192,6 +192,49 @@ export function paperWorkerMayWrite(nodeDir: string, absPath: string): boolean {
 }
 
 /**
+ * The real location a write to `absPath` would land at: the nearest existing
+ * ancestor (a link counts as existing) resolved with realpath, with the segments
+ * that do not exist yet re-appended. Undefined when that ancestor cannot be
+ * resolved (a dangling link, a link loop, an unreadable entry), so the caller
+ * refuses rather than guesses.
+ */
+function realWriteTarget(absPath: string): string | undefined {
+  let existing = path.resolve(absPath);
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      fs.lstatSync(existing);
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return undefined;
+      const parent = path.dirname(existing);
+      if (parent === existing) return undefined;
+      missing.unshift(path.basename(existing));
+      existing = parent;
+      continue;
+    }
+    try {
+      return path.join(fs.realpathSync(existing), ...missing);
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * The paper writer's lane on the real location of a `write` or `edit` target:
+ * `paperWorkerMayWrite`'s allow-list applied to `realWriteTarget`, with the node
+ * folder real too. A `..` segment is refused outright, because the kernel resolves
+ * it after any link on the way, which the lexical resolution here cannot follow.
+ */
+export function paperWorkerMayWriteReal(nodeDir: string, filePath: string): boolean {
+  if (filePath.split(/[\\/]/).includes("..")) return false;
+  const real = realWriteTarget(path.resolve(filePath));
+  if (real === undefined) return false;
+  return paperWorkerMayWrite(realPathOrSelf(nodeDir), real);
+}
+
+/**
  * The part of a run-relative path after the explanation node it is inside (its
  * first `explanations/E<nn>-` pair), or undefined when it is not inside one.
  */
@@ -272,6 +315,12 @@ function commandPuzzleId(token: string): string | undefined {
   const digits = match?.[1];
   return digits === undefined ? undefined : `P${Number.parseInt(digits, 10)}`;
 }
+
+/**
+ * The explanation a path continues into, right after a puzzle folder name in a
+ * command: `/explanations/E01-x` (or a glob that names it). Group 1 is the token.
+ */
+const EXPLANATION_CONTINUATION = /^\/explanations\/(E\d+)(?:-[A-Za-z0-9._-]*|[*?])?(?![A-Za-z0-9._-])/;
 
 /** The explanation a command token stands for (`E02-x` is E2), or undefined when it is not one. */
 function commandExplanationId(token: string): string | undefined {
@@ -376,9 +425,11 @@ function within(root: string, absPath: string): boolean {
  * paper's folder, its parent explanation's folder and the exploration copy
  * (`<run>/analysis-data/exploration/`) are its reads. Any other puzzle folder,
  * which includes the ancestor puzzle's card and reviews, and any other
- * explanation folder is refused; so is a bash command that names one of them, or
- * that names the ancestor puzzle together with a `reviews/` segment. The dataset
- * and the hold-out are refused by the caller (`datasetRefusal`, `holdoutRefusal`).
+ * explanation folder is refused. A bash command is refused when it names one of
+ * them: the ancestor puzzle's folder is named only where the same token continues
+ * into the paper's own explanation (`P01-x/explanations/E01-y/…`), so its card and
+ * reviews stay unreadable by bash. The dataset and the hold-out are refused by the
+ * caller (`datasetRefusal`, `holdoutRefusal`).
  */
 function paperRefusal(paperDir: string, toolName: string, input: { path?: unknown; command?: unknown } | undefined): string | undefined {
   const ownDir = realPathOrSelf(paperDir);
@@ -406,21 +457,18 @@ function paperRefusal(paperDir: string, toolName: string, input: { path?: unknow
     if (input.command.includes("..") && GLOB.test(input.command)) {
       return "This command combines a `..` traversal with a glob: name every path you read explicitly";
     }
-    const puzzles = [...input.command.matchAll(PUZZLE_IN_COMMAND)];
-    for (const match of puzzles) {
+    for (const match of input.command.matchAll(PUZZLE_IN_COMMAND)) {
       const id = commandPuzzleId(match[0]);
-      if (id !== undefined && id !== ownPuzzleId) {
-        return `This command names ${match[0]}: a paper names only its own explanation and its ancestor puzzle, and a shell command is checked by name only`;
-      }
+      if (id === undefined) continue;
+      const after = input.command.slice((match.index ?? 0) + match[0].length);
+      const continuation = EXPLANATION_CONTINUATION.exec(after);
+      if (id === ownPuzzleId && continuation !== null && commandExplanationId(continuation[1] ?? "") === ownExplanationId) continue;
+      return `This command names ${match[0]}: a paper names only its own explanation (and its ancestor puzzle through that folder), and a shell command is checked by name only`;
     }
     for (const match of input.command.matchAll(EXPLANATION_IN_COMMAND)) {
       if (commandExplanationId(match[0]) !== ownExplanationId) {
         return `This command names ${match[0]}: a paper names only its own explanation, and a shell command is checked by name only`;
       }
-    }
-    const namesAncestor = puzzles.some((match) => commandPuzzleId(match[0]) === ownPuzzleId);
-    if (namesAncestor && restrictedSegments(input.command).has("reviews")) {
-      return "This command names the ancestor puzzle's reviews/: a paper reads no review of its puzzle";
     }
   }
   return undefined;

@@ -1838,14 +1838,31 @@ test("tree_create makes a paper only for the phase-4 owner, under an explanation
   assert.match(early, /paper/, "a paper under a phase-3 explanation is refused by the phase-3 owner");
   assert.equal(subjects(fx.run).length, before, "a refused create makes no commit");
 
+  const phase4Early = captureTools(t, fx.run, 4);
+  const notYet = await rejectMessage(phase4Early.get("tree_create")!.execute("c", { parentId: "E01", title: "Paper of crowd" }));
+  assert.match(notYet, /papers are created only under explanations that submit has moved to Phase 4/, "the phase-4 owner, under a phase-3 explanation");
+  assert.equal(subjects(fx.run).length, before, "the refused create makes no commit");
+
   updateNode(fx.run, "E01", { phase: 4, status: "ready" }, "owner-p3");
   settle(fx.run);
-  const wrongOwner = await rejectMessage(phase3.get("tree_create")!.execute("c", { parentId: "E01", title: "Paper of crowd" }));
+  // captureTools sets CTC_PHASE when it is called and the tools read it at call time, so re-capture as phase 3.
+  const wrongOwner = await rejectMessage(captureTools(t, fx.run, 3).get("tree_create")!.execute("c", { parentId: "E01", title: "Paper of crowd" }));
   assert.match(wrongOwner, /Not your phase/, "the phase-3 owner no longer owns the explanation");
 
   const phase4 = captureTools(t, fx.run, 4);
   const made = await phase4.get("tree_create")!.execute("c", { parentId: "E01", title: "Paper of crowd" });
   assert.match(made.content[0]!.text, /^created W01 paper 4 ready paper-of-crowd$/);
+});
+
+test("tree_create refuses a paper under a puzzle, for the phase-3 and the phase-4 owner alike", async (t) => {
+  const fx = fixture(t);
+  const before = subjects(fx.run).length;
+  for (const phase of [3, 4]) {
+    const tools = captureTools(t, fx.run, phase);
+    const message = await rejectMessage(tools.get("tree_create")!.execute("c", { parentId: "P01", title: "Paper of crowd", type: "paper" }));
+    assert.match(message, /P01 is a puzzle: a paper goes under an explanation/, `phase ${phase} owner`);
+  }
+  assert.equal(subjects(fx.run).length, before, "the refused creates make no commit");
 });
 
 test("tree_update refuses a paper's submitted status and any phase change, naming submit_paper", async (t) => {
