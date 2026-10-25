@@ -339,6 +339,27 @@ function percentDecoded(text: string): string {
 }
 
 /**
+ * The text under `## <heading>` up to the next `## `, trimmed; empty when there is no such section. Every
+ * section with that heading counts, so a second one cannot change the text unseen. A heading inside fenced
+ * code is not a heading, and the heading matches as `check-puzzle.ts` matches headings (case and emphasis).
+ */
+export function sectionText(markdown: string, heading: string): string {
+  const lines = markdown.split(/\r?\n/);
+  const masked = maskFences(markdown);
+  const wanted = normaliseHeading(`## ${heading}`);
+  const body: string[] = [];
+  let inside = false;
+  for (const [index, line] of masked.entries()) {
+    if (SECTION_HEADING.test(line)) {
+      inside = normaliseHeading(line) === wanted;
+      continue;
+    }
+    if (inside) body.push(lines[index] ?? "");
+  }
+  return body.join("\n").trim();
+}
+
+/**
  * Checks the argument node at `nodeDir` inside the run at `runDir`. `citations`
  * replaces the citation runner (the real `check-citations.ts`, one node process
  * per file); `report: true` also requires `reviews/report.md`. Throws for a

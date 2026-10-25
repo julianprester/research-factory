@@ -39,7 +39,8 @@
 // `argument.md` links to, so a number the argument stands on cannot vanish.
 //
 // **`reproduce`** re-runs the node's scripts in the container (design §10) once
-// the loop has stopped and records `owners/phase-3/loop/<E>/reproduction.json`.
+// the current loop has stopped (a reopen's loop, once one is recorded) and records
+// `owners/phase-3/loop/<E>/reproduction.json`.
 // A call is bounded by an 8-minute budget that is checked only between scripts, so
 // it can overrun by one script's timeout; a partial answer means "call again". A
 // link planted in the reproduced registry makes `reproduceWorkspace` reject on
@@ -49,13 +50,16 @@
 // scratch), so a partial run does not leave the tree dirty.
 //
 // **`submit`** is the end gate (design §10): one `updateNode` hands the node to
-// Phase 4, and only when every gate holds - a STOP, at least one script, a clean
-// `check-argument` (with its review checks), a reproduction that is ok and whose
-// hash (scripts, numbers and assets) still matches now, a review that is not BLOCKED
-// and a ruling on every finding. Nothing is committed before `updateNode`, whose
-// tree commit is the argument's preregistration for Phase 5 (design §9): the
-// reply names it. An edit to `argument.md` after the review is allowed (and is in
-// that commit); an edit to a script or a number is not.
+// Phase 4, and only when every gate holds - a STOP of the current loop, at least one
+// script, a clean `check-argument` (with its review checks), the Predictions pin
+// (design §9), a reproduction that is ok and whose hash (scripts, numbers and assets)
+// still matches now, a review that is not BLOCKED and a ruling on every finding.
+// The first submit writes the pin, the sha-256 of the `## Predictions` section, before
+// `updateNode`; a reopened node must still match it. Nothing is committed before
+// `updateNode`, whose tree commit is the argument's preregistration for Phase 5
+// (design §9): the reply names it, and the pin is in it. An edit to `argument.md`
+// after the review is allowed (and is in that commit) unless it changes the
+// Predictions the pin holds; an edit to a script or a number is not.
 //
 // `tasks/`, `workspace/output/`, `workspace/scripts/` and `workspace/archive/`
 // are written by workers and scripts, so every read and move here goes through
@@ -63,18 +67,18 @@
 // opened without following one) and everything is verified before anything is
 // changed. Every write is a temp file and a rename.
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { ignoreScratch, prepareExploration, type Exec } from "../analysis/run.ts";
 import { readConfig } from "../launch.ts";
 import { commitFiles, findNode, updateNode, type NodeRef } from "../tree.ts";
-import { argumentLinks, checkArgument, checkRevision, parseReport } from "../tools/check-argument.ts";
+import { argumentLinks, checkArgument, checkRevision, parseReport, sectionText } from "../tools/check-argument.ts";
 import { maskFences, normaliseHeading } from "../tools/check-puzzle.ts";
 import { ANALYSIS_SCRIPT, ANALYSIS_TASK, compareTasks, greatestTask, parseTask } from "./names.ts";
 import { reproduceWorkspace, workspaceHash } from "./reproduce.ts";
-import { currentLoop } from "./reopen.ts";
+import { currentLoop, type CurrentLoop } from "./reopen.ts";
 import {
   appendRound,
   argumentSha,
@@ -87,9 +91,9 @@ import {
   readRounds,
   ROUND_CAP,
   roundName,
-  stopOf,
   writeAtomic,
   type Decision,
+  type ReopenRecord,
   type RoundRecord,
 } from "./rounds.ts";
 
@@ -607,9 +611,13 @@ function listLines(lines: string[]): string {
 export async function reproduce(runDir: string, input: ReproduceInput, deps: ReproduceDeps = {}): Promise<string> {
   const node = explanationNode(runDir, input.nodeId);
   const history = readRounds(runDir, node.id);
-  const stopped = stopOf(history, capOf(runDir));
-  if (!stopped.stop) {
-    throw new Error(`no STOP is recorded for ${node.id} (${history.length} closed round(s)): reproduce checks the finished workspace, after the loop has stopped`);
+  const current = currentLoop(history, readReopens(runDir, node.id), capOf(runDir), reopenRoundsOf(runDir));
+  if (!current.decision.stop) {
+    throw new Error(
+      current.reopen === 0
+        ? `no STOP is recorded for ${node.id} (${history.length} closed round(s)): reproduce checks the finished workspace, after the loop has stopped`
+        : `the reopen loop has not stopped yet (reopen ${current.reopen}): reproduce checks the finished workspace, after the loop has stopped`,
+    );
   }
   const config = readConfig(runDir);
   // `.analysis/` must be ignored before the first scratch file exists, or a partial run leaves the tree dirty.
@@ -712,6 +720,28 @@ function updateCommitSha(runDir: string, nodeId: string, phase: number): string 
   return sha;
 }
 
+/** `predictions.sha256` of `nodeId`, relative to the run: the pin the first submit writes (design §9). */
+function pinPath(runDir: string, nodeId: string): string {
+  return loopRecord(runDir, nodeId, "predictions.sha256");
+}
+
+/** The pin as the first submit wrote it (a sha-256 and a newline), or undefined when absent. Anything else is an error. */
+function readPin(runDir: string, nodeId: string): string | undefined {
+  const rel = pinPath(runDir, nodeId);
+  const bytes = readRegular(runDir, rel);
+  if (bytes === undefined) return undefined;
+  const text = bytes.toString("utf8");
+  if (!/^[0-9a-f]{64}\n$/.test(text)) throw new Error(`${rel} is not a sha-256 pin`);
+  return text.trim();
+}
+
+/** The sha-256 of `workspace/argument.md`'s `## Predictions` section, read without following a link. */
+function predictionsSha(node: NodeRef): string {
+  const argument = readRegular(node.dir, "workspace/argument.md");
+  if (argument === undefined) throw new Error("workspace/argument.md is missing");
+  return createHash("sha256").update(sectionText(argument.toString("utf8"), "Predictions")).digest("hex");
+}
+
 /**
  * The end gate (design §10). Refuses, naming the gate, unless every condition
  * holds; then one `updateNode` hands the node to Phase 4 `ready` and the reply
@@ -722,16 +752,25 @@ function updateCommitSha(runDir: string, nodeId: string, phase: number): string 
 export async function submit(runDir: string, input: SubmitInput, deps: SubmitDeps = {}): Promise<string> {
   const node = explanationNode(runDir, input.nodeId);
 
-  // 1. the loop has stopped.
-  let history: ReturnType<typeof readRounds>;
-  let stopped: Decision;
+  // 1. the current loop has stopped: loop 0, or the latest reopen once one is recorded (design §9).
+  let history: RoundRecord[];
+  let reopens: ReopenRecord[];
+  let current: CurrentLoop;
   try {
     history = readRounds(runDir, node.id);
-    stopped = stopOf(history, capOf(runDir));
+    reopens = readReopens(runDir, node.id);
+    current = currentLoop(history, reopens, capOf(runDir), reopenRoundsOf(runDir));
   } catch (error) {
     throw refusal("STOP", `the round record cannot be read: ${message(error)}`);
   }
-  if (!stopped.stop) throw refusal("STOP", `no STOP is recorded (${history.length} closed round(s)): finish the loop first`);
+  if (!current.decision.stop) {
+    throw refusal(
+      "STOP",
+      current.reopen === 0
+        ? `no STOP is recorded (${history.length} closed round(s)): finish the loop first`
+        : `the reopen loop has not stopped yet (reopen ${current.reopen}, ${history.filter((record) => record.reopen === current.reopen).length} closed round(s) in it): finish the loop first`,
+    );
+  }
 
   // 2. there is something to reproduce.
   let scripts: string[];
@@ -753,7 +792,26 @@ export async function submit(runDir: string, input: SubmitInput, deps: SubmitDep
   }
   if (problems.length > 0) throw refusal("check-argument", `${problems.length} problem(s):\n${listLines(problems)}`);
 
-  // 4. the reproduction record is ok and still describes these scripts and numbers.
+  // 4. the Predictions are pinned (design §9): the first submit writes their hash, and a reopened node must still match it.
+  let pin: string | undefined;
+  let sectionSha: string;
+  try {
+    pin = readPin(runDir, node.id);
+    sectionSha = predictionsSha(node);
+  } catch (error) {
+    throw refusal("predictions", message(error));
+  }
+  if (pin !== undefined && pin !== sectionSha) {
+    throw refusal(
+      "predictions",
+      `the Predictions section differs from the one pinned at the first submit (${pinPath(runDir, node.id)}). The pin is the preregistration, so the Predictions stay as they were: a prediction the extra loop wants to add is recorded as a deviation in the Limitations, not as a prediction`,
+    );
+  }
+  if (pin === undefined && reopens.length > 0) {
+    throw refusal("predictions", `${pinPath(runDir, node.id)} is missing, so the Predictions cannot be checked against the first submit: a reopened node is not submitted without its pin`);
+  }
+
+  // 5. the reproduction record is ok and still describes these scripts and numbers.
   const record = readReproduction(runDir, node.id);
   if (record === undefined) throw refusal("reproduction", "there is no reproduction record: call reproduce");
   if (!record.ok) {
@@ -769,7 +827,7 @@ export async function submit(runDir: string, input: SubmitInput, deps: SubmitDep
     throw refusal("reproduction", "workspace/scripts, workspace/output/numbers or workspace/output/assets changed since the reproduction: call reproduce again");
   }
 
-  // 5. the review is not BLOCKED, and every finding has a ruling.
+  // 6. the review is not BLOCKED, and every finding has a ruling.
   let report: ReturnType<typeof parseReport>;
   let revision = "";
   try {
@@ -787,6 +845,8 @@ export async function submit(runDir: string, input: SubmitInput, deps: SubmitDep
   const unruled = checkRevision(report.findings, revision);
   if (unruled.length > 0) throw refusal("revision", listLines(unruled));
 
+  // The first submit pins the Predictions. The pin is written before updateNode, so the tree commit carries it (the preregistration).
+  if (pin === undefined) writeAtomic(path.join(runDir, ...pinPath(runDir, node.id).split("/")), `${sectionSha}\n`);
   // The one commit: updateNode's tree commit, which carries the argument as it stands.
   const note = typeof input.note === "string" && input.note.trim() !== "" ? input.note.trim() : undefined;
   updateNode(runDir, node.id, { status: "ready", phase: 4 }, ACTOR, note);

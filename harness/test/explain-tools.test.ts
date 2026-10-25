@@ -9,6 +9,7 @@
 // plant symlinks where workers and scripts can write (`tasks/`, `workspace/output/`,
 // `workspace/archive/`), because a host-side read or move must never follow one.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -28,6 +29,7 @@ import {
 } from "../explain/tools.ts";
 import ownerExtension from "../owner-extension.ts";
 import { explanationWorkerMayWrite, ownerMayWrite } from "../guard.ts";
+import { sectionText } from "../tools/check-argument.ts";
 import { createChild, updateNode } from "../tree.ts";
 import {
   ARGUMENT,
@@ -1509,6 +1511,119 @@ test("submit refuses a second time: the node is no longer in Phase 3", async (t)
   const fx = await reproduced(t);
   await submitOk(fx);
   assert.match(await submitMessage(fx), /Not your phase/);
+});
+
+// --- reproduce and submit for a reopened node (design §9): the current loop's stop, and the Predictions pin ---
+
+const pinFile = (fx: Fixture) => path.join(loopDir(fx.run, "E01"), "predictions.sha256");
+const PINNED = `${createHash("sha256").update(sectionText(ARGUMENT_FULL, "Predictions")).digest("hex")}\n`;
+
+/**
+ * A node whose loop 0 stopped (two quiet rounds), then whose reopen 1 stopped (two quiet rounds 4 and 5), in Phase 3.
+ * With `submitFirst` it is submitted once before the reopen, as a real reopen follows a submit: the pin exists.
+ */
+async function reopenStopped(t: TestContext, { submitFirst = false } = {}): Promise<Fixture> {
+  const fx = await closedOut(t, ["substantial", "none", "none"]);
+  if (submitFirst) {
+    await reproduce(fx.run, { nodeId: "E01" }, { exec: fakeContainer().exec });
+    await submitOk(fx);
+    updateNode(fx.run, "E01", { phase: 3 }, "owner-p4");
+  }
+  appendReopen(fx.run, "E01", { n: 1, requestSha: REOPEN_SHA, afterRound: 3 }, 2);
+  await runRound(fx, 4, ["R1A"], "none");
+  await runRound(fx, 5, ["R1B"], "none");
+  for (const round of [4, 5]) write(inWorkspace(fx, "reports", `${String(round).padStart(2, "0")}.md`), REPORT_FULL(round));
+  settle(fx.run);
+  return fx;
+}
+
+const reproduceAgain = (fx: Fixture) => reproduce(fx.run, { nodeId: "E01" }, { exec: fakeContainer().exec });
+
+test("the first submit pins the Predictions: the pin file is written, and the submit commit carries it", async (t) => {
+  const fx = await reproduced(t);
+  const text = await submitOk(fx);
+  const sha = git(fx.run, "rev-parse", "--short", "HEAD").trim();
+  assert.ok(text.includes(sha), `the reply names ${sha}: ${text}`);
+  assert.equal(readFileSync(pinFile(fx), "utf8"), PINNED);
+  assert.equal(git(fx.run, "show", `${sha}:owners/phase-3/loop/E01/predictions.sha256`), PINNED);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+});
+
+test("a refused first submit writes no pin: the Predictions are pinned only by a submit that goes through", async (t) => {
+  const fx = await reproduced(t);
+  write(inWorkspace(fx, "reviews", "report.md"), review("BLOCKED"));
+  settle(fx.run);
+  assert.match(await submitMessage(fx), /gate "review"/);
+  assert.equal(existsSync(pinFile(fx)), false);
+});
+
+test("a reopened node submits again when its Predictions are unchanged: phase 4 ready, the pin kept", async (t) => {
+  const fx = await reopenStopped(t, { submitFirst: true });
+  await reproduceAgain(fx);
+  const before = subjects(fx.run).length;
+  assert.match(await submitOk(fx), /submitted E01/);
+  assert.equal(readFileSync(pinFile(fx), "utf8"), PINNED);
+  assert.equal(subjects(fx.run).length, before + 1, "one commit");
+  const state = JSON.parse(readFileSync(path.join(fx.node, "node.json"), "utf8")) as { phase: number; status: string };
+  assert.deepEqual([state.phase, state.status], [4, "ready"]);
+});
+
+test("a reopened node whose Predictions were reworded is refused at the predictions gate, and the pin is untouched", async (t) => {
+  const fx = await reopenStopped(t, { submitFirst: true });
+  await reproduceAgain(fx);
+  write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL.replace("the same ordering", "a reversed ordering"));
+  settle(fx.run);
+  const before = subjects(fx.run).length;
+  const message = await submitMessage(fx);
+  assert.match(message, /gate "predictions"/);
+  assert.match(message, /differs from the one pinned at the first submit/);
+  assert.match(message, /deviation in the Limitations/);
+  assert.equal(readFileSync(pinFile(fx), "utf8"), PINNED);
+  assert.equal(subjects(fx.run).length, before, "no commit");
+});
+
+test("a reopened node whose pin file is missing is refused at the predictions gate, and nothing is pinned", async (t) => {
+  const fx = await reopenStopped(t);
+  await reproduceAgain(fx);
+  const message = await submitMessage(fx);
+  assert.match(message, /gate "predictions"/);
+  assert.match(message, /predictions\.sha256 is missing/);
+  assert.equal(existsSync(pinFile(fx)), false);
+});
+
+test("a pin that is a link is refused, not read through (submit reads it without following a link)", async (t) => {
+  const fx = await reopenStopped(t, { submitFirst: true });
+  await reproduceAgain(fx);
+  const target = path.join(fx.run, "elsewhere.sha256");
+  write(target, PINNED);
+  unlinkSync(pinFile(fx));
+  symlinkSync(target, pinFile(fx));
+  settle(fx.run);
+  assert.match(await submitMessage(fx), /gate "predictions".*is a link/s);
+});
+
+test("reproduce is refused while the reopen loop has not stopped, though loop 0 has, and runs no script", async (t) => {
+  const fx = await closedOut(t, ["substantial", "none", "none"]);
+  appendReopen(fx.run, "E01", { n: 1, requestSha: REOPEN_SHA, afterRound: 3 }, 2);
+  await runRound(fx, 4, ["R1A"], "none");
+  const fake = fakeContainer();
+  assert.match(await rejectMessage(reproduce(fx.run, { nodeId: "E01" }, { exec: fake.exec })), /the reopen loop has not stopped yet/);
+  assert.deepEqual(fake.calls, [], "no script ran");
+});
+
+test("a node with only loop 0 stopped and a reopen pending is not submittable (Review Focus 3)", async (t) => {
+  const fx = await reproduced(t);
+  appendReopen(fx.run, "E01", { n: 1, requestSha: REOPEN_SHA, afterRound: 3 }, 2);
+  settle(fx.run);
+  const message = await submitMessage(fx);
+  assert.match(message, /gate "STOP"/);
+  assert.match(message, /the reopen loop has not stopped yet \(reopen 1, 0 closed round\(s\) in it\)/);
+});
+
+test("loop 0's refusals keep their wording: no STOP, and reproduce before the STOP", async (t) => {
+  const fx = await closedOut(t, ["substantial", "none"]);
+  assert.match(await submitMessage(fx), /no STOP is recorded \(2 closed round\(s\)\): finish the loop first/);
+  assert.match(await rejectMessage(reproduce(fx.run, { nodeId: "E01" }, { exec: fakeContainer().exec })), /no STOP is recorded for E01 \(2 closed round\(s\)\)/);
 });
 
 // --- tree_update and tree_create ------------------------------------------

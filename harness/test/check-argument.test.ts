@@ -24,7 +24,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { argumentLinks, checkArgument, checkRevision, parseReport } from "../tools/check-argument.ts";
+import { argumentLinks, checkArgument, checkRevision, parseReport, sectionText } from "../tools/check-argument.ts";
 import { initRun } from "../tree.ts";
 
 const CHECK_ARGUMENT = fileURLToPath(new URL("../tools/check-argument.ts", import.meta.url));
@@ -850,4 +850,19 @@ test("a script with a suffix after its extension, such as A_01.Rx, is reported a
   assert.deepEqual(problemsOf(fixture), [
     "workspace/scripts/A_01.Rx is not a script name (X_nn.R, X_nn.py, assets.R or assets.py)",
   ]);
+});
+
+test("sectionText returns the text under a ## heading up to the next ##, trimmed, and empty when the section is absent", () => {
+  const markdown = ["# Argument", "", "## Predictions", "", "First.", "", "### Sub", "Kept.", "", "## Limitations", "Not this.", ""].join("\n");
+  assert.equal(sectionText(markdown, "Predictions"), "First.\n\n### Sub\nKept.");
+  assert.equal(sectionText(markdown, "Alternatives considered"), "");
+});
+
+test("sectionText ignores a heading inside a fenced code block, and matches the heading as check-puzzle does", () => {
+  const markdown = ["## **predictions**:", "Before.", "```", "## Limitations", "in code", "```", "After.", "## Limitations", "Out."].join("\n");
+  assert.equal(sectionText(markdown, "Predictions"), "Before.\n```\n## Limitations\nin code\n```\nAfter.");
+});
+
+test("sectionText takes every Predictions section, so a second one cannot change the pin unseen", () => {
+  assert.equal(sectionText("## Predictions\nA.\n## Limitations\nL.\n## Predictions\nB.\n", "Predictions"), "A.\nB.");
 });
