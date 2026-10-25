@@ -201,34 +201,43 @@ export function appendRound(
   cap: number = ROUND_CAP,
   reopenRounds: number = 2,
 ): void {
-  const history = readRounds(runDir, nodeId);
-  if (record.round !== history.length + 1) {
-    throw new Error(`rounds: cannot record round ${record.round}: the next round is ${history.length + 1}`);
+  // Validated with the reader's rules first, so a record the reader would refuse is never written.
+  const checked = recordOf(record);
+  if (checked === undefined) {
+    throw new Error(`rounds: cannot record round ${String(record.round)}: not a round record: ${JSON.stringify(record)?.slice(0, 160)}`);
   }
-  const loop = record.reopen ?? 0;
+  const history = readRounds(runDir, nodeId);
+  if (checked.round !== history.length + 1) {
+    throw new Error(`rounds: cannot record round ${checked.round}: the next round is ${history.length + 1}`);
+  }
+  const loop = checked.reopen ?? 0;
   if (loop === 0) {
     const stopped = stopOf(segment(history, 0), cap);
     if (stopped.stop) throw new Error(`STOP recorded (${stopped.reason}): no more rounds`);
-    writeAtomic(path.join(loopDir(runDir, nodeId), "rounds.json"), `${JSON.stringify([...history, record], null, 2)}\n`);
-    return;
-  }
-
-  const current = history[history.length - 1]?.reopen ?? 0;
-  if (loop === current) {
-    const stopped = stopOf(segment(history, loop), reopenRounds);
-    if (stopped.stop) throw new Error(`STOP recorded (${stopped.reason}) in reopen ${loop}: no more rounds`);
-  } else if (loop === current + 1) {
-    const before = current === 0 ? stopOf(segment(history, 0), cap) : stopOf(segment(history, current), reopenRounds);
-    if (!before.stop) throw new Error(`rounds: cannot record reopen ${loop}: loop ${current} has not stopped`);
+    // Once a reopen round exists, the original loop is over whatever the cap now says: no original round may follow.
+    if (history.some((earlier) => earlier.reopen !== undefined)) {
+      throw new Error(`rounds: cannot record original round ${checked.round}: reopen rounds follow it`);
+    }
   } else {
-    throw new Error(`rounds: cannot record round ${record.round} in reopen ${loop}: the current loop is ${current}`);
+    const current = history[history.length - 1]?.reopen ?? 0;
+    if (loop === current) {
+      const stopped = stopOf(segment(history, loop), reopenRounds);
+      if (stopped.stop) throw new Error(`STOP recorded (${stopped.reason}) in reopen ${loop}: no more rounds`);
+    } else if (loop === current + 1) {
+      const before = current === 0 ? stopOf(segment(history, 0), cap) : stopOf(segment(history, current), reopenRounds);
+      if (!before.stop) throw new Error(`rounds: cannot record reopen ${loop}: loop ${current} has not stopped`);
+    } else {
+      throw new Error(`rounds: cannot record round ${checked.round} in reopen ${loop}: the current loop is ${current}`);
+    }
   }
 
-  const decided = decideStop([...segment(history, loop), record], reopenRounds);
-  if (record.stop !== undefined && (!decided.stop || decided.reason !== record.stop)) {
-    throw new Error(`rounds: stop ${JSON.stringify(record.stop)} is not what reopen ${loop} decides`);
+  // A stop the record brings must be the reason its loop decides, on loop 0 as on a reopen.
+  const decided = decideStop([...segment(history, loop), checked], loop === 0 ? cap : reopenRounds);
+  const label = loop === 0 ? "the original loop" : `reopen ${loop}`;
+  if (checked.stop !== undefined && (!decided.stop || decided.reason !== checked.stop)) {
+    throw new Error(`rounds: stop ${JSON.stringify(checked.stop)} is not what ${label} decides`);
   }
-  const stored: RoundRecord = decided.stop ? { ...record, stop: decided.reason } : record;
+  const stored: RoundRecord = loop > 0 && decided.stop ? { ...checked, stop: decided.reason } : checked;
   writeAtomic(path.join(loopDir(runDir, nodeId), "rounds.json"), `${JSON.stringify([...history, stored], null, 2)}\n`);
 }
 

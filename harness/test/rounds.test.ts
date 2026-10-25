@@ -334,3 +334,77 @@ test("appendRound: a stop given in a reopen round must be the one its loop decid
   );
   assert.equal(readRounds(run, "E01").length, 7);
 });
+
+/** An original-loop record (no `reopen`), as the owner's close_round writes one. */
+function originalRecord(round: number, changed = true): RoundRecord {
+  return { round, changed, argumentSha: `sha${round}`, summary: `round ${round}`, letters: ["A"] };
+}
+
+/** The rounds file's bytes, or undefined when it is absent. */
+function bytesOf(run: string): string | undefined {
+  const file = path.join(loopDir(run, "E01"), "rounds.json");
+  return existsSync(file) ? readFileSync(file, "utf8") : undefined;
+}
+
+/** A refused append throws the message and leaves the rounds file exactly as it was. */
+function refusedWritingNothing(run: string, record: RoundRecord, cap: number, reopenRounds: number, pattern: RegExp, label: string): void {
+  const before = bytesOf(run);
+  assert.throws(() => appendRound(run, "E01", record, cap, reopenRounds), pattern, label);
+  assert.equal(bytesOf(run), before, `${label}: the file is unchanged`);
+}
+
+test("appendRound refuses a record that readRounds would refuse, and writes nothing (I1)", (t) => {
+  const run = tempDir(t);
+  const [one, two] = history("cc");
+  appendRound(run, "E01", one!, 6);
+  const bad: [string, unknown][] = [
+    ["reopen 0", { ...two!, reopen: 0 }],
+    ["reopen null", { ...two!, reopen: null }],
+    ["reopen a string", { ...two!, reopen: "1" }],
+    ["a stop that is not a reason", { ...two!, stop: "nope" }],
+    ["a non-string summary", { ...two!, summary: 7 }],
+    ["letters that are not strings", { ...two!, letters: [1] }],
+    ["a changed that is not a boolean", { ...two!, changed: "yes" }],
+  ];
+  for (const [label, record] of bad) {
+    refusedWritingNothing(run, record as RoundRecord, 6, 2, /not a round record/, label);
+  }
+  assert.deepEqual(readRounds(run, "E01"), [one], "the history still reads");
+});
+
+test("appendRound refuses an unreadable record when no rounds file exists yet (I1)", (t) => {
+  const run = tempDir(t);
+  refusedWritingNothing(run, { ...originalRecord(1), reopen: 0 }, 6, 2, /not a round record/, "reopen 0 on round 1");
+  assert.equal(bytesOf(run), undefined, "no file is created");
+});
+
+test("appendRound refuses an original round once a reopen round is recorded, even under a raised cap (I2)", (t) => {
+  const run = tempDir(t);
+  // A legacy six-round file: no stop is stored, so the cap decides loop 0.
+  writeAtomic(path.join(loopDir(run, "E01"), "rounds.json"), `${JSON.stringify(history("cccccc"))}\n`);
+  appendRound(run, "E01", reopenRecord(7, 1, true), 6, 2);
+  refusedWritingNothing(run, originalRecord(8), 9, 2, /cannot record original round 8: reopen rounds follow it/, "loop 0 after a reopen under cap 9");
+  const records = readRounds(run, "E01");
+  assert.equal(records.length, 7, "the reopen round stands and no original round follows it");
+  assert.equal(records[6]?.reopen, 1);
+});
+
+test("appendRound stores no stop it cannot decide, on loop 0 as on a reopen (I3)", (t) => {
+  const run = tempDir(t);
+  const [one, two] = history("cn");
+  refusedWritingNothing(run, { ...one!, stop: "two-quiet" }, 6, 2, /stop "two-quiet" is not what the original loop decides/, "a bogus two-quiet on round 1");
+  refusedWritingNothing(run, { ...one!, stop: "cap" }, 6, 2, /stop "cap" is not what the original loop decides/, "a cap on round 1 under cap 6");
+  appendRound(run, "E01", one!, 2);
+  refusedWritingNothing(run, { ...two!, stop: "two-quiet" }, 2, 2, /stop "two-quiet" is not what the original loop decides/, "two-quiet where cap decides");
+  refusedWritingNothing(run, { ...two!, stop: "cap" }, 6, 2, /stop "cap" is not what the original loop decides/, "cap before the cap is reached");
+  appendRound(run, "E01", { ...two!, stop: "cap" }, 2);
+  assert.equal(readRounds(run, "E01")[1]?.stop, "cap", "the stop the loop decides is stored as given");
+});
+
+test("appendRound: an omitted stop on loop 0 is accepted as before", (t) => {
+  const run = tempDir(t);
+  const [one, two] = history("cn");
+  appendRound(run, "E01", one!, 2);
+  appendRound(run, "E01", two!, 2);
+  assert.deepEqual(readRounds(run, "E01"), [one, two]);
+});
