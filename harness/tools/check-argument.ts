@@ -338,10 +338,14 @@ function percentDecoded(text: string): string {
   }
 }
 
+/** A `##` heading line, with up to three leading spaces (CommonMark); `##Predictions` with no space is not one. */
+const INDENTED_SECTION_HEADING = /^ {0,3}##\s/;
+
 /**
- * The text under `## <heading>` up to the next `## `, trimmed; empty when there is no such section. Every
- * section with that heading counts, so a second one cannot change the text unseen. A heading inside fenced
- * code is not a heading, and the heading matches as `check-puzzle.ts` matches headings (case and emphasis).
+ * The text under every `## ` heading whose normalised text starts with `heading`, in document order, trimmed; empty
+ * when there is no such section. A variant (`## Predictions (addendum)`, `## Predictions: round 3`) is part of the
+ * section, so a second one cannot change the pin unseen. A heading inside fenced code is not a heading, and a
+ * heading is matched as `check-puzzle.ts` matches headings (case and emphasis); a `###` line is body text.
  */
 export function sectionText(markdown: string, heading: string): string {
   const lines = markdown.split(/\r?\n/);
@@ -350,8 +354,8 @@ export function sectionText(markdown: string, heading: string): string {
   const body: string[] = [];
   let inside = false;
   for (const [index, line] of masked.entries()) {
-    if (SECTION_HEADING.test(line)) {
-      inside = normaliseHeading(line) === wanted;
+    if (INDENTED_SECTION_HEADING.test(line)) {
+      inside = normaliseHeading(line.trimStart()).startsWith(wanted);
       continue;
     }
     if (inside) body.push(lines[index] ?? "");

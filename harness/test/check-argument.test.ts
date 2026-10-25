@@ -866,3 +866,39 @@ test("sectionText ignores a heading inside a fenced code block, and matches the 
 test("sectionText takes every Predictions section, so a second one cannot change the pin unseen", () => {
   assert.equal(sectionText("## Predictions\nA.\n## Limitations\nL.\n## Predictions\nB.\n", "Predictions"), "A.\nB.");
 });
+
+test("sectionText takes a variant heading that starts with the wanted text, in document order, so an addendum cannot hide", () => {
+  const markdown = ["## Predictions", "A.", "## Limitations", "L.", "## Predictions (addendum)", "B.", "## Predictions: round 3", "C.", ""].join("\n");
+  assert.equal(sectionText(markdown, "Predictions"), "A.\nB.\nC.");
+  assert.equal(sectionText("## Predictionsfoo\nX.\n", "Predictions"), "X.");
+  assert.equal(sectionText("## Limitations\nL.\n## Predictions (addendum)\nB.\n", "Predictions"), "B.");
+});
+
+test("sectionText takes a heading indented by up to three spaces as a heading, and four spaces as body text", () => {
+  assert.equal(sectionText("## Limitations\nL.\n  ## Predictions\nStray.\n## Predictions\nReal.\n", "Predictions"), "Stray.\nReal.");
+  assert.equal(sectionText("## Limitations\nL.\n   ## Predictions\nStray.\n", "Predictions"), "Stray.");
+  assert.equal(sectionText("## Predictions\nA.\n    ## Limitations\nStill predictions.\n", "Predictions"), "A.\n    ## Limitations\nStill predictions.");
+});
+
+test("sectionText does not take ##Predictions with no space, or a ### subheading, as a heading", () => {
+  assert.equal(sectionText("## Limitations\nL.\n##Predictions\nNot a heading.\n", "Predictions"), "");
+  assert.equal(sectionText("## Predictions\nA.\n### Predictions detail\nKept.\n", "Predictions"), "A.\n### Predictions detail\nKept.");
+});
+
+test("sectionText keeps an H1 inside the section", () => {
+  assert.equal(sectionText("## Predictions\nA.\n# A title\nB.\n## Limitations\n", "Predictions"), "A.\n# A title\nB.");
+});
+
+test("sectionText ignores headings inside a tilde fence and inside a four-backtick fence", () => {
+  const tilde = ["## Predictions", "A.", "~~~", "## Limitations", "in code", "~~~", "B."].join("\n");
+  assert.equal(sectionText(tilde, "Predictions"), "A.\n~~~\n## Limitations\nin code\n~~~\nB.");
+  // a three-backtick line does not close a four-backtick fence, so the heading inside stays code
+  const four = ["## Predictions", "A.", "````", "```", "## Limitations", "```", "````", "B."].join("\n");
+  assert.equal(sectionText(four, "Predictions"), "A.\n````\n```\n## Limitations\n```\n````\nB.");
+});
+
+test("sectionText reads CRLF input the same as LF input", () => {
+  const lf = "## Limitations\nL.\n## Predictions\nA.\nB.\n## Alternatives considered\nC.\n";
+  assert.equal(sectionText(lf.replace(/\n/g, "\r\n"), "Predictions"), sectionText(lf, "Predictions"));
+  assert.equal(sectionText(lf.replace(/\n/g, "\r\n"), "Predictions"), "A.\nB.");
+});

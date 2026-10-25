@@ -1587,12 +1587,12 @@ test("a reopened node whose Predictions were reworded is refused at the predicti
   assert.equal(subjects(fx.run).length, before, "no commit");
 });
 
-test("a reopened node whose pin file is missing is refused at the predictions gate, and nothing is pinned", async (t) => {
+test("a reopened node with no submit commit in its history is refused at the predictions gate, and nothing is pinned", async (t) => {
   const fx = await reopenStopped(t);
   await reproduceAgain(fx);
   const message = await submitMessage(fx);
   assert.match(message, /gate "predictions"/);
-  assert.match(message, /predictions\.sha256 is missing/);
+  assert.match(message, /no submit commit/);
   assert.equal(existsSync(pinFile(fx)), false);
 });
 
@@ -1700,12 +1700,12 @@ test("ensurePredictionsPin writes the derived pin when none exists, and never ov
   assert.equal(readFileSync(pinFile(fx), "utf8"), existing, "an existing pin is kept as it is");
 });
 
-test("a node submitted before pins: submit refuses while the pin is missing, then the derived pin lets an unchanged Predictions section submit (concern 1)", async (t) => {
+test("a node submitted before pins: its pin is derived from the first submit, and the reopened submit's commit carries it (concern 1)", async (t) => {
   const fx = await submittedBeforePins(t);
-  assert.match(await submitMessage(fx), /gate "predictions".*is missing/s);
-  ensurePredictionsPin(fx.run, fx.node);
+  assert.equal(existsSync(pinFile(fx)), false);
   assert.match(await submitOk(fx), /submitted E01/);
   assert.equal(git(fx.run, "show", `HEAD:${loopRecord(fx)}`), PINNED);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
 });
 
 test("a node submitted before pins, Predictions reworded in the reopen: the derived pin is the original, so the edit is refused (concern 1)", async (t) => {
@@ -1719,6 +1719,83 @@ test("a node submitted before pins, Predictions reworded in the reopen: the deri
   assert.match(message, /gate "predictions"/);
   assert.match(message, /deviation in the Limitations/);
   assert.equal(subjects(fx.run).length, before, "no commit");
+});
+
+test("a node submitted once, then a pending reopen, a reworded Predictions and reopens.json deleted: submit refuses at the predictions gate (probe 6)", async (t) => {
+  const fx = await reproduced(t);
+  await submitOk(fx);
+  updateNode(fx.run, "E01", { phase: 3 }, "owner-p4");
+  appendReopen(fx.run, "E01", { n: 1, requestSha: REOPEN_SHA, afterRound: 3 }, 2);
+  write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL.replace("the same ordering", "a reversed ordering"));
+  rmSync(path.join(loopDir(fx.run, "E01"), "reopens.json"));
+  settle(fx.run);
+  const message = await submitMessage(fx);
+  assert.match(message, /gate "predictions"/);
+  assert.match(message, /differs from the one pinned/);
+  assert.equal(readFileSync(pinFile(fx), "utf8"), PINNED);
+});
+
+test("a garbage pin before any submit commit is rewritten by the first submit, which succeeds (probe 6, concern 2)", async (t) => {
+  const fx = await reproduced(t);
+  write(pinFile(fx), "not a pin\n");
+  settle(fx.run);
+  assert.match(await submitOk(fx), /submitted E01/);
+  assert.equal(readFileSync(pinFile(fx), "utf8"), PINNED);
+});
+
+test("a garbage pin on a node with an earlier submit commit is refused at the predictions gate, not rewritten (fail closed)", async (t) => {
+  const fx = await reproduced(t);
+  await submitOk(fx);
+  updateNode(fx.run, "E01", { phase: 3 }, "owner-p4");
+  write(pinFile(fx), "not a pin\n");
+  settle(fx.run);
+  assert.match(await submitMessage(fx), /gate "predictions".*not a sha-256 pin/s);
+  assert.equal(readFileSync(pinFile(fx), "utf8"), "not a pin\n");
+});
+
+test("a reopened node whose Predictions gain an addendum after the reopen is refused at the predictions gate (probe W7)", async (t) => {
+  const fx = await reopenStopped(t, { submitFirst: true });
+  await reproduceAgain(fx);
+  write(inWorkspace(fx, "argument.md"), `${ARGUMENT_FULL}## Predictions (addendum)\nA new prediction.\n`);
+  settle(fx.run);
+  const before = subjects(fx.run).length;
+  assert.match(await submitMessage(fx), /gate "predictions"/);
+  assert.equal(readFileSync(pinFile(fx), "utf8"), PINNED);
+  assert.equal(subjects(fx.run).length, before, "no commit");
+});
+
+test("a reopened node with an indented ## Predictions inside Limitations is refused at the predictions gate (probe 16)", async (t) => {
+  const fx = await reopenStopped(t, { submitFirst: true });
+  await reproduceAgain(fx);
+  write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL.replace("The snapshot cannot show causality.\n", "The snapshot cannot show causality.\n  ## Predictions\nA stray prediction.\n"));
+  settle(fx.run);
+  assert.match(await submitMessage(fx), /gate "predictions"/);
+  assert.equal(readFileSync(pinFile(fx), "utf8"), PINNED);
+});
+
+test("derivePredictionsPin takes the first submit's commit when a later [P4:updateNode] commit holds reworded Predictions (Important 3)", async (t) => {
+  const fx = await reproduced(t);
+  await submitOk(fx);
+  const first = git(fx.run, "rev-parse", "HEAD").trim();
+  updateNode(fx.run, "E01", { phase: 3 }, "owner-p4");
+  write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL.replace("the same ordering", "a reversed ordering"));
+  settle(fx.run);
+  // A second phase-4 commit, as a later submit would make; the derivation must still read the first one.
+  updateNode(fx.run, "E01", { status: "ready", phase: 4 }, "owner-p4");
+  assert.equal(git(fx.run, "log", "--format=%s", "--grep", "[P4:updateNode] E01 \u2014 ", "--fixed-strings").trim().split("\n").length, 2);
+  assert.deepEqual(derivePredictionsPin(fx.run, fx.node), { sha256: PINNED.trim(), commit: first });
+});
+
+test("reproduce refuses a reopens.json that cannot be read as a STOP refusal, naming the gate, and runs no script", async (t) => {
+  const fx = await closedOut(t, ["substantial", "none"]);
+  write(path.join(loopDir(fx.run, "E01"), "reopens.json"), JSON.stringify([{ n: 1, requestSha: REOPEN_SHA, afterRound: 2 }]));
+  settle(fx.run);
+  const fake = fakeContainer();
+  assert.equal(
+    await rejectMessage(reproduce(fx.run, { nodeId: "E01" }, { exec: fake.exec })),
+    'reproduce refused (gate "STOP"): the round record cannot be read: reopens: a reopen is recorded while loop 0 has not stopped',
+  );
+  assert.deepEqual(fake.calls, [], "no script ran");
 });
 
 // --- tree_update and tree_create ------------------------------------------
