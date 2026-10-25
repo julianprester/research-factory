@@ -433,21 +433,21 @@ test("readConfig accepts canonical non-negative integer phase keys", (t) => {
     "12": "harness/skills/demo-phase12",
   };
   writeFileSync(path.join(dir, "config.json"), JSON.stringify({ model: "m1", phases }));
-  assert.deepEqual(readConfig(dir), { model: "m1", judgeModel: "m1", ...ANALYSIS_DEFAULTS, phases });
+  assert.deepEqual(readConfig(dir), { model: "m1", judgeModel: "m1", ...CONFIG_DEFAULTS, phases });
 });
 
 test("readConfig reads the model and the phases", (t) => {
   const dir = configDir(t);
   const cfg = { model: "m1", phases: { "1": "harness/skills/demo-phase1" } };
   writeFileSync(path.join(dir, "config.json"), JSON.stringify(cfg));
-  assert.deepEqual(readConfig(dir), { ...cfg, judgeModel: "m1", ...ANALYSIS_DEFAULTS });
+  assert.deepEqual(readConfig(dir), { ...cfg, judgeModel: "m1", ...CONFIG_DEFAULTS });
 });
 
 test("readConfig reads judgeModel when the run names a different judge model", (t) => {
   const dir = configDir(t);
   const cfg = { model: "worker/model", judgeModel: "judge/model", phases: { "2": "harness/skills/phase-2" } };
   writeFileSync(path.join(dir, "config.json"), JSON.stringify(cfg));
-  assert.deepEqual(readConfig(dir), { ...cfg, ...ANALYSIS_DEFAULTS });
+  assert.deepEqual(readConfig(dir), { ...cfg, ...CONFIG_DEFAULTS });
 });
 
 test("readConfig returns the analysis keys with their defaults", (t) => {
@@ -463,7 +463,7 @@ test("readConfig reads the analysis keys when the run sets them", (t) => {
   const dir = configDir(t);
   const cfg = { model: "m1", analysisImage: "ctc-analysis:2", analysisTimeoutMs: 60_000, roundCap: 3, phases: {} };
   writeFileSync(path.join(dir, "config.json"), JSON.stringify(cfg));
-  assert.deepEqual(readConfig(dir), { ...cfg, judgeModel: "m1" });
+  assert.deepEqual(readConfig(dir), { ...CONFIG_DEFAULTS, ...cfg, judgeModel: "m1" });
 });
 
 test("readConfig rejects a non-string analysisImage, naming the key", (t) => {
@@ -522,7 +522,16 @@ test("readConfig throws a clear error for invalid JSON", (t) => {
   assert.throws(() => readConfig(dir), /config\.json/);
 });
 
-const ANALYSIS_DEFAULTS = { analysisImage: "ctc-analysis:1", analysisTimeoutMs: 1_800_000, roundCap: 6 };
+const CONFIG_DEFAULTS = {
+  analysisImage: "ctc-analysis:1",
+  analysisTimeoutMs: 1_800_000,
+  roundCap: 6,
+  reopenRounds: 2,
+  maxReopens: 2,
+  paperImage: "ctc-paper:1",
+  paperTimeoutMs: 600_000,
+  paperBareNumberLimit: 3,
+};
 
 function configDir(t: TestContext): string {
   const dir = mkdtempSync(path.join(tmpdir(), "ctc-launch-config-"));
@@ -543,3 +552,42 @@ async function killChild(child: ChildProcess): Promise<void> {
   child.kill("SIGKILL");
   await once(child, "exit");
 }
+
+test("readConfig returns the reopen and paper keys with their defaults", (t) => {
+  const dir = configDir(t);
+  writeFileSync(path.join(dir, "config.json"), JSON.stringify({ model: "m1", phases: {} }));
+  assert.deepEqual(readConfig(dir), { model: "m1", judgeModel: "m1", ...CONFIG_DEFAULTS, phases: {} });
+});
+
+test("readConfig reads the reopen and paper keys when the run sets them", (t) => {
+  const dir = configDir(t);
+  const cfg = {
+    model: "m1",
+    reopenRounds: 3,
+    maxReopens: 1,
+    paperImage: "ctc-paper:2",
+    paperTimeoutMs: 60_000,
+    paperBareNumberLimit: 0,
+    phases: {},
+  };
+  writeFileSync(path.join(dir, "config.json"), JSON.stringify(cfg));
+  assert.deepEqual(readConfig(dir), { ...CONFIG_DEFAULTS, ...cfg, judgeModel: "m1" });
+});
+
+test("readConfig rejects a reopen or paper key of the wrong kind, naming the key", (t) => {
+  for (const [key, value, message] of [
+    ["reopenRounds", 0, /"reopenRounds" must be a positive integer/],
+    ["reopenRounds", 2.5, /"reopenRounds" must be a positive integer/],
+    ["reopenRounds", "2", /"reopenRounds" must be a positive integer/],
+    ["maxReopens", 0, /"maxReopens" must be a positive integer/],
+    ["paperTimeoutMs", -1, /"paperTimeoutMs" must be a positive integer/],
+    ["paperBareNumberLimit", -1, /"paperBareNumberLimit" must be a non-negative integer/],
+    ["paperBareNumberLimit", 1.5, /"paperBareNumberLimit" must be a non-negative integer/],
+    ["paperImage", 7, /"paperImage" must be a string/],
+    ["paperImage", "", /"paperImage" must be a string/],
+  ] as const) {
+    const dir = configDir(t);
+    writeFileSync(path.join(dir, "config.json"), JSON.stringify({ model: "m1", [key]: value, phases: {} }));
+    assert.throws(() => readConfig(dir), message, `${key}=${JSON.stringify(value)} is rejected and named`);
+  }
+});

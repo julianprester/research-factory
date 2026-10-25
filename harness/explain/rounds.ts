@@ -49,6 +49,11 @@ export interface RoundRecord {
    * stop is derived from the history and the cap, as it always was.
    */
   stop?: "two-quiet" | "cap";
+  /**
+   * The reopen loop this round belongs to (`reopen.ts`), when it is a reopen's round. Absent for the
+   * original loop, which is what every record written before reopens existed is.
+   */
+  reopen?: number;
 }
 
 /** Yes or no, and for a yes the rule that fired. */
@@ -160,13 +165,20 @@ export function readRounds(runDir: string, nodeId: string): RoundRecord[] {
 
 function recordOf(value: unknown): RoundRecord | undefined {
   if (typeof value !== "object" || value === null) return undefined;
-  const { round, changed, argumentSha, summary, letters, stop } = value as Partial<RoundRecord>;
+  const { round, changed, argumentSha, summary, letters, stop, reopen } = value as Partial<RoundRecord>;
   if (typeof round !== "number" || !Number.isInteger(round) || round < 1) return undefined;
   if (typeof changed !== "boolean" || typeof argumentSha !== "string" || typeof summary !== "string") return undefined;
   if (!Array.isArray(letters) || !letters.every((letter) => typeof letter === "string")) return undefined;
-  if (stop === undefined) return { round, changed, argumentSha, summary, letters };
-  if (stop !== "two-quiet" && stop !== "cap") return undefined;
-  return { round, changed, argumentSha, summary, letters, stop };
+  const record: RoundRecord = { round, changed, argumentSha, summary, letters };
+  if (stop !== undefined) {
+    if (stop !== "two-quiet" && stop !== "cap") return undefined;
+    record.stop = stop;
+  }
+  if (reopen !== undefined) {
+    if (typeof reopen !== "number" || !Number.isInteger(reopen) || reopen < 1) return undefined;
+    record.reopen = reopen;
+  }
+  return record;
 }
 
 /**

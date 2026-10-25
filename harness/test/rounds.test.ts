@@ -221,3 +221,21 @@ test("parsePlan accepts a reopen task heading, and reads its letter from the R<n
   assert.equal(parsePlan("## Questions\nWhy?\n\n## Tasks\n\n### Task R1: no letter\n"), null, "a reopen number with no letter");
   assert.equal(parsePlan("## Questions\nWhy?\n\n## Tasks\n\n### Task R1a: lowercase\n"), null, "a lowercase letter after digits");
 });
+
+test("rounds.json: an old file without reopen reads unchanged, and a reopen number is kept when positive", (t) => {
+  const run = tempDir(t);
+  const file = path.join(loopDir(run, "E01"), "rounds.json");
+  mkdirSync(path.dirname(file), { recursive: true });
+  const original = history("cccccc");
+  writeFileSync(file, JSON.stringify(original));
+  assert.deepEqual(readRounds(run, "E01"), original, "an old file reads as before");
+  assert.equal(Object.hasOwn(readRounds(run, "E01")[0]!, "reopen"), false, "an old record gains no reopen key");
+
+  const reopened = { ...history("c")[0]!, round: 7, reopen: 1 };
+  writeFileSync(file, JSON.stringify([...original, reopened]));
+  assert.equal(readRounds(run, "E01")[6]?.reopen, 1);
+  for (const bad of [0, 1.5, -1, "1"]) {
+    writeFileSync(file, JSON.stringify([...original, { ...reopened, reopen: bad }]));
+    assert.throws(() => readRounds(run, "E01"), /rounds:.*entry 6/, `reopen ${JSON.stringify(bad)} is refused`);
+  }
+});

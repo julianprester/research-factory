@@ -29,6 +29,16 @@ export interface RunConfig {
   analysisTimeoutMs?: number;
   /** The most review rounds an explanation may take; defaults to 6 (see `readConfig`). */
   roundCap?: number;
+  /** The most rounds one reopen of an explanation may take; defaults to 2 (see `readConfig`). */
+  reopenRounds?: number;
+  /** The most reopens one explanation may have; defaults to 2 (see `readConfig`). */
+  maxReopens?: number;
+  /** The image the paper node's Quarto and Graphviz run in; defaults to `ctc-paper:1` (see `readConfig`). */
+  paperImage?: string;
+  /** The wall-clock limit for one paper build, in ms; defaults to 600000 (see `readConfig`). */
+  paperTimeoutMs?: number;
+  /** Bare numbers a paper may carry before the check fails; defaults to 3, 0 allowed (see `readConfig`). */
+  paperBareNumberLimit?: number;
   phases: Record<string, string>;
 }
 
@@ -38,6 +48,11 @@ const PHASE_KEY = /^(0|[1-9]\d*)$/;
 const ANALYSIS_IMAGE = "ctc-analysis:1";
 const ANALYSIS_TIMEOUT_MS = 1_800_000;
 const ROUND_CAP = 6;
+const REOPEN_ROUNDS = 2;
+const MAX_REOPENS = 2;
+const PAPER_IMAGE = "ctc-paper:1";
+const PAPER_TIMEOUT_MS = 600_000;
+const PAPER_BARE_NUMBER_LIMIT = 3;
 const HERDR_TIMEOUT_MS = 30_000;
 const SESSION_POLL_MS = 200;
 const SESSION_POLL_LIMIT = 100; // 20 s, as run.sh's 100 x 0.2 s
@@ -371,8 +386,9 @@ export function startSupervisor(runDir: string, herdr: Herdr): "started" | "alre
 
 /**
  * The run's config.json: `{model, phases}` with a model and a relative skill
- * path per phase, plus the optional judgeModel, analysisImage, analysisTimeoutMs
- * and roundCap, which are filled in with their defaults here. A missing or
+ * path per phase, plus the optional judgeModel, analysisImage, analysisTimeoutMs,
+ * roundCap, reopenRounds, maxReopens, paperImage, paperTimeoutMs and paperBareNumberLimit,
+ * which are filled in with their defaults here. A missing or
  * invalid file throws a clear error, so a caller can log it and skip a tick
  * rather than start an owner with no skill.
  */
@@ -396,13 +412,30 @@ export function readConfig(runDir: string): RunConfig {
     throw new Error(`${file}: expected a JSON object`);
   }
 
-  const { model, phases, judgeModel, analysisImage, analysisTimeoutMs, roundCap } = parsed as {
+  const {
+    model,
+    phases,
+    judgeModel,
+    analysisImage,
+    analysisTimeoutMs,
+    roundCap,
+    reopenRounds,
+    maxReopens,
+    paperImage,
+    paperTimeoutMs,
+    paperBareNumberLimit,
+  } = parsed as {
     model?: unknown;
     phases?: unknown;
     judgeModel?: unknown;
     analysisImage?: unknown;
     analysisTimeoutMs?: unknown;
     roundCap?: unknown;
+    reopenRounds?: unknown;
+    maxReopens?: unknown;
+    paperImage?: unknown;
+    paperTimeoutMs?: unknown;
+    paperBareNumberLimit?: unknown;
   };
   if (typeof model !== "string" || model === "") throw new Error(`${file}: missing "model" (a string)`);
   // The design puts the judge behind its own key (design §8) so swapping model
@@ -419,6 +452,21 @@ export function readConfig(runDir: string): RunConfig {
   }
   if (roundCap !== undefined && !isPositiveInteger(roundCap)) {
     throw new Error(`${file}: "roundCap" must be a positive integer when present`);
+  }
+  if (reopenRounds !== undefined && !isPositiveInteger(reopenRounds)) {
+    throw new Error(`${file}: "reopenRounds" must be a positive integer when present`);
+  }
+  if (maxReopens !== undefined && !isPositiveInteger(maxReopens)) {
+    throw new Error(`${file}: "maxReopens" must be a positive integer when present`);
+  }
+  if (paperImage !== undefined && (typeof paperImage !== "string" || paperImage === "")) {
+    throw new Error(`${file}: "paperImage" must be a string when present`);
+  }
+  if (paperTimeoutMs !== undefined && !isPositiveInteger(paperTimeoutMs)) {
+    throw new Error(`${file}: "paperTimeoutMs" must be a positive integer when present`);
+  }
+  if (paperBareNumberLimit !== undefined && !isNonNegativeInteger(paperBareNumberLimit)) {
+    throw new Error(`${file}: "paperBareNumberLimit" must be a non-negative integer when present`);
   }
   if (phases === null || typeof phases !== "object" || Array.isArray(phases)) {
     throw new Error(`${file}: missing "phases" (an object of phase number to skill path)`);
@@ -438,10 +486,19 @@ export function readConfig(runDir: string): RunConfig {
     analysisImage: analysisImage ?? ANALYSIS_IMAGE,
     analysisTimeoutMs: analysisTimeoutMs ?? ANALYSIS_TIMEOUT_MS,
     roundCap: roundCap ?? ROUND_CAP,
+    reopenRounds: reopenRounds ?? REOPEN_ROUNDS,
+    maxReopens: maxReopens ?? MAX_REOPENS,
+    paperImage: paperImage ?? PAPER_IMAGE,
+    paperTimeoutMs: paperTimeoutMs ?? PAPER_TIMEOUT_MS,
+    paperBareNumberLimit: paperBareNumberLimit ?? PAPER_BARE_NUMBER_LIMIT,
     phases: skills,
   };
 }
 
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
 }
