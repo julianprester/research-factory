@@ -100,6 +100,28 @@ export function escapeQuoteLine(line: string): string {
   return out;
 }
 
+/** The characters a header carries as they are. Every other character is percent-encoded. */
+const HEADER_PLAIN = /[A-Za-z0-9._/~-]/;
+
+/**
+ * A source path as it sits in a fragment's header comment. Every character outside
+ * `[A-Za-z0-9._/~-]` is percent-encoded (its UTF-8 bytes, uppercase hex), and a `-`
+ * that would follow another `-` in the output is `%2D`, so the header never holds
+ * `--`. Every HTML comment closer (`-->`, `--!>`) needs a `>`, which is encoded, so a
+ * name cannot end the comment, open a shortcode, or carry markup into the paper. The
+ * output is plain ASCII. Ordinary names (letters, digits, `.`, `_`, `/`, `~`, `-`) are
+ * unchanged, so the brief's header is exact for them.
+ */
+export function headerSource(source: string): string {
+  let out = "";
+  for (const c of source) {
+    if (c === "-" && out.endsWith("-")) out += "%2D";
+    else if (HEADER_PLAIN.test(c)) out += c;
+    else for (const byte of Buffer.from(c, "utf8")) out += `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
 function idOf(n: number): string {
   return `Q${String(n).padStart(2, "0")}`;
 }
@@ -155,7 +177,7 @@ function sliceOf(lines: string[], start: number, end: number): string[] {
  * of the quotation. LF endings.
  */
 function fragmentOf(quote: Quote, slice: string[]): string {
-  const header = `<!-- quote ${quote.id} source=${quote.source} lines=${quote.start}-${quote.end} sha256=${quote.fileSha256} -->`;
+  const header = `<!-- quote ${quote.id} source=${headerSource(quote.source)} lines=${quote.start}-${quote.end} sha256=${quote.fileSha256} -->`;
   const block = slice.map((line) => (line === "" ? ">" : `> ${escapeQuoteLine(line)}`));
   const source = `— ${escapeQuoteLine(quote.source)}, lines ${quote.start}–${quote.end}`;
   return [header, ...block, "", source, ""].join("\n");
@@ -239,11 +261,18 @@ function readSource(ctx: Exploration, rel: string): Source {
   return { lines: linesOf(bytes), sha256: createHash("sha256").update(bytes).digest("hex") };
 }
 
-/** The quotes folder of a paper, refused when a link or a file stands where it belongs. */
-function quotesFolderOf(nodeDir: string): string {
+/** Why the quotes folder cannot be used (a link on the way, or a file where the folder belongs); undefined when it is a folder or absent. */
+function quotesFolderProblem(nodeDir: string): string | undefined {
   const found = locate(nodeDir, QUOTES_DIR);
-  if (found.kind === "refused") throw new Error(found.problem);
-  if (found.kind === "file") throw new Error(`${QUOTES_DIR} is a file, not a folder`);
+  if (found.kind === "refused") return found.problem;
+  if (found.kind === "file") return `${QUOTES_DIR} is a file, not a folder`;
+  return undefined;
+}
+
+/** The quotes folder of a paper, refused when `quotesFolderProblem` says so. */
+function quotesFolderOf(nodeDir: string): string {
+  const problem = quotesFolderProblem(nodeDir);
+  if (problem !== undefined) throw new Error(problem);
   return path.join(nodeDir, ...QUOTES_DIR.split("/"));
 }
 
@@ -312,8 +341,17 @@ export function quoteSource(
   return { id: quote.id, embed: embedOf(quote.id) };
 }
 
+/** The exploration copy of a run, or the error that refused it: read once per check, reported against every entry. */
+function explorationOrError(runDir: string): Exploration | Error {
+  try {
+    return explorationOf(runDir);
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+}
+
 /** The problems with one entry: its fragment, and its text and fragment against the exploration copy. */
-function entryProblems(runDir: string, nodeDir: string, quote: Quote): string[] {
+function entryProblems(nodeDir: string, quote: Quote, copy: Exploration | Error): string[] {
   const { id } = quote;
   const problems: string[] = [];
   let fragment: string | undefined;
@@ -328,7 +366,8 @@ function entryProblems(runDir: string, nodeDir: string, quote: Quote): string[] 
   let source: Source;
   let slice: string[];
   try {
-    source = readSource(explorationOf(runDir), sourceOf(quote.source));
+    if (copy instanceof Error) throw copy;
+    source = readSource(copy, sourceOf(quote.source));
     slice = sliceOf(source.lines, quote.start, quote.end);
   } catch (error) {
     problems.push(`${id}: ${message(error)}`);
@@ -361,13 +400,13 @@ export function verifyQuotes(runDir: string, nodeDir: string): string[] {
     return [`quotes.json cannot be read: ${message(error)}`];
   }
 
+  const folderProblem = quotesFolderProblem(nodeDir);
+  if (folderProblem !== undefined) return [folderProblem];
   const problems: string[] = [];
-  const found = locate(nodeDir, QUOTES_DIR);
-  if (found.kind === "refused") return [`${QUOTES_DIR}: ${found.problem}`];
-  if (found.kind === "file") return [`${QUOTES_DIR} is a file, not a folder`];
   const ids = new Set(quotes.map((q) => q.id));
-  if (found.kind === "folder") {
-    const folder = path.join(nodeDir, ...QUOTES_DIR.split("/"));
+  const folder = path.join(nodeDir, ...QUOTES_DIR.split("/"));
+  // A folder that is absent has nothing to list; quotesFolderProblem has already ruled out a link or a file.
+  if (fs.existsSync(folder)) {
     for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
       if (entry.name === QUOTES_INDEX) continue;
       const match = FRAGMENT.exec(entry.name);
@@ -380,13 +419,15 @@ export function verifyQuotes(runDir: string, nodeDir: string): string[] {
   }
 
   const seen = new Set<string>();
+  let copy: Exploration | Error | undefined;
   for (const quote of quotes) {
     if (seen.has(quote.id)) {
       problems.push(`${quote.id}: listed twice in quotes.json`);
       continue;
     }
     seen.add(quote.id);
-    problems.push(...entryProblems(runDir, nodeDir, quote));
+    copy ??= explorationOrError(runDir);
+    problems.push(...entryProblems(nodeDir, quote, copy));
   }
   return problems;
 }

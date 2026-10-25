@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -20,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 
 import { prepareExploration } from "../analysis/run.ts";
-import { escapeQuoteLine, quoteSource, verifyQuotes } from "../paper/quotes.ts";
+import { escapeQuoteLine, headerSource, quoteSource, verifyQuotes } from "../paper/quotes.ts";
 import { createChild, findNode, initRun, updateNode } from "../tree.ts";
 
 const RULES = ["# Rules", "", "Be patient.   ", "  Wait your turn.", "", "Never interrupt.", "   ", "Last line"].join("\n") + "\n";
@@ -378,10 +379,10 @@ function quartoPrintEach(t: TestContext, fragments: string[]): string[][] {
  * A fresh run whose exploration copy holds `file` (one line per entry of `lines`) and whose paper
  * is W01. Each line is quoted on its own through quoteSource; returns the fragments in order.
  */
-function quoteEveryLine(t: TestContext, file: string, lines: string[]): Array<{ fragment: string; lines: string[] }> {
+function corpusPaper(t: TestContext, files: Map<string, string>): { run: string; paper: string } {
   const dataset = mkdtempSync(path.join(tmpdir(), "ctc-quote-corpus-"));
   t.after(() => rmSync(dataset, { recursive: true, force: true }));
-  put(path.join(dataset, file), `${lines.join("\n")}\n`);
+  for (const [file, text] of files) put(path.join(dataset, file), text);
   const run = mkdtempSync(path.join(tmpdir(), "ctc-quote-corpus-run-"));
   t.after(() => rmSync(run, { recursive: true, force: true }));
   initRun(run, dataset, "interest");
@@ -392,11 +393,14 @@ function quoteEveryLine(t: TestContext, file: string, lines: string[]): Array<{ 
   updateNode(run, "E01", { phase: 4, status: "ready" }, "owner-p3");
   createChild(run, "E01", "Paper of crowd", "owner-p4", [], "paper");
   const split = path.join(run, "prep", "Z01-profile", "workspace", "split");
-  put(path.join(split, "exploration.txt"), `${file}\n`);
+  put(path.join(split, "exploration.txt"), `${[...files.keys()].join("\n")}\n`);
   put(path.join(split, "holdout.txt"), "");
   prepareExploration(run);
-  const paper = findNode(run, "W01").dir;
+  return { run, paper: findNode(run, "W01").dir };
+}
 
+function quoteEveryLine(t: TestContext, file: string, lines: string[]): Array<{ fragment: string; lines: string[] }> {
+  const { run, paper } = corpusPaper(t, new Map([[file, `${lines.join("\n")}\n`]]));
   return lines.map((line, index) => {
     const start = index + 1;
     quoteSource(run, paper, { path: file, start, end: start });
@@ -559,4 +563,95 @@ test("quote_source refuses a line with a control character and writes nothing", 
   writeFileSync(path.join(exploration, "handbook", "ctrl.md"), "fine\nbad\u000cline\n");
   assert.throws(() => quoteSource(run, paper, { path: "handbook/ctrl.md", start: 2, end: 2 }), /control character/);
   assert.equal(existsSync(quotesDir), false, "nothing was written");
+});
+
+/** Names whose raw form would break an HTML comment, open a shortcode or carry markup into the header. */
+const HOSTILE_NAMES = [
+  "handbook/bad--!>name.md",
+  "handbook/a -- > b.md",
+  "handbook/x--{{< meta title >}} *y*.md",
+  "handbook/tick`s.md",
+  "handbook/sp ace.md",
+  "handbook/café.md",
+  "handbook/a--b.md",
+  "handbook/{{<meta>}}.md",
+];
+const HOSTILE_LINE = "bang *y* {{< meta title >}}";
+
+test("headerSource leaves ordinary names as they are and percent-encodes everything else", () => {
+  assert.equal(headerSource("handbook/rules.md"), "handbook/rules.md");
+  assert.equal(headerSource("handbook/a-b_c~d.md"), "handbook/a-b_c~d.md");
+  assert.equal(headerSource("handbook/a--b.md"), "handbook/a-%2Db.md", "a dash that follows a dash is %2D");
+  assert.equal(headerSource("handbook/---x"), "handbook/-%2D-x", "the third dash follows an encoded one, so it stays");
+  assert.equal(headerSource("handbook/bad--!>name.md"), "handbook/bad-%2D%21%3Ename.md");
+  assert.equal(headerSource("handbook/a -- > b.md"), "handbook/a%20-%2D%20%3E%20b.md");
+  assert.equal(headerSource("handbook/{{< meta title >}} *y*.md"), "handbook/%7B%7B%3C%20meta%20title%20%3E%7D%7D%20%2Ay%2A.md");
+  assert.equal(headerSource("handbook/tick`s.md"), "handbook/tick%60s.md");
+  assert.equal(headerSource("handbook/café.md"), "handbook/caf%C3%A9.md", "UTF-8 bytes, uppercase hex");
+  assert.equal(headerSource("handbook/a%b.md"), "handbook/a%25b.md");
+});
+
+test("headerSource output holds no double hyphen and no character that could close or open markup", () => {
+  for (const name of [...HOSTILE_NAMES, "a--->b", "--!>", "-- >", "{{{<x>}}}", "<!-- x -->"]) {
+    assert.doesNotMatch(headerSource(name), /--|[<>!{}` ]/, JSON.stringify(name));
+  }
+});
+
+test("quote_source refuses a name containing -->, which cannot be made safe in a header", (t) => {
+  const { run, paper } = corpusPaper(t, new Map([["handbook/a-->b.md", "text\n"]]));
+  assert.throws(() => quoteSource(run, paper, { path: "handbook/a-->b.md", start: 1, end: 1 }), /-->/);
+  assert.equal(existsSync(path.join(paper, "workspace", "embeds", "quotes")), false, "nothing was written");
+});
+
+test("hostile names quote into fragments whose pandoc and Quarto text is only the quotation and its source line", { skip: BOTH_SKIP }, (t) => {
+  const { run, paper } = corpusPaper(t, new Map(HOSTILE_NAMES.map((name) => [name, `${HOSTILE_LINE}\n`])));
+  const quoted = HOSTILE_NAMES.map((name, index) => {
+    quoteSource(run, paper, { path: name, start: 1, end: 1 });
+    return { name, fragment: fragment(paper, `Q${String(index + 1).padStart(2, "0")}`) };
+  });
+  const quartoOut = quartoPrintEach(t, quoted.map((q) => q.fragment));
+  quoted.forEach((q, index) => {
+    const expected = expectedPrint([HOSTILE_LINE], q.name, 1, 1);
+    const printed = pandocPrint(t, q.fragment);
+    assert.doesNotMatch(printed.join("\n"), /quote Q|<!--/, `pandoc shows no header text for ${q.name}`);
+    assert.deepEqual(printed, expected, `pandoc renders ${q.name}`);
+    assert.deepEqual(quartoOut[index], expected, `quarto renders ${q.name}`);
+  });
+  assert.deepEqual(verifyQuotes(run, paper), [], "every hostile fragment verifies clean");
+});
+
+test("a fragment whose header was edited is a problem, even when the quoted text is unchanged", (t) => {
+  const { run, paper } = corpusPaper(t, new Map([["handbook/a--b.md", `${HOSTILE_LINE}\n`]]));
+  quoteSource(run, paper, { path: "handbook/a--b.md", start: 1, end: 1 });
+  assert.deepEqual(verifyQuotes(run, paper), []);
+  const file = path.join(paper, "workspace", "embeds", "quotes", "Q01.qmd");
+  const header = readFileSync(file, "utf8").split("\n")[0] as string;
+  assert.ok(header.includes("source=handbook/a-%2Db.md"), "the header carries the encoded name");
+  writeFileSync(file, readFileSync(file, "utf8").replace(header, header.replace("a-%2Db.md", "a--b.md")));
+  const problems = verifyQuotes(run, paper);
+  assert.equal(problems.length, 1, problems.join("\n"));
+  assert.match(problems[0] ?? "", /^Q01: /);
+});
+
+test("verifyQuotes names every entry when the hold-out list cannot be read", (t) => {
+  const { run, paper, quotesDir } = fixture(t);
+  quoteSource(run, paper, { path: "handbook/rules.md", start: 1, end: 4 });
+  quoteSource(run, paper, { path: "handbook/crlf.md", start: 1, end: 2 });
+  unlinkSync(path.join(run, "prep", "Z01-profile", "workspace", "split", "holdout.txt"));
+  const problems = verifyQuotes(run, paper);
+  assert.equal(problems.length, 2, problems.join("\n"));
+  assert.match(problems[0] ?? "", /^Q01: .*holdout\.txt is missing/);
+  assert.match(problems[1] ?? "", /^Q02: .*holdout\.txt is missing/);
+  assert.equal(existsSync(quotesDir), true);
+});
+
+test("verifyQuotes reports a quotes folder that is a link once, not once per entry", (t) => {
+  const { run, paper, quotesDir } = fixture(t);
+  quoteSource(run, paper, { path: "handbook/rules.md", start: 1, end: 4 });
+  const moved = `${quotesDir}-moved`;
+  renameSync(quotesDir, moved);
+  symlinkSync(moved, quotesDir);
+  const problems = verifyQuotes(run, paper);
+  assert.equal(problems.length, 1, problems.join("\n"));
+  assert.match(problems[0] ?? "", /is a link/);
 });
