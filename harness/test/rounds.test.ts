@@ -239,3 +239,98 @@ test("rounds.json: an old file without reopen reads unchanged, and a reopen numb
     assert.throws(() => readRounds(run, "E01"), /rounds:.*entry 6/, `reopen ${JSON.stringify(bad)} is refused`);
   }
 });
+
+/** Six changed loop-0 rounds, the sixth storing its `cap` stop, written through appendRound. */
+function stoppedOriginal(run: string): void {
+  history("cccccc").forEach((record, index) => {
+    appendRound(run, "E01", index === 5 ? { ...record, stop: "cap" } : record, 6);
+  });
+}
+
+/** A reopen-n record for round `round`, changed or quiet. */
+function reopenRecord(round: number, reopen: number, changed: boolean): RoundRecord {
+  return { round, changed, argumentSha: `sha${round}`, summary: `round ${round}`, letters: ["A"], reopen };
+}
+
+test("appendRound: a reopen round follows a loop-0 cap stop, and its own loop stops at reopenRounds", (t) => {
+  const run = tempDir(t);
+  stoppedOriginal(run);
+  appendRound(run, "E01", reopenRecord(7, 1, true), 6, 2);
+  appendRound(run, "E01", reopenRecord(8, 1, true), 6, 2);
+  const records = readRounds(run, "E01");
+  assert.equal(records[6]?.reopen, 1, "round 7 is in reopen 1");
+  assert.equal(records[7]?.stop, "cap", "round 8 stops reopen 1 at reopenRounds 2, and the stop is stored");
+  assert.equal(Object.hasOwn(records[6]!, "stop"), false, "round 7 does not stop its loop");
+  assert.throws(() => appendRound(run, "E01", reopenRecord(9, 1, true), 6, 2), /STOP recorded \(cap\) in reopen 1: no more rounds/);
+  assert.equal(readRounds(run, "E01").length, 8);
+});
+
+test("appendRound: two quiet reopen rounds stop reopen 1 early, and a further round is refused", (t) => {
+  const run = tempDir(t);
+  stoppedOriginal(run);
+  appendRound(run, "E01", reopenRecord(7, 1, false), 6, 2);
+  appendRound(run, "E01", reopenRecord(8, 1, false), 6, 2);
+  assert.equal(readRounds(run, "E01")[7]?.stop, "two-quiet");
+  assert.throws(() => appendRound(run, "E01", reopenRecord(9, 1, true), 6, 2), /STOP recorded \(two-quiet\) in reopen 1/);
+});
+
+test("appendRound: a stop stored in a reopen round stands when reopenRounds is raised later", (t) => {
+  const run = tempDir(t);
+  stoppedOriginal(run);
+  appendRound(run, "E01", reopenRecord(7, 1, true), 6, 2);
+  appendRound(run, "E01", reopenRecord(8, 1, true), 6, 2);
+  assert.throws(() => appendRound(run, "E01", reopenRecord(9, 1, true), 6, 9), /STOP recorded \(cap\) in reopen 1/);
+});
+
+test("appendRound: a reopen 2 round after reopen 1 stopped is accepted, and reopen 1 takes no more", (t) => {
+  const run = tempDir(t);
+  stoppedOriginal(run);
+  appendRound(run, "E01", reopenRecord(7, 1, false), 6, 2);
+  appendRound(run, "E01", reopenRecord(8, 1, false), 6, 2);
+  appendRound(run, "E01", reopenRecord(9, 2, true), 6, 2);
+  assert.equal(readRounds(run, "E01")[8]?.reopen, 2);
+  assert.throws(() => appendRound(run, "E01", reopenRecord(10, 1, true), 6, 2), /reopen 1/, "reopen 1 is not the current loop");
+  assert.equal(readRounds(run, "E01").length, 9);
+});
+
+test("appendRound: a loop-0 round after loop 0 stopped is refused, even with reopens recorded", (t) => {
+  const run = tempDir(t);
+  stoppedOriginal(run);
+  const loopZero = (round: number): RoundRecord => ({ ...reopenRecord(round, 1, true), reopen: undefined });
+  assert.throws(() => appendRound(run, "E01", loopZero(7), 6, 2), /STOP recorded \(cap\): no more rounds/, "before any reopen");
+  appendRound(run, "E01", reopenRecord(7, 1, true), 6, 2);
+  assert.throws(() => appendRound(run, "E01", loopZero(8), 6, 2), /STOP recorded \(cap\): no more rounds/, "after a reopen round");
+  assert.equal(readRounds(run, "E01").length, 7);
+});
+
+test("appendRound: a reopen round is refused while loop 0 has not stopped", (t) => {
+  const run = tempDir(t);
+  for (const record of history("ccccc")) appendRound(run, "E01", record, 6);
+  assert.throws(() => appendRound(run, "E01", reopenRecord(6, 1, true), 6, 2), /loop 0 has not stopped/);
+  assert.equal(readRounds(run, "E01").length, 5);
+});
+
+test("appendRound: round numbers stay contiguous across loops", (t) => {
+  const run = tempDir(t);
+  stoppedOriginal(run);
+  assert.throws(() => appendRound(run, "E01", reopenRecord(8, 1, true), 6, 2), /next round is 7/, "a reopen round that skips a number");
+  assert.throws(() => appendRound(run, "E01", reopenRecord(6, 1, true), 6, 2), /next round is 7/, "a reopen round that repeats a number");
+  assert.equal(readRounds(run, "E01").length, 6);
+});
+
+test("appendRound: a stop given in a reopen round must be the one its loop decides", (t) => {
+  const run = tempDir(t);
+  stoppedOriginal(run);
+  assert.throws(
+    () => appendRound(run, "E01", { ...reopenRecord(7, 1, true), stop: "two-quiet" }, 6, 2),
+    /stop "two-quiet" is not what reopen 1 decides/,
+    "a stop on a loop that continues is refused",
+  );
+  appendRound(run, "E01", reopenRecord(7, 1, false), 6, 2);
+  assert.throws(
+    () => appendRound(run, "E01", { ...reopenRecord(8, 1, true), stop: "two-quiet" }, 6, 2),
+    /stop "two-quiet" is not what reopen 1 decides/,
+    "a wrong reason on the stopping round is refused",
+  );
+  assert.equal(readRounds(run, "E01").length, 7);
+});

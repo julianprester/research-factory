@@ -182,17 +182,59 @@ function recordOf(value: unknown): RoundRecord | undefined {
 }
 
 /**
- * Record a closed round: it must be the next one (rounds are contiguous from 1)
- * and, once the history has stopped, no round may follow. Written atomically.
+ * Record a closed round. It must be the next one (rounds are contiguous from 1 across every loop).
+ *
+ * The stop applies per loop. A loop-0 round (no `reopen`) is refused once loop 0 has stopped, as it
+ * always was. A reopen-`n` round is refused once reopen `n` has stopped; it may follow a stopped loop 0
+ * or a stopped reopen `n - 1`, and it may not start while loop 0 or reopen `n - 1` is still running. When
+ * a reopen round is the one that stops its loop, the reason is stored in its record, so a later change of
+ * `reopenRounds` cannot un-latch it; a `stop` the record brings must be the reason the loop decides.
+ *
+ * This does not read `reopens.json` (the reopen layer imports this module, so the import would cycle): the
+ * caller checks `currentLoop` first. `reopenRounds` is the config's default (`reopen.ts`'s `REOPEN_ROUNDS`).
+ * Written atomically.
  */
-export function appendRound(runDir: string, nodeId: string, record: RoundRecord, cap: number = ROUND_CAP): void {
+export function appendRound(
+  runDir: string,
+  nodeId: string,
+  record: RoundRecord,
+  cap: number = ROUND_CAP,
+  reopenRounds: number = 2,
+): void {
   const history = readRounds(runDir, nodeId);
   if (record.round !== history.length + 1) {
     throw new Error(`rounds: cannot record round ${record.round}: the next round is ${history.length + 1}`);
   }
-  const stopped = stopOf(history, cap);
-  if (stopped.stop) throw new Error(`STOP recorded (${stopped.reason}): no more rounds`);
-  writeAtomic(path.join(loopDir(runDir, nodeId), "rounds.json"), `${JSON.stringify([...history, record], null, 2)}\n`);
+  const loop = record.reopen ?? 0;
+  if (loop === 0) {
+    const stopped = stopOf(segment(history, 0), cap);
+    if (stopped.stop) throw new Error(`STOP recorded (${stopped.reason}): no more rounds`);
+    writeAtomic(path.join(loopDir(runDir, nodeId), "rounds.json"), `${JSON.stringify([...history, record], null, 2)}\n`);
+    return;
+  }
+
+  const current = history[history.length - 1]?.reopen ?? 0;
+  if (loop === current) {
+    const stopped = stopOf(segment(history, loop), reopenRounds);
+    if (stopped.stop) throw new Error(`STOP recorded (${stopped.reason}) in reopen ${loop}: no more rounds`);
+  } else if (loop === current + 1) {
+    const before = current === 0 ? stopOf(segment(history, 0), cap) : stopOf(segment(history, current), reopenRounds);
+    if (!before.stop) throw new Error(`rounds: cannot record reopen ${loop}: loop ${current} has not stopped`);
+  } else {
+    throw new Error(`rounds: cannot record round ${record.round} in reopen ${loop}: the current loop is ${current}`);
+  }
+
+  const decided = decideStop([...segment(history, loop), record], reopenRounds);
+  if (record.stop !== undefined && (!decided.stop || decided.reason !== record.stop)) {
+    throw new Error(`rounds: stop ${JSON.stringify(record.stop)} is not what reopen ${loop} decides`);
+  }
+  const stored: RoundRecord = decided.stop ? { ...record, stop: decided.reason } : record;
+  writeAtomic(path.join(loopDir(runDir, nodeId), "rounds.json"), `${JSON.stringify([...history, stored], null, 2)}\n`);
+}
+
+/** The records of one loop: `n` 0 is the original loop (those with no `reopen`), `n` ≥ 1 is reopen `n`. */
+function segment(history: RoundRecord[], n: number): RoundRecord[] {
+  return history.filter((record) => (record.reopen ?? 0) === n);
 }
 
 /** The sha-256 of the node's `workspace/argument.md`, a regular file read without following a link. */
