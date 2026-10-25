@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
@@ -15,10 +16,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 
 import { prepareExploration } from "../analysis/run.ts";
-import { quoteSource, verifyQuotes } from "../paper/quotes.ts";
+import { escapeQuoteLine, quoteSource, verifyQuotes } from "../paper/quotes.ts";
 import { createChild, findNode, initRun, updateNode } from "../tree.ts";
 
 const RULES = ["# Rules", "", "Be patient.   ", "  Wait your turn.", "", "Never interrupt.", "   ", "Last line"].join("\n") + "\n";
@@ -90,25 +92,27 @@ function index(paper: string): { quotes: Array<Record<string, unknown>> } {
   return JSON.parse(readFileSync(path.join(paper, "workspace", "embeds", "quotes", "quotes.json"), "utf8"));
 }
 
-test("a verbatim slice yields a block quotation whose text is the file's lines, with its source line", (t) => {
+test("a verbatim slice yields an escaped block quotation with a blank line and its source line", (t) => {
   const { run, paper, exploration } = fixture(t);
   const result = quoteSource(run, paper, { path: "handbook/rules.md", start: 1, end: 4 });
   assert.deepEqual(result, { id: "Q01", embed: "{{< include embeds/quotes/Q01.qmd >}}" });
 
   const text = fragment(paper, "Q01");
   const sha = sha256(readFileSync(path.join(exploration, "handbook", "rules.md")));
-  const lines = text.split("\n");
-  assert.equal(lines[0], `<!-- quote Q01 source=handbook/rules.md lines=1-4 sha256=${sha} -->`);
-  assert.deepEqual(lines.slice(1, 5), ["> # Rules", ">", "> Be patient.", ">   Wait your turn."], "an empty line becomes >, trailing whitespace is trimmed");
-  assert.equal(lines[5], "— handbook/rules.md, lines 1–4", "the source line, with an em dash and an en dash");
-  assert.equal(lines.length, 7, "nothing after the source line but the final newline");
-  assert.equal(text.endsWith("\n"), true);
-  assert.equal(text.includes("\r"), false, "LF endings");
-  assert.deepEqual(
-    lines.slice(1, 5).map((line) => line.replace(/^> ?/, "")),
-    ["# Rules", "", "Be patient.", "  Wait your turn."],
-    "the block text is the file's lines",
+  assert.equal(
+    text,
+    [
+      `<!-- quote Q01 source=handbook/rules.md lines=1-4 sha256=${sha} -->`,
+      "> \\# Rules",
+      ">",
+      "> Be patient\\.",
+      "> &#32;&#32;Wait your turn\\.",
+      "",
+      "— handbook\\/rules\\.md, lines 1–4",
+      "",
+    ].join("\n"),
   );
+  assert.equal(text.includes("\r"), false, "LF endings");
 });
 
 test("CRLF endings and trailing whitespace are folded in the stored text and the fragment", (t) => {
@@ -294,4 +298,265 @@ test("verifyQuotes flags an entry whose text was edited in quotes.json", (t) => 
   const problems = verifyQuotes(run, paper);
   assert.equal(problems.length, 1, problems.join("\n"));
   assert.match(problems[0] ?? "", /^Q01: .*text/);
+});
+
+/** The reason a host tool cannot run here, or undefined when it can (a skip reason for the tests that need it). */
+function missingTool(command: string): string | undefined {
+  const probe = spawnSync(command, ["--version"], { encoding: "utf8" });
+  return probe.status === 0 ? undefined : `${command} is not runnable on this host`;
+}
+
+const PANDOC_SKIP = missingTool("pandoc");
+const QUARTO_SKIP = missingTool("quarto");
+const BOTH_SKIP = [PANDOC_SKIP, QUARTO_SKIP].filter((reason) => reason !== undefined).join("; ") || undefined;
+
+/** The text a quotation of `lines` renders to: paragraphs split at empty lines, a line break inside a paragraph as a space. */
+function renderedParagraphs(lines: string[]): string[] {
+  const paragraphs: string[][] = [[]];
+  for (const line of lines) {
+    if (line === "") paragraphs.push([]);
+    else paragraphs[paragraphs.length - 1]?.push(line);
+  }
+  return paragraphs.filter((paragraph) => paragraph.length > 0).map((paragraph) => paragraph.join(" "));
+}
+
+/** The non-empty lines a fragment of `lines` from `source` must print as: each paragraph under pandoc's two-space quotation indent, then the source line. */
+function expectedPrint(lines: string[], source: string, start: number, end: number): string[] {
+  return [...renderedParagraphs(lines).map((paragraph) => `  ${paragraph}`), `— ${source}, lines ${start}–${end}`];
+}
+
+/**
+ * A bibliography with one unrelated entry. The paper has one, so an unescaped `@word` is a
+ * citation that does not resolve (it prints `(word?)` and logs a warning) rather than text.
+ */
+const BIBLIOGRAPHY = "@article{other,\n  title = {Unrelated},\n  author = {Doe, Ann},\n  year = {2020}\n}\n";
+
+/** Pandoc's plain text of one markdown document, with citations processed against the bibliography. */
+function pandocPrint(t: TestContext, markdown: string): string[] {
+  const dir = mkdtempSync(path.join(tmpdir(), "ctc-pandoc-quotes-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bib = path.join(dir, "refs.bib");
+  writeFileSync(bib, BIBLIOGRAPHY);
+  const result = spawnSync(
+    "pandoc",
+    ["-f", "markdown", "-t", "plain", "--wrap=none", "--citeproc", "--bibliography", bib],
+    { input: markdown, encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, /WARNING/, "pandoc logs no warning");
+  return result.stdout.split("\n").filter((line) => line !== "");
+}
+
+/**
+ * Quarto's plain text of many fragments, one render: each fragment is included in a minimal
+ * paper between marker paragraphs, and the text is cut at the markers. Returns the non-empty
+ * lines of each fragment's part, in order.
+ */
+function quartoPrintEach(t: TestContext, fragments: string[]): string[][] {
+  const dir = mkdtempSync(path.join(tmpdir(), "ctc-quarto-quotes-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // Quarto's plain writer wraps at 72 columns unless told not to; the line breaks are not part of the text.
+  const parts = ["---", "title: round trip", "bibliography: refs.bib", "format:", "  plain:", "    wrap: none", "---", ""];
+  put(path.join(dir, "refs.bib"), BIBLIOGRAPHY);
+  fragments.forEach((fragment, index) => {
+    const name = `Q${String(index + 1).padStart(3, "0")}.qmd`;
+    put(path.join(dir, "embeds", "quotes", name), fragment);
+    parts.push(`ZMARK${String(index).padStart(3, "0")}ZMARK`, "", `{{< include embeds/quotes/${name} >}}`, "");
+  });
+  parts.push("ZMARKEND", "");
+  writeFileSync(path.join(dir, "paper.qmd"), parts.join("\n"));
+
+  const result = spawnSync("quarto", ["render", "paper.qmd", "--to", "plain"], { cwd: dir, encoding: "utf8" });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, /WARNING/, "quarto logs no warning");
+  const segments = readFileSync(path.join(dir, "paper.txt"), "utf8").split(/ZMARK\d{3}ZMARK|ZMARKEND/);
+  assert.equal(segments.length, fragments.length + 2, "one part per marker, plus the title and the end");
+  return segments.slice(1, fragments.length + 1).map((segment) => segment.split("\n").filter((line) => line !== ""));
+}
+
+/**
+ * A fresh run whose exploration copy holds `file` (one line per entry of `lines`) and whose paper
+ * is W01. Each line is quoted on its own through quoteSource; returns the fragments in order.
+ */
+function quoteEveryLine(t: TestContext, file: string, lines: string[]): Array<{ fragment: string; lines: string[] }> {
+  const dataset = mkdtempSync(path.join(tmpdir(), "ctc-quote-corpus-"));
+  t.after(() => rmSync(dataset, { recursive: true, force: true }));
+  put(path.join(dataset, file), `${lines.join("\n")}\n`);
+  const run = mkdtempSync(path.join(tmpdir(), "ctc-quote-corpus-run-"));
+  t.after(() => rmSync(run, { recursive: true, force: true }));
+  initRun(run, dataset, "interest");
+  createChild(run, "D01", "Self Presentation", "owner-p1");
+  createChild(run, "T01", "status quo: crowd", "owner-p2");
+  createChild(run, "P01", "Explanation of crowd", "owner-p3", [], "explanation");
+  updateNode(run, "E01", { phase: 3, status: "active" }, "owner-p3");
+  updateNode(run, "E01", { phase: 4, status: "ready" }, "owner-p3");
+  createChild(run, "E01", "Paper of crowd", "owner-p4", [], "paper");
+  const split = path.join(run, "prep", "Z01-profile", "workspace", "split");
+  put(path.join(split, "exploration.txt"), `${file}\n`);
+  put(path.join(split, "holdout.txt"), "");
+  prepareExploration(run);
+  const paper = findNode(run, "W01").dir;
+
+  return lines.map((line, index) => {
+    const start = index + 1;
+    quoteSource(run, paper, { path: file, start, end: start });
+    const id = `Q${String(index + 1).padStart(2, "0")}`;
+    return { fragment: fragment(paper, id), lines: [line] };
+  });
+}
+
+/** Each line is quoted on its own; its fragment must print exactly as the line, through pandoc and through Quarto. */
+function assertRoundTrip(t: TestContext, file: string, lines: string[]): void {
+  const quoted = quoteEveryLine(t, file, lines);
+  const quartoOut = quartoPrintEach(t, quoted.map((q) => q.fragment));
+  quoted.forEach((q, index) => {
+    const expected = expectedPrint(q.lines, file, index + 1, index + 1);
+    assert.deepEqual(pandocPrint(t, q.fragment), expected, `pandoc renders ${JSON.stringify(q.lines[0])}`);
+    assert.deepEqual(quartoOut[index], expected, `quarto renders ${JSON.stringify(q.lines[0])}`);
+  });
+}
+
+/** The nasty lines of the brief, each of which markdown or Quarto would read as markup. */
+const NASTY = [
+  "{{< section-inline-toc >}}",
+  "{{% note %}}",
+  "@jane and @team",
+  "$5 and $10 costs",
+  "*bold* _it_ `code`",
+  "[link](http://x)",
+  "- not a bullet",
+  "1. not a list",
+  "# not a heading",
+  "> not a quote",
+  "<div>",
+  "&amp;",
+  "a \\ backslash",
+  "|a|b|",
+  "~~x~~",
+  "x^2^",
+  "---",
+  "a  b   c",
+  "  leading spaces",
+  "\ttab inside",
+  "\"double\" and 'single' quotes",
+  "a -- b --- c",
+  "{{< a *b* -- \"c\" >}} and {{<pagebreak>}}",
+  "trailing backslash \\",
+];
+
+/** Ten lines of the same shapes as the handbook's (shortcodes, Hugo panels, handles and code), for when the run's data is absent. */
+const FIXTURE_LINES = [
+  "{{< handbook-counts site=\"about\" >}}",
+  "{{% alert title=\"Note\" color=\"info\" %}}",
+  "Email `ar@gitlab.com` with the receipt.",
+  "- Add your handle without the leading `@`.",
+  "{{< youtube Kfdf2VAk9sM >}}",
+  "If in doubt, contact [Corporate Development](mailto:acquisitions@gitlab.com).",
+  "{{% panel header=\"**NOTES**\" header-bg=\"info\" %}}",
+  "> @here, the plan has been invoked for @team.",
+  "| Keep pipeline green | [`@gitlab-com/content-sites`](https://gitlab.com) |",
+  "Fees are $5 and $10, paid by {{ user }}.",
+];
+
+/** Ten real lines from the run's exploration copy that hold a `{{` or an `@`, in folder order, when the run is present. */
+function realLines(): string[] | undefined {
+  const root = fileURLToPath(new URL("../../runs/gl1/analysis-data/exploration", import.meta.url));
+  if (!existsSync(root)) return undefined;
+  const found: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      if (found.length >= 10) return;
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(file);
+      else if (entry.isFile()) {
+        for (const line of readFileSync(file, "utf8").split("\n")) {
+          if (found.length >= 10) return;
+          if (line.trim() === "" || line.length > 400 || !/\{\{|@/.test(line) || found.includes(line)) continue;
+          if (/[\u0000-\u0008\u000b-\u001f\u007f]/.test(line)) continue;
+          found.push(line.replace(/\r$/, "").trimEnd());
+        }
+      }
+    }
+  };
+  walk(root);
+  return found.length === 10 ? found : undefined;
+}
+
+/** Seeded pseudo-random lines of markup and text, so the same lines run every time. */
+function randomLines(count: number): string[] {
+  const tokens = ["{{<", ">}}", "{{%", "%}}", "{{{", "}}}", "@", "$", "*", "_", "`", "\\", "&amp;", "&#32;", "<div>", "# ", "- ", "1. ", "> ", "|", "~~", "^", "[", "](", "---", "--", "\"", "'", "–", "—", "é", "word", "a", " ", "  ", "\t", "{", "}", "%", "+", "=", ":", "!"];
+  let seed = 20261026;
+  const next = (n: number): number => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed % n;
+  };
+  const lines: string[] = [];
+  while (lines.length < count) {
+    let line = "";
+    for (let i = 1 + next(12); i > 0; i -= 1) line += tokens[next(tokens.length)];
+    if (line.trim() !== "") lines.push(line.replace(/\s+$/, ""));
+  }
+  return lines;
+}
+
+test("the escape backslashes a shortcode's braces and angle brackets, and punctuation generally", () => {
+  assert.equal(escapeQuoteLine("{{< pagebreak >}}"), "\\{\\{\\< pagebreak \\>\\}\\}");
+  assert.equal(escapeQuoteLine("{{% note %}}"), "\\{\\{\\% note \\%\\}\\}");
+  assert.equal(escapeQuoteLine("a.b/c"), "a\\.b\\/c");
+  assert.equal(escapeQuoteLine("a  b"), "a &#32;b", "a space after a space is an entity");
+  assert.equal(escapeQuoteLine("\tx"), "&#9;x");
+  assert.equal(escapeQuoteLine("café — “ok”"), "café — “ok”", "non-ASCII text is not escaped");
+});
+
+test("pandoc prints the nasty lines exactly as quoted", { skip: PANDOC_SKIP }, (t) => {
+  for (const line of NASTY) {
+    const printed = pandocPrint(t, `> ${escapeQuoteLine(line)}\n`);
+    assert.deepEqual(printed, [`  ${line}`], JSON.stringify(line));
+  }
+});
+
+test("quarto and pandoc print the nasty lines exactly as quoted, from real quotation fragments", { skip: BOTH_SKIP }, (t) => {
+  assertRoundTrip(t, "nasty.md", NASTY);
+});
+
+test("quarto and pandoc print the handbook's lines exactly as quoted", { skip: BOTH_SKIP }, (t) => {
+  const lines = realLines();
+  if (lines === undefined) {
+    t.diagnostic("runs/gl1 is absent: the fixture lines stand in for the handbook's");
+    assertRoundTrip(t, "handbook.md", FIXTURE_LINES);
+    return;
+  }
+  assertRoundTrip(t, "handbook.md", lines);
+});
+
+test("quarto and pandoc print seeded random markup exactly as quoted", { skip: BOTH_SKIP }, (t) => {
+  assertRoundTrip(t, "random.md", randomLines(150));
+});
+
+test("verifyQuotes flags a raw fragment, one whose lines are not escaped", (t) => {
+  const { run, paper, quotesDir } = fixture(t);
+  quoteSource(run, paper, { path: "handbook/rules.md", start: 1, end: 4 });
+  const file = path.join(quotesDir, "Q01.qmd");
+  const raw = readFileSync(file, "utf8").replace("> \\# Rules", "> # Rules");
+  writeFileSync(file, raw);
+  const problems = verifyQuotes(run, paper);
+  assert.equal(problems.length, 1, problems.join("\n"));
+  assert.match(problems[0] ?? "", /^Q01: .*escaped form/);
+});
+
+test("verifyQuotes flags an edit of one escaped character", (t) => {
+  const { run, paper, quotesDir } = fixture(t);
+  quoteSource(run, paper, { path: "handbook/rules.md", start: 1, end: 4 });
+  const file = path.join(quotesDir, "Q01.qmd");
+  writeFileSync(file, readFileSync(file, "utf8").replace("Be patient\\.", "Be patient\\!"));
+  const problems = verifyQuotes(run, paper);
+  assert.equal(problems.length, 1, problems.join("\n"));
+  assert.match(problems[0] ?? "", /^Q01: /);
+});
+
+test("quote_source refuses a line with a control character and writes nothing", (t) => {
+  const { run, paper, exploration, quotesDir } = fixture(t);
+  writeFileSync(path.join(exploration, "handbook", "ctrl.md"), "fine\nbad\u000cline\n");
+  assert.throws(() => quoteSource(run, paper, { path: "handbook/ctrl.md", start: 2, end: 2 }), /control character/);
+  assert.equal(existsSync(quotesDir), false, "nothing was written");
 });

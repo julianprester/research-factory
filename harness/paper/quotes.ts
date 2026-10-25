@@ -2,6 +2,11 @@
 // line range of the exploration copy into `workspace/embeds/quotes/` as a block
 // quotation, and `verifyQuotes` checks every fragment against that copy again.
 //
+// The quoted lines are written escaped (`escapeQuoteLine`): Quarto and pandoc read
+// them as markdown, so a `{{< … >}}` shortcode, an `@key` citation or a `*` would
+// otherwise render as markup. `quotes.json` keeps the unescaped text; `verifyQuotes`
+// recomputes the escaped fragment from the exploration copy and compares it.
+//
 // The writer's `write` tool cannot reach `embeds/quotes/` (the paper lane), so the
 // fragments and `quotes.json` are written here, after every check, through
 // `writeAtomic`. The exploration copy, the hold-out list and the paper's quotes are
@@ -69,6 +74,32 @@ function embedOf(id: string): string {
   return `{{< include embeds/quotes/${id}.qmd >}}`;
 }
 
+/** Every ASCII punctuation character: pandoc markdown reads a backslash before any of them as the bare character. */
+const ASCII_PUNCTUATION = /[!-\/:-@\[-`{-~]/;
+
+/**
+ * One source line as markdown that renders as the same text, in pandoc and in Quarto:
+ * every ASCII punctuation character backslash-escaped (so `{{<`, `@`, `*`, `&` and `\`
+ * are literal, and a Quarto shortcode is not run); a space that follows another space
+ * or opens the line as `&#32;`, because markdown collapses runs of spaces and drops
+ * leading ones; a tab as `&#9;`, because markdown expands tabs. Letters, digits and
+ * non-ASCII text stay as they are. Quarto's triple-brace escape `{{{< … >}}}` is not
+ * used: Quarto prints it without the extra braces, but pandoc prints them, so it fails
+ * the pandoc half of the round trip (tested).
+ */
+export function escapeQuoteLine(line: string): string {
+  let out = "";
+  let afterSpace = true;
+  for (const c of line) {
+    if (c === "\t") out += "&#9;";
+    else if (c === " " && afterSpace) out += "&#32;";
+    else if (ASCII_PUNCTUATION.test(c)) out += `\\${c}`;
+    else out += c;
+    afterSpace = c === " ";
+  }
+  return out;
+}
+
 function idOf(n: number): string {
   return `Q${String(n).padStart(2, "0")}`;
 }
@@ -112,17 +143,22 @@ function sliceOf(lines: string[], start: number, end: number): string[] {
   if (end > lines.length) throw new Error(`lines ${start}-${end}: the file has ${lines.length} lines`);
   const slice = lines.slice(start - 1, end);
   if (slice.every((line) => line === "")) throw new Error(`lines ${start}-${end} are blank`);
+  const control = slice.find((line) => /[\u0000-\u0008\u000a-\u001f\u007f]/.test(line));
+  if (control !== undefined) throw new Error(`lines ${start}-${end} contain a control character: refusing to quote them`);
   return slice;
 }
 
 /**
- * The fragment for a quotation: the header comment, the lines as a block quotation
- * (`> ` on each, `>` for an empty line), and the source line. LF endings.
+ * The fragment for a quotation: the header comment, the escaped lines as a block
+ * quotation (`> ` on each, `>` for an empty line), a blank line, and the source line.
+ * The blank line matters: without it pandoc reads the source line as a continuation
+ * of the quotation. LF endings.
  */
 function fragmentOf(quote: Quote, slice: string[]): string {
   const header = `<!-- quote ${quote.id} source=${quote.source} lines=${quote.start}-${quote.end} sha256=${quote.fileSha256} -->`;
-  const block = slice.map((line) => (line === "" ? ">" : `> ${line}`));
-  return [header, ...block, `— ${quote.source}, lines ${quote.start}–${quote.end}`, ""].join("\n");
+  const block = slice.map((line) => (line === "" ? ">" : `> ${escapeQuoteLine(line)}`));
+  const source = `— ${escapeQuoteLine(quote.source)}, lines ${quote.start}–${quote.end}`;
+  return [header, ...block, "", source, ""].join("\n");
 }
 
 /** Records one listed hold-out file (if it exists and is a file) by its inode and by its real path. */
@@ -305,7 +341,7 @@ function entryProblems(runDir: string, nodeDir: string, quote: Quote): string[] 
     problems.push(`${id}: the entry's text is not lines ${quote.start}-${quote.end} of ${quote.source} in the exploration copy`);
   }
   if (fragment !== undefined && fragment !== fragmentOf(quote, slice)) {
-    problems.push(`${id}: fragment ${id}.qmd is not the verbatim lines ${quote.start}-${quote.end} of ${quote.source}`);
+    problems.push(`${id}: fragment ${id}.qmd is not the escaped form of lines ${quote.start}-${quote.end} of ${quote.source} (raw, edited or stale)`);
   }
   return problems;
 }
