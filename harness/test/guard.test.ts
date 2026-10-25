@@ -1470,6 +1470,33 @@ test("paperWorkerMayWriteReal applies the lane to the real location: a symlinked
   assert.equal(writable("workspace/paper.qmd"), true, "a plain paper.qmd is still in the lane");
 });
 
+test("a paper's read through a link into the run's owners/ is refused by real path, and the explanation's files stay readable", (t) => {
+  const { paper, explanation, run } = paperRun(t);
+  mkdirSync(path.join(run, "owners", "phase-3"), { recursive: true });
+  writeFileSync(path.join(run, "owners", "phase-3", "ledger.md"), "ledger\n");
+  mkdirSync(path.join(paper, "workspace", "embeds"), { recursive: true });
+  symlinkSync(path.join(run, "owners"), path.join(paper, "workspace", "embeds", "own-link"));
+  const call = workerGuard(t, paper);
+  const linked = call("read", { path: "workspace/embeds/own-link/phase-3/ledger.md" });
+  assert.equal(linked?.block, true, "a link into owners/, read by its relative path");
+  assert.match(linked?.reason ?? "", /owners/);
+  assert.equal(call("read", { path: "workspace/embeds/own-link/phase-4/new.md" })?.block, true, "a missing file under the link");
+  assert.equal(call("read", { path: path.join(paper, "workspace", "embeds", "own-link", "phase-3", "ledger.md") })?.block, true, "the same link, absolute");
+  assert.equal(call("read", { path: path.join(explanation, "workspace", "argument.md") }), undefined, "the explanation's argument stays readable");
+  assert.equal(call("read", { path: path.join(explanation, "workspace", "output", "numbers", "A_01.csv") }), undefined, "the explanation's numbers stay readable");
+});
+
+test("DOCUMENTED LIMITATION: a bash relative climb from the paper to the ancestor card is not refused (accepted heuristic limit)", (t) => {
+  const { paper, p1 } = paperRun(t);
+  const call = workerGuard(t, paper);
+  // The climb names no puzzle and no glob, so the name-based bash check cannot see it. The real-path read
+  // guard refuses the same file, and the card is the writer's own puzzle, snapshotted in its explanation.
+  assert.equal(call("bash", { command: "cat ../../../../workspace/puzzle.md" }), undefined, "NOT caught: a relative climb to the ancestor card");
+  assert.equal(call("bash", { command: "cat ./../../../../workspace/puzzle.md" }), undefined, "NOT caught: the same climb with a leading ./");
+  assert.equal(call("read", { path: path.join(paper, "..", "..", "..", "..", "workspace", "puzzle.md") })?.block, true, "the same file by read is refused");
+  assert.equal(call("bash", { command: `cat ${path.join(p1, "workspace", "puzzle.md")}` })?.block, true, "the named form is still refused");
+});
+
 test("ownerMayWrite lets the owner write a paper node's brief, and not its manuscript", (t) => {
   const { run, paper } = paperRun(t);
   assert.equal(ownerMayWrite(run, 4, path.join(paper, "brief.md")), true, "the paper's own brief");

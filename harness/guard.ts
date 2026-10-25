@@ -192,13 +192,13 @@ export function paperWorkerMayWrite(nodeDir: string, absPath: string): boolean {
 }
 
 /**
- * The real location a write to `absPath` would land at: the nearest existing
+ * The real location a read or write of `absPath` lands at: the nearest existing
  * ancestor (a link counts as existing) resolved with realpath, with the segments
  * that do not exist yet re-appended. Undefined when that ancestor cannot be
  * resolved (a dangling link, a link loop, an unreadable entry), so the caller
  * refuses rather than guesses.
  */
-function realWriteTarget(absPath: string): string | undefined {
+function realTargetOf(absPath: string): string | undefined {
   let existing = path.resolve(absPath);
   const missing: string[] = [];
   for (;;) {
@@ -223,15 +223,36 @@ function realWriteTarget(absPath: string): string | undefined {
 
 /**
  * The paper writer's lane on the real location of a `write` or `edit` target:
- * `paperWorkerMayWrite`'s allow-list applied to `realWriteTarget`, with the node
+ * `paperWorkerMayWrite`'s allow-list applied to `realTargetOf`, with the node
  * folder real too. A `..` segment is refused outright, because the kernel resolves
  * it after any link on the way, which the lexical resolution here cannot follow.
  */
 export function paperWorkerMayWriteReal(nodeDir: string, filePath: string): boolean {
   if (filePath.split(/[\\/]/).includes("..")) return false;
-  const real = realWriteTarget(path.resolve(filePath));
+  const real = realTargetOf(path.resolve(filePath));
   if (real === undefined) return false;
   return paperWorkerMayWrite(realPathOrSelf(nodeDir), real);
+}
+
+/**
+ * Why a paper may not `read` a path whose real location is the run's `owners/`
+ * folder, or undefined when it may. `ownersRefusal` checks the spelling, so a
+ * link inside the paper's workspace (`embeds/own-link -> <run>/owners`) would
+ * pass it; this checks the real location, relative to the run root, for an
+ * `owners` segment. A read whose real location cannot be resolved (a dangling
+ * link) is refused. Bash is checked by name in `ownersRefusal` only.
+ */
+export function paperOwnersRefusal(nodeDir: string, toolName: string, input: { path?: unknown } | undefined): string | undefined {
+  if (toolName !== "read" || typeof input?.path !== "string") return undefined;
+  const real = realTargetOf(path.resolve(input.path));
+  if (real === undefined) return `Reading ${input.path} is not allowed: its real location cannot be resolved`;
+  const runDir = findRunDir(nodeDir);
+  const relative = runDir === undefined ? real : path.relative(realPathOrSelf(runDir), real);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+  if (relative.split(path.sep).includes("owners")) {
+    return `Reading ${input.path} is not allowed: its real location is the owners' folder (rulings and judge verdicts)`;
+  }
+  return undefined;
 }
 
 /**
@@ -421,15 +442,30 @@ function within(root: string, absPath: string): boolean {
 }
 
 /**
- * Why a paper node may not run this tool call, or undefined when it may. The
- * paper's folder, its parent explanation's folder and the exploration copy
- * (`<run>/analysis-data/exploration/`) are its reads. Any other puzzle folder,
- * which includes the ancestor puzzle's card and reviews, and any other
- * explanation folder is refused. A bash command is refused when it names one of
- * them: the ancestor puzzle's folder is named only where the same token continues
- * into the paper's own explanation (`P01-x/explanations/E01-y/…`), so its card and
- * reviews stay unreadable by bash. The dataset and the hold-out are refused by the
- * caller (`datasetRefusal`, `holdoutRefusal`).
+ * Why a paper node may not run this tool call, or undefined when it may.
+ *
+ * The paper's reads are its own folder, its parent explanation's folder and the
+ * exploration copy (`<run>/analysis-data/exploration/`).
+ *
+ * `read` is the protection that matters, and it is checked by real path: a path
+ * whose real location is another puzzle's folder, the ancestor puzzle's card or
+ * reviews, or another explanation's folder is refused, so a symlink cannot reach
+ * them.
+ *
+ * `bash` is a heuristic, checked by name only. A command that names another puzzle
+ * or another explanation is refused, and so is a command that names the ancestor
+ * puzzle's folder, unless the same token continues into the paper's own explanation
+ * (`P01-x/explanations/E01-y/…`). A `..` traversal combined with a glob is refused.
+ * NOT caught by bash, an accepted limit (controller ruling, fix round 2): a relative
+ * climb to the ancestor (`cat ../../../../workspace/puzzle.md` from the paper folder),
+ * a glob that does not name the folder, a name split by quoting or built at run time
+ * (`P''01-x`, `$(printf …)`), and a `cd` followed by a relative path. The ancestor
+ * card is the writer's own puzzle, already snapshotted into the explanation's
+ * `workspace/puzzle.md`, which is why this limit is accepted.
+ *
+ * The dataset and the hold-out are refused by the caller (`datasetRefusal`,
+ * `holdoutRefusal`), and the owners' folder by `ownersRefusal` and
+ * `paperOwnersRefusal`.
  */
 function paperRefusal(paperDir: string, toolName: string, input: { path?: unknown; command?: unknown } | undefined): string | undefined {
   const ownDir = realPathOrSelf(paperDir);

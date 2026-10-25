@@ -34,6 +34,7 @@ import {
   isExplanationNode,
   isPaperNode,
   ownersRefusal,
+  paperOwnersRefusal,
   paperWorkerMayWriteReal,
   siblingRefusal,
   taskOf,
@@ -250,7 +251,9 @@ export default function workerExtension(pi: PiLike): void {
       const phase = nodePhase(nodeDir);
       const reason =
         (holdoutLocked(phase) ? holdoutRefusal(event.toolName, event.input) : undefined) ??
-        (isPaperNode(nodeDir) ? ownersRefusal(event.toolName, event.input) : undefined) ??
+        (isPaperNode(nodeDir)
+          ? ownersRefusal(event.toolName, event.input) ?? paperOwnersRefusal(nodeDir, event.toolName, event.input)
+          : undefined) ??
         (phase === 2 || isExplanationNode(nodeDir) || isPaperNode(nodeDir)
           ? siblingRefusal(nodeDir, event.toolName, event.input)
           : undefined) ??
