@@ -54,8 +54,9 @@
 // script, a clean `check-argument` (with its review checks), the Predictions pin
 // (design §9), a reproduction that is ok and whose hash (scripts, numbers and assets)
 // still matches now, a review that is not BLOCKED and a ruling on every finding.
-// The first submit writes the pin, the sha-256 of the `## Predictions` section, before
-// `updateNode`; a reopened node must still match it. Nothing is committed before
+// The submit writes the pin, the sha-256 of the `## Predictions` section, before
+// `updateNode`; on a node that has been reopened the pin must already match it. A node
+// submitted before pins existed gets its pin from `ensurePredictionsPin` before it is reopened. Nothing is committed before
 // `updateNode`, whose tree commit is the argument's preregistration for Phase 5
 // (design §9): the reply names it, and the pin is in it. An edit to `argument.md`
 // after the review is allowed (and is in that commit) unless it changes the
@@ -73,7 +74,7 @@ import * as path from "node:path";
 
 import { ignoreScratch, prepareExploration, type Exec } from "../analysis/run.ts";
 import { readConfig } from "../launch.ts";
-import { commitFiles, findNode, updateNode, type NodeRef } from "../tree.ts";
+import { commitFiles, findNode, nodeIdOf, updateNode, type NodeRef } from "../tree.ts";
 import { argumentLinks, checkArgument, checkRevision, parseReport, sectionText } from "../tools/check-argument.ts";
 import { maskFences, normaliseHeading } from "../tools/check-puzzle.ts";
 import { ANALYSIS_SCRIPT, ANALYSIS_TASK, compareTasks, greatestTask, parseTask } from "./names.ts";
@@ -743,6 +744,49 @@ function predictionsSha(node: NodeRef): string {
 }
 
 /**
+ * The pin a node submitted before pins existed would have: the sha-256 of its `## Predictions` section as its
+ * first submit committed it (the earliest `[P4:updateNode] <id> — ` commit), so a Predictions edit since then is
+ * not what gets pinned. Fails closed: no such commit, no `argument.md` in it, or an empty section.
+ */
+export function derivePredictionsPin(runDir: string, nodeDir: string): { sha256: string; commit: string } {
+  const nodeId = nodeIdOf(nodeDir);
+  if (nodeId === undefined) throw new Error(`${nodeDir} is not a node folder`);
+  const subject = `[P4:updateNode] ${nodeId} \u2014 `;
+  const commits = execFileSync("git", ["log", "--reverse", "--format=%H%x09%s"], { cwd: runDir, encoding: "utf8" })
+    .split("\n")
+    .filter((line) => line.includes("\t"))
+    .map((line) => ({ sha: line.slice(0, line.indexOf("\t")), subject: line.slice(line.indexOf("\t") + 1) }));
+  const first = commits.find((commit) => commit.subject.startsWith(subject));
+  if (first === undefined) throw new Error(`no submit commit for ${nodeId}: no updateNode to phase 4 is in the run's history`);
+  const short = first.sha.slice(0, 7);
+  const rel = path.relative(runDir, path.join(nodeDir, "workspace", "argument.md")).split(path.sep).join("/");
+  let argument: Buffer;
+  try {
+    argument = execFileSync("git", ["show", `${first.sha}:${rel}`], { cwd: runDir });
+  } catch {
+    throw new Error(`${rel} is not in commit ${short}, the first submit of ${nodeId}`);
+  }
+  const section = sectionText(argument.toString("utf8"), "Predictions");
+  if (section === "") throw new Error(`the Predictions section is empty at commit ${short}, the first submit of ${nodeId}`);
+  return { sha256: createHash("sha256").update(section).digest("hex"), commit: first.sha };
+}
+
+/**
+ * Write the derived pin (`derivePredictionsPin`) for a node that has none, so a node submitted before pins can be
+ * reopened (design §9). An existing pin is never overwritten; a link or a folder at the pin's path is refused.
+ */
+export function ensurePredictionsPin(runDir: string, nodeDir: string): void {
+  const nodeId = nodeIdOf(nodeDir);
+  if (nodeId === undefined) throw new Error(`${nodeDir} is not a node folder`);
+  const rel = pinPath(runDir, nodeId);
+  const found = locate(runDir, rel);
+  if (found.kind === "refused") throw new Error(found.problem);
+  if (found.kind === "folder") throw new Error(`${rel} is not a regular file`);
+  if (found.kind === "file") return;
+  writeAtomic(path.join(runDir, ...rel.split("/")), `${derivePredictionsPin(runDir, nodeDir).sha256}\n`);
+}
+
+/**
  * The end gate (design §10). Refuses, naming the gate, unless every condition
  * holds; then one `updateNode` hands the node to Phase 4 `ready` and the reply
  * names the commit, which stands as the argument's preregistration (design §9).
@@ -792,7 +836,8 @@ export async function submit(runDir: string, input: SubmitInput, deps: SubmitDep
   }
   if (problems.length > 0) throw refusal("check-argument", `${problems.length} problem(s):\n${listLines(problems)}`);
 
-  // 4. the Predictions are pinned (design §9): the first submit writes their hash, and a reopened node must still match it.
+  // 4. the Predictions are pinned (design §9). A node never reopened is pinned by this submit: whatever pin it holds (none, or a stale one
+  // left by a failed first submit) is rewritten to the section as it stands. A reopened node's pin is authoritative: it must exist and match.
   let pin: string | undefined;
   let sectionSha: string;
   try {
@@ -801,14 +846,16 @@ export async function submit(runDir: string, input: SubmitInput, deps: SubmitDep
   } catch (error) {
     throw refusal("predictions", message(error));
   }
-  if (pin !== undefined && pin !== sectionSha) {
-    throw refusal(
-      "predictions",
-      `the Predictions section differs from the one pinned at the first submit (${pinPath(runDir, node.id)}). The pin is the preregistration, so the Predictions stay as they were: a prediction the extra loop wants to add is recorded as a deviation in the Limitations, not as a prediction`,
-    );
-  }
-  if (pin === undefined && reopens.length > 0) {
-    throw refusal("predictions", `${pinPath(runDir, node.id)} is missing, so the Predictions cannot be checked against the first submit: a reopened node is not submitted without its pin`);
+  if (reopens.length > 0) {
+    if (pin === undefined) {
+      throw refusal("predictions", `${pinPath(runDir, node.id)} is missing, so the Predictions cannot be checked against the first submit: a reopened node is not submitted without its pin`);
+    }
+    if (pin !== sectionSha) {
+      throw refusal(
+        "predictions",
+        `the Predictions section differs from the one pinned at the first submit (${pinPath(runDir, node.id)}). The pin is the preregistration, so the Predictions stay as they were: a prediction the extra loop wants to add is recorded as a deviation in the Limitations, not as a prediction`,
+      );
+    }
   }
 
   // 5. the reproduction record is ok and still describes these scripts and numbers.
@@ -845,8 +892,8 @@ export async function submit(runDir: string, input: SubmitInput, deps: SubmitDep
   const unruled = checkRevision(report.findings, revision);
   if (unruled.length > 0) throw refusal("revision", listLines(unruled));
 
-  // The first submit pins the Predictions. The pin is written before updateNode, so the tree commit carries it (the preregistration).
-  if (pin === undefined) writeAtomic(path.join(runDir, ...pinPath(runDir, node.id).split("/")), `${sectionSha}\n`);
+  // The pin is written before updateNode, so the tree commit carries it (the preregistration). A reopened node's pin matches, so nothing is rewritten there.
+  if (pin !== sectionSha) writeAtomic(path.join(runDir, ...pinPath(runDir, node.id).split("/")), `${sectionSha}\n`);
   // The one commit: updateNode's tree commit, which carries the argument as it stands.
   const note = typeof input.note === "string" && input.note.trim() !== "" ? input.note.trim() : undefined;
   updateNode(runDir, node.id, { status: "ready", phase: 4 }, ACTOR, note);

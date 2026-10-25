@@ -20,6 +20,8 @@ import { loopDir, readRounds, writeAtomic } from "../explain/rounds.ts";
 import {
   archiveScript,
   closeRound,
+  derivePredictionsPin,
+  ensurePredictionsPin,
   openRound,
   reproduce,
   setBudgetForTests,
@@ -1516,7 +1518,10 @@ test("submit refuses a second time: the node is no longer in Phase 3", async (t)
 // --- reproduce and submit for a reopened node (design §9): the current loop's stop, and the Predictions pin ---
 
 const pinFile = (fx: Fixture) => path.join(loopDir(fx.run, "E01"), "predictions.sha256");
-const PINNED = `${createHash("sha256").update(sectionText(ARGUMENT_FULL, "Predictions")).digest("hex")}\n`;
+/** The pin file as the run's git sees it, for `git show`. */
+const loopRecord = (fx: Fixture) => path.relative(fx.run, pinFile(fx)).split(path.sep).join("/");
+const sha256Of = (markdown: string): string => createHash("sha256").update(sectionText(markdown, "Predictions")).digest("hex");
+const PINNED = `${sha256Of(ARGUMENT_FULL)}\n`;
 
 /**
  * A node whose loop 0 stopped (two quiet rounds), then whose reopen 1 stopped (two quiet rounds 4 and 5), in Phase 3.
@@ -1624,6 +1629,96 @@ test("loop 0's refusals keep their wording: no STOP, and reproduce before the ST
   const fx = await closedOut(t, ["substantial", "none"]);
   assert.match(await submitMessage(fx), /no STOP is recorded \(2 closed round\(s\)\): finish the loop first/);
   assert.match(await rejectMessage(reproduce(fx.run, { nodeId: "E01" }, { exec: fakeContainer().exec })), /no STOP is recorded for E01 \(2 closed round\(s\)\)/);
+});
+
+/** A node submitted before pins existed: submitted, its pin file removed, then reopened after round 3 and stopped at round 5. */
+async function submittedBeforePins(t: TestContext): Promise<Fixture> {
+  const fx = await reproduced(t);
+  await submitOk(fx);
+  rmSync(pinFile(fx));
+  settle(fx.run);
+  updateNode(fx.run, "E01", { phase: 3 }, "owner-p4");
+  appendReopen(fx.run, "E01", { n: 1, requestSha: REOPEN_SHA, afterRound: 3 }, 2);
+  await runRound(fx, 4, ["R1A"], "none");
+  await runRound(fx, 5, ["R1B"], "none");
+  for (const round of [4, 5]) write(inWorkspace(fx, "reports", `${String(round).padStart(2, "0")}.md`), REPORT_FULL(round));
+  settle(fx.run);
+  await reproduceAgain(fx);
+  return fx;
+}
+
+test("a retry after a stale pin from a failed first submit, with Predictions edited since, succeeds and the pin holds the new hash (concern 2)", async (t) => {
+  const fx = await reproduced(t);
+  // The first submit wrote the pin, then its updateNode never landed; the Predictions were edited before the retry.
+  write(pinFile(fx), `${"d".repeat(64)}\n`);
+  write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL.replace("the same ordering", "a reversed ordering"));
+  settle(fx.run);
+  assert.match(await submitOk(fx), /submitted E01/);
+  assert.equal(readFileSync(pinFile(fx), "utf8"), `${sha256Of(ARGUMENT_FULL.replace("the same ordering", "a reversed ordering"))}\n`);
+  assert.equal(git(fx.run, "status", "--porcelain"), "");
+});
+
+test("derivePredictionsPin takes the Predictions of the first submit commit, not the current text, and names that commit (concern 1)", async (t) => {
+  const fx = await reproduced(t);
+  await submitOk(fx);
+  const submitCommit = git(fx.run, "rev-parse", "HEAD").trim();
+  rmSync(pinFile(fx));
+  write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL.replace("the same ordering", "a reversed ordering"));
+  settle(fx.run);
+  assert.deepEqual(derivePredictionsPin(fx.run, fx.node), { sha256: PINNED.trim(), commit: submitCommit });
+  assert.equal(existsSync(pinFile(fx)), false, "deriving writes nothing");
+});
+
+test("derivePredictionsPin throws when the node has no submit commit (concern 1, fail closed)", async (t) => {
+  const fx = await closedOut(t);
+  assert.throws(() => derivePredictionsPin(fx.run, fx.node), /no submit commit for E01/);
+});
+
+test("derivePredictionsPin throws when the submit commit's argument has an empty Predictions section or no argument (concern 1, fail closed)", async (t) => {
+  const fx = await closedOut(t);
+  write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL.replace(/## Predictions[\s\S]*$/, "## Predictions\n\n"));
+  settle(fx.run);
+  git(fx.run, "commit", "--allow-empty", "-q", "-m", "[P4:updateNode] E01 \u2014 status ready, phase 4");
+  assert.throws(() => derivePredictionsPin(fx.run, fx.node), /Predictions section is empty/);
+
+  const absent = await closedOut(t);
+  rmSync(inWorkspace(absent, "argument.md"));
+  settle(absent.run);
+  git(absent.run, "commit", "--allow-empty", "-q", "-m", "[P4:updateNode] E01 \u2014 status ready, phase 4");
+  assert.throws(() => derivePredictionsPin(absent.run, absent.node), /workspace\/argument\.md is not in commit/);
+});
+
+test("ensurePredictionsPin writes the derived pin when none exists, and never overwrites an existing pin (concern 1)", async (t) => {
+  const fx = await submittedBeforePins(t);
+  assert.equal(existsSync(pinFile(fx)), false);
+  ensurePredictionsPin(fx.run, fx.node);
+  assert.equal(readFileSync(pinFile(fx), "utf8"), PINNED);
+
+  const existing = `${"e".repeat(64)}\n`;
+  write(pinFile(fx), existing);
+  ensurePredictionsPin(fx.run, fx.node);
+  assert.equal(readFileSync(pinFile(fx), "utf8"), existing, "an existing pin is kept as it is");
+});
+
+test("a node submitted before pins: submit refuses while the pin is missing, then the derived pin lets an unchanged Predictions section submit (concern 1)", async (t) => {
+  const fx = await submittedBeforePins(t);
+  assert.match(await submitMessage(fx), /gate "predictions".*is missing/s);
+  ensurePredictionsPin(fx.run, fx.node);
+  assert.match(await submitOk(fx), /submitted E01/);
+  assert.equal(git(fx.run, "show", `HEAD:${loopRecord(fx)}`), PINNED);
+});
+
+test("a node submitted before pins, Predictions reworded in the reopen: the derived pin is the original, so the edit is refused (concern 1)", async (t) => {
+  const fx = await submittedBeforePins(t);
+  write(inWorkspace(fx, "argument.md"), ARGUMENT_FULL.replace("the same ordering", "a reversed ordering"));
+  settle(fx.run);
+  ensurePredictionsPin(fx.run, fx.node);
+  assert.equal(readFileSync(pinFile(fx), "utf8"), PINNED, "the derived pin is the first submit's text, not the edited one");
+  const before = subjects(fx.run).length;
+  const message = await submitMessage(fx);
+  assert.match(message, /gate "predictions"/);
+  assert.match(message, /deviation in the Limitations/);
+  assert.equal(subjects(fx.run).length, before, "no commit");
 });
 
 // --- tree_update and tree_create ------------------------------------------
