@@ -71,3 +71,22 @@ test("greatestTask is the greatest analysis task: a reopen task beats every plai
   assert.equal(greatestTask(["lit-01", "assets.R"]), undefined);
   assert.equal(greatestTask([]), undefined);
 });
+
+test("a reopen number starts at 1: R0A, R01A and R00B are not task names, and neither is a script name built on them", () => {
+  for (const name of ["R0A", "R01A", "R00B"]) {
+    assert.equal(parseTask(name), undefined, name);
+    assert.equal(TASK_NAME.test(name), false, name);
+    assert.equal(ANALYSIS_TASK.test(name), false, name);
+    assert.equal(ANALYSIS_SCRIPT.test(`${name}_01.R`), false, `${name}_01.R`);
+    assert.equal(scriptTask(`${name}_01.R`), undefined, `${name}_01.R`);
+  }
+});
+
+test("plain R and R_01.R are still the plain letter R; R10A is a valid reopen task that sorts after R9Z", () => {
+  assert.deepEqual(parseTask("R"), { kind: "analysis", reopen: 0, letter: "R" });
+  assert.equal(scriptTask("R_01.R"), "R");
+  assert.deepEqual(parseTask("R10A"), { kind: "analysis", reopen: 10, letter: "A" });
+  assert.equal(TASK_NAME.test("R10A"), true);
+  assert.equal(scriptTask("R10A_01.R"), "R10A");
+  assert.ok(compareTasks("R9Z", "R10A") < 0, "reopen 9 sorts below reopen 10, whatever the letters");
+});

@@ -1335,3 +1335,11 @@ test("a reopen task writes its own scripts only, and the greatest task (a reopen
   assert.equal(may("V", "workspace/scripts/V_01.R"), true);
   assert.equal(may("R1A", "workspace/scripts/R1A_1.R"), false, "the script number has two digits");
 });
+
+test("a worker in a task folder named R0A is not an explanation task: nothing under it is hers, and taskOf names none", (t) => {
+  const { explanation } = explanationRun(t);
+  mkdirSync(path.join(explanation, "tasks", "R0A"), { recursive: true });
+  assert.equal(taskOf(explanation, path.join(explanation, "tasks", "R0A")), undefined);
+  assert.equal(explanationWorkerMayWrite(explanation, "R0A", path.join(explanation, "tasks", "R0A", "handoff.md")), false);
+  assert.equal(explanationWorkerMayWrite(explanation, "R0A", path.join(explanation, "workspace", "scripts", "R0A_01.R")), false);
+});

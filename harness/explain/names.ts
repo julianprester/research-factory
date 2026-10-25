@@ -1,29 +1,29 @@
 // The one naming module for an explanation's tasks and their scripts (design §9).
 //
 // A plain letter task `A`..`Z` is one of the round's tasks. A reopen task `R<n><L>` (`R1A`, `R12C`)
-// belongs to reopen loop `n`. `R` alone is the plain letter R: a reopen task needs its digits, so
-// the two never collide. A literature task `lit-NN` is neither and keeps its own form.
+// belongs to reopen loop `n`, which starts at 1 (`R0A` and `R01A` are not names). `R` alone is the
+// plain letter R: a reopen task needs its digits, so the two never collide. A literature task `lit-NN` is neither and keeps its own form.
 //
 // Order: every plain letter is below every reopen task; reopen tasks order by their number, then
 // their letter. The shared `assets.R|py` belongs to the greatest analysis task.
 
 /** A task folder name: an analysis task (`A`, `R1A`) or a literature task (`lit-07`). */
-export const TASK_NAME = /^(?:(?:R\d+)?[A-Z]|lit-\d\d)$/;
+export const TASK_NAME = /^(?:(?:R[1-9]\d*)?[A-Z]|lit-\d\d)$/;
 
 /** An analysis task: a plain letter (`A`) or a reopen task (`R1A`). */
-export const ANALYSIS_TASK = /^(?:R\d+)?[A-Z]$/;
+export const ANALYSIS_TASK = /^(?:R[1-9]\d*)?[A-Z]$/;
 
 /** An analysis script name: `<task>_nn.R|py` for an analysis task, or the shared `assets.R|py`. */
-export const ANALYSIS_SCRIPT = /^(?:(?:R\d+)?[A-Z]_\d\d|assets)\.(?:R|py)$/;
+export const ANALYSIS_SCRIPT = /^(?:(?:R[1-9]\d*)?[A-Z]_\d\d|assets)\.(?:R|py)$/;
 
 /** A literature task `lit-<nn>`; its report is `workspace/reports/<nn>.md`. */
 export const LIT_TASK = /^lit-(\d\d)$/;
 
 /** A reopen task's number and letter: `R12C` → 12 and `C`. */
-const REOPEN_TASK = /^R(\d+)([A-Z])$/;
+const REOPEN_TASK = /^R([1-9]\d*)([A-Z])$/;
 
 /** The task a script `<task>_nn.R|py` belongs to (`R1A_03.R` → `R1A`). */
-const SCRIPT_TASK = /^((?:R\d+)?[A-Z])_\d\d\.(?:R|py)$/;
+const SCRIPT_TASK = /^((?:R[1-9]\d*)?[A-Z])_\d\d\.(?:R|py)$/;
 
 export type ParsedTask = { kind: "analysis"; reopen: number; letter: string } | { kind: "lit"; n: number };
 
