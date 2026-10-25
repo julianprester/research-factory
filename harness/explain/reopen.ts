@@ -28,9 +28,6 @@ export { readReopens, type ReopenRecord } from "./rounds.ts";
 /** Rounds in one reopen's loop (the config's default, `reopenRounds`). */
 export const REOPEN_ROUNDS = 2;
 
-/** Reopens one explanation may have (the config's default, `maxReopens`). */
-export const MAX_REOPENS = 2;
-
 /** The loop that is current, and whether it has stopped. Reopen 0 is the original loop. */
 export interface CurrentLoop {
   reopen: number;

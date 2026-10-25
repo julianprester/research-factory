@@ -472,6 +472,27 @@ test("readConfig rejects a non-string analysisImage, naming the key", (t) => {
   assert.throws(() => readConfig(dir), /config\.json: "analysisImage" must be a string/);
 });
 
+test("readConfig accepts the default reopen bound, and refuses a run whose last round can reach 50, naming the keys", (t) => {
+  const write = (extra: Record<string, unknown>): string => {
+    const dir = configDir(t);
+    writeFileSync(path.join(dir, "config.json"), JSON.stringify({ model: "m1", phases: {}, ...extra }));
+    return dir;
+  };
+  // The last round is roundCap + maxReopens * reopenRounds: 6 + 2 * 2 by default.
+  assert.equal(readConfig(write({})).roundCap, 6, "the defaults (6, 2, 2) are accepted");
+  assert.doesNotThrow(() => readConfig(write({ roundCap: 45 })), "45 + 2 * 2 = 49 is below 50");
+  assert.throws(
+    () => readConfig(write({ roundCap: 46 })),
+    /"roundCap" \+ "maxReopens" \* "reopenRounds" must stay below 50 .*literature folders are numbered by global round number.*50 \+ round/,
+    "46 + 2 * 2 = 50 is refused",
+  );
+  assert.throws(
+    () => readConfig(write({ roundCap: 49, maxReopens: 1, reopenRounds: 1 })),
+    /must stay below 50 \(this run's last round would be 50\)/,
+    "49 + 1 * 1 = 50 is refused",
+  );
+});
+
 test("readConfig rejects a roundCap or analysisTimeoutMs that is not a positive integer", (t) => {
   for (const [key, value] of [
     ["roundCap", 0],

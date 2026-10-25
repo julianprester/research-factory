@@ -359,7 +359,7 @@ export default function ownerExtension(pi: PiLike): void {
     name: "open_round",
     label: "Open a round",
     description:
-      "Open the next round of an explanation node from your plan. The plan needs `## Questions` and `## Tasks` sections, each task a `### Task <L>: <aim>` heading with a capital letter never used in this node before (in a reopen loop, the tasks are `R<n><L>`, such as `R1A`). The tool writes rounds/NN/plan.md, creates tasks/<L>/ for each letter, and on round 1 snapshots the puzzle and its Phase 3 must-check list into the workspace. It refuses while the previous round is open, after the cap, and after a recorded STOP; a reopen loop has its own cap.",
+      "Open the next round of an explanation node from your plan. The plan needs `## Questions` and `## Tasks` sections, each task a `### Task <L>: <aim>` heading with a capital letter never used in this node before. The tool writes rounds/NN/plan.md, creates tasks/<L>/ for each letter, and on round 1 snapshots the puzzle and its Phase 3 must-check list into the workspace. It refuses while the previous round is open, after the cap, and after a recorded STOP. In a reopen loop the tasks are `R<n><L>`, such as `R1A`, and the cap is the reopen's own.",
     parameters: OpenRoundParams,
     async execute(_toolCallId: string, params: OpenRoundInput) {
       requirePhase3("open_round");

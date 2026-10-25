@@ -74,7 +74,7 @@ import { argumentLinks, checkArgument, checkRevision, parseReport } from "../too
 import { maskFences, normaliseHeading } from "../tools/check-puzzle.ts";
 import { ANALYSIS_SCRIPT, ANALYSIS_TASK, compareTasks, greatestTask, parseTask } from "./names.ts";
 import { reproduceWorkspace, workspaceHash } from "./reproduce.ts";
-import { currentLoop, MAX_REOPENS, REOPEN_ROUNDS } from "./reopen.ts";
+import { currentLoop } from "./reopen.ts";
 import {
   appendRound,
   argumentSha,
@@ -177,13 +177,13 @@ function capOf(runDir: string): number {
   return readConfig(runDir).roundCap ?? ROUND_CAP;
 }
 
-/** The config's rounds per reopen, and its reopens per explanation (`readConfig` defaults both). */
+/** The config's rounds per reopen, and its reopens per explanation; `readConfig` fills both, though its type leaves them optional. */
 function reopenRoundsOf(runDir: string): number {
-  return readConfig(runDir).reopenRounds ?? REOPEN_ROUNDS;
+  return readConfig(runDir).reopenRounds as number;
 }
 
 function maxReopensOf(runDir: string): number {
-  return readConfig(runDir).maxReopens ?? MAX_REOPENS;
+  return readConfig(runDir).maxReopens as number;
 }
 
 /** The reopen an analysis task belongs to: 0 for a plain letter, `n` for `R<n><L>`. Any other name is refused. */
@@ -277,7 +277,8 @@ export async function openRound(runDir: string, input: OpenRoundInput): Promise<
   const plan = parsePlan(input.plan);
   if (plan === null) {
     throw new Error(
-      "the plan does not parse: it needs a `## Questions` section and a `## Tasks` section with at least one `### Task <L>: <aim>` heading, <L> a plain capital letter A-Z (in a reopen loop, R<n><L>, such as R1A)",
+      "the plan does not parse: it needs a `## Questions` section and a `## Tasks` section with at least one `### Task <L>: <aim>` heading, <L> one capital letter A-Z" +
+        (loop === 0 ? "" : ` (in reopen ${loop} the tasks are R${loop}<L>, such as R${loop}A)`),
     );
   }
   const seen = new Set<string>();

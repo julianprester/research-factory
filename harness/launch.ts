@@ -468,6 +468,14 @@ export function readConfig(runDir: string): RunConfig {
   if (paperBareNumberLimit !== undefined && !isNonNegativeInteger(paperBareNumberLimit)) {
     throw new Error(`${file}: "paperBareNumberLimit" must be a non-negative integer when present`);
   }
+  // The last round is roundCap + maxReopens * reopenRounds. Literature folders are numbered by the global round number,
+  // and the second worker's convention is 50 + round, so a run that could reach round 50 would collide with it.
+  const lastRound = Number(roundCap ?? ROUND_CAP) + Number(maxReopens ?? MAX_REOPENS) * Number(reopenRounds ?? REOPEN_ROUNDS);
+  if (lastRound >= 50) {
+    throw new Error(
+      `${file}: "roundCap" + "maxReopens" * "reopenRounds" must stay below 50 (this run's last round would be ${lastRound}): literature folders are numbered by global round number, and the second worker's convention uses 50 + round`,
+    );
+  }
   if (phases === null || typeof phases !== "object" || Array.isArray(phases)) {
     throw new Error(`${file}: missing "phases" (an object of phase number to skill path)`);
   }
