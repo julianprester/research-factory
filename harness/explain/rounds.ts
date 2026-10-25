@@ -190,9 +190,11 @@ function recordOf(value: unknown): RoundRecord | undefined {
  * a reopen round is the one that stops its loop, the reason is stored in its record, so a later change of
  * `reopenRounds` cannot un-latch it; a `stop` the record brings must be the reason the loop decides.
  *
- * This does not read `reopens.json` (the reopen layer imports this module, so the import would cycle): the
- * caller checks `currentLoop` first. `reopenRounds` is the config's default (`reopen.ts`'s `REOPEN_ROUNDS`).
- * Written atomically.
+ * It reads `reopens.json` itself, through the same no-follow reader, and refuses what the file rules out: an
+ * original round once any reopen is recorded, and a reopen-`n` round whose entry `n` is not recorded. It does
+ * not decide whether a loop may take a round beyond its own stop: the caller consults `currentLoop` for the
+ * loop's decision, and `appendReopen` enforces `maxReopens`. `reopenRounds` is the config's default
+ * (`reopen.ts`'s `REOPEN_ROUNDS`). Written atomically.
  */
 export function appendRound(
   runDir: string,
@@ -231,6 +233,12 @@ export function appendRound(
       if (!before.stop) throw new Error(`rounds: cannot record reopen ${loop}: loop ${current} has not stopped`);
     } else {
       throw new Error(`rounds: cannot record round ${checked.round} in reopen ${loop}: the current loop is ${current}`);
+    }
+    // A reopen round needs its reopen recorded first: an unrecorded reopen leaves the node unreadable by currentLoop.
+    if (!reopens.some((entry) => entry.n === loop)) {
+      throw new Error(
+        `rounds: cannot record round ${checked.round} in reopen ${loop}: reopen ${loop} is not recorded in reopens.json: record the reopen first`,
+      );
     }
   }
 

@@ -248,14 +248,22 @@ function stoppedOriginal(run: string): void {
   });
 }
 
+const SHA = "a".repeat(64);
+
 /** A reopen-n record for round `round`, changed or quiet. */
 function reopenRecord(round: number, reopen: number, changed: boolean): RoundRecord {
   return { round, changed, argumentSha: `sha${round}`, summary: `round ${round}`, letters: ["A"], reopen };
 }
 
+/** Record reopen `n` after round `afterRound`, through the reopen writer, so its rounds may be recorded. */
+function enterReopen(run: string, n: number, afterRound: number): void {
+  appendReopen(run, "E01", { n, requestSha: SHA, afterRound }, 2, 6, 2);
+}
+
 test("appendRound: a reopen round follows a loop-0 cap stop, and its own loop stops at reopenRounds", (t) => {
   const run = tempDir(t);
   stoppedOriginal(run);
+  enterReopen(run, 1, 6);
   appendRound(run, "E01", reopenRecord(7, 1, true), 6, 2);
   appendRound(run, "E01", reopenRecord(8, 1, true), 6, 2);
   const records = readRounds(run, "E01");
@@ -269,6 +277,7 @@ test("appendRound: a reopen round follows a loop-0 cap stop, and its own loop st
 test("appendRound: two quiet reopen rounds stop reopen 1 early, and a further round is refused", (t) => {
   const run = tempDir(t);
   stoppedOriginal(run);
+  enterReopen(run, 1, 6);
   appendRound(run, "E01", reopenRecord(7, 1, false), 6, 2);
   appendRound(run, "E01", reopenRecord(8, 1, false), 6, 2);
   assert.equal(readRounds(run, "E01")[7]?.stop, "two-quiet");
@@ -278,6 +287,7 @@ test("appendRound: two quiet reopen rounds stop reopen 1 early, and a further ro
 test("appendRound: a stop stored in a reopen round stands when reopenRounds is raised later", (t) => {
   const run = tempDir(t);
   stoppedOriginal(run);
+  enterReopen(run, 1, 6);
   appendRound(run, "E01", reopenRecord(7, 1, true), 6, 2);
   appendRound(run, "E01", reopenRecord(8, 1, true), 6, 2);
   assert.throws(() => appendRound(run, "E01", reopenRecord(9, 1, true), 6, 9), /STOP recorded \(cap\) in reopen 1/);
@@ -286,8 +296,10 @@ test("appendRound: a stop stored in a reopen round stands when reopenRounds is r
 test("appendRound: a reopen 2 round after reopen 1 stopped is accepted, and reopen 1 takes no more", (t) => {
   const run = tempDir(t);
   stoppedOriginal(run);
+  enterReopen(run, 1, 6);
   appendRound(run, "E01", reopenRecord(7, 1, false), 6, 2);
   appendRound(run, "E01", reopenRecord(8, 1, false), 6, 2);
+  enterReopen(run, 2, 8);
   appendRound(run, "E01", reopenRecord(9, 2, true), 6, 2);
   assert.equal(readRounds(run, "E01")[8]?.reopen, 2);
   assert.throws(() => appendRound(run, "E01", reopenRecord(10, 1, true), 6, 2), /reopen 1/, "reopen 1 is not the current loop");
@@ -297,6 +309,7 @@ test("appendRound: a reopen 2 round after reopen 1 stopped is accepted, and reop
 test("appendRound: a loop-0 round after loop 0 stopped is refused, even with reopens recorded", (t) => {
   const run = tempDir(t);
   stoppedOriginal(run);
+  enterReopen(run, 1, 6);
   const loopZero = (round: number): RoundRecord => ({ ...reopenRecord(round, 1, true), reopen: undefined });
   assert.throws(() => appendRound(run, "E01", loopZero(7), 6, 2), /STOP recorded \(cap\): no more rounds/, "before any reopen");
   appendRound(run, "E01", reopenRecord(7, 1, true), 6, 2);
@@ -322,6 +335,7 @@ test("appendRound: round numbers stay contiguous across loops", (t) => {
 test("appendRound: a stop given in a reopen round must be the one its loop decides", (t) => {
   const run = tempDir(t);
   stoppedOriginal(run);
+  enterReopen(run, 1, 6);
   assert.throws(
     () => appendRound(run, "E01", { ...reopenRecord(7, 1, true), stop: "two-quiet" }, 6, 2),
     /stop "two-quiet" is not what reopen 1 decides/,
@@ -383,6 +397,7 @@ test("appendRound refuses an original round once a reopen round is recorded, eve
   const run = tempDir(t);
   // A legacy six-round file: no stop is stored, so the cap decides loop 0.
   writeAtomic(path.join(loopDir(run, "E01"), "rounds.json"), `${JSON.stringify(history("cccccc"))}\n`);
+  appendReopen(run, "E01", { n: 1, requestSha: SHA, afterRound: 6 }, 2, 6, 2);
   appendRound(run, "E01", reopenRecord(7, 1, true), 6, 2);
   refusedWritingNothing(run, originalRecord(8), 9, 2, /a reopen is recorded, so the original rounds are closed/, "loop 0 after a reopen under cap 9");
   const records = readRounds(run, "E01");
@@ -451,4 +466,40 @@ test("appendRound fails closed on a linked reopens.json, and writes nothing", (t
   symlinkSync(elsewhere, path.join(loopDir(run, "E01"), "reopens.json"));
   refusedWritingNothing(run, two!, 6, 2, /link/, "a loop-0 round through a link");
   assert.equal(readRounds(run, "E01").length, 1);
+});
+
+test("appendRound refuses a reopen round whose reopen is not recorded in reopens.json, and writes nothing", (t) => {
+  const run = tempDir(t);
+  // A legacy six-round file with no reopens.json: loop 0 has stopped, so the reopen round is otherwise in order.
+  writeAtomic(path.join(loopDir(run, "E01"), "rounds.json"), `${JSON.stringify(history("cccccc"))}\n`);
+  refusedWritingNothing(
+    run,
+    reopenRecord(7, 1, true),
+    6,
+    2,
+    /reopen 1 is not recorded in reopens.json: record the reopen first/,
+    "reopen 1 round 7 with no reopens.json",
+  );
+  assert.equal(readRounds(run, "E01").length, 6, "rounds.json is untouched");
+  assert.equal(existsSync(path.join(loopDir(run, "E01"), "reopens.json")), false, "no reopens.json is created");
+});
+
+test("appendRound refuses a reopen 2 round when only reopen 1 is recorded, and accepts it once reopen 2 is", (t) => {
+  const run = tempDir(t);
+  stoppedOriginal(run);
+  enterReopen(run, 1, 6);
+  appendRound(run, "E01", reopenRecord(7, 1, false), 6, 2);
+  appendRound(run, "E01", reopenRecord(8, 1, false), 6, 2);
+  refusedWritingNothing(
+    run,
+    reopenRecord(9, 2, true),
+    6,
+    2,
+    /reopen 2 is not recorded in reopens.json: record the reopen first/,
+    "reopen 2 round 9 with only entry 1",
+  );
+  assert.equal(readRounds(run, "E01").length, 8);
+  enterReopen(run, 2, 8);
+  appendRound(run, "E01", reopenRecord(9, 2, true), 6, 2);
+  assert.equal(readRounds(run, "E01")[8]?.reopen, 2);
 });
