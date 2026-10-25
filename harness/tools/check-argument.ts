@@ -86,7 +86,7 @@ const CHECK_HEADINGS = REVIEW_HEADINGS.slice(0, 4);
 const DEFINITION = /^ {0,3}\[((?:[^\]\\]|\\.)+)\]:[ \t]*(<[^>]*>|\S+)(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/;
 /** A registry source `output/numbers/<file>.csv#<key>`: the file is directly in numbers/. */
 const REGISTRY_SOURCE = /^output\/numbers\/([^/#]+\.csv)#(.*)$/;
-const YAML_VARIABLE = /^([A-Za-z_][A-Za-z0-9_]*): ".*"$/;
+export const YAML_VARIABLE = /^([A-Za-z_][A-Za-z0-9_]*): ".*"$/;
 const FINDING = /^[-*+]\s+\[(F\d+)\]\s+\[(blocking|major|minor)\]\s+([^:]+?):\s+(\S.*)$/;
 const STATUS = /^Status:\s*(DONE_WITH_CONCERNS|DONE|BLOCKED)\s*$/;
 const RULING = /^\s*(?:[-*+]\s+)?(F\d+):\s*(taken|overruled)\b\s*(?:[—–-]\s*)?(.*)$/i;
@@ -532,7 +532,7 @@ function lstatIfPresent(file: string): fs.Stats | undefined {
  * (the problem is pushed). A missing registry is empty; a malformed one, or a
  * link on its path, is named.
  */
-function loadRegistry(node: string, problems: string[]): Record<string, Row[]> | undefined {
+export function loadRegistry(node: string, problems: string[]): Record<string, Row[]> | undefined {
   const numbers = locate(node, "workspace/output/numbers");
   if (numbers.kind === "absent") return {};
   if (numbers.kind === "refused") {
@@ -718,7 +718,7 @@ function unlinkedScriptWarnings(node: string, scripts: Found, links: { target: s
     );
 }
 
-function resolvesOnce(source: string, registry: Record<string, Row[]>): boolean {
+export function resolvesOnce(source: string, registry: Record<string, Row[]>): boolean {
   const match = REGISTRY_SOURCE.exec(source);
   return match !== null && rowsNamed(registry, match[1] ?? "", match[2] ?? "") === 1;
 }
@@ -788,9 +788,18 @@ function reviewProblems(node: string, citations: (file: string) => string[]): st
 // ---------------------------------------------------------------------------
 // Markdown helpers.
 
-/** Bare numerals in argument.md's prose (see the header for what is not prose). */
+/** Bare numerals in argument.md's prose, as warnings (see the header for what is not prose). */
 function bareNumbers(lines: string[]): string[] {
-  const warnings: string[] = [];
+  return bareNumberHits(lines).map(({ line, token }) => `workspace/argument.md line ${line}: bare number ${token}`);
+}
+
+/**
+ * The bare numbers in prose lines, each with its 1-based line: a decimal or two or more digits, outside link text, link
+ * targets, inline code, headings and URLs, and not a four-digit year between 1900 and 2100. The caller blanks what is not
+ * prose (`check-paper.ts` blanks its shortcodes, citation brackets and block quotations); a blanked line counts nothing.
+ */
+export function bareNumberHits(lines: string[]): { line: number; token: string }[] {
+  const hits: { line: number; token: string }[] = [];
   const links = scanLinks(lines);
   lines.forEach((raw, index) => {
     if (/^\s*#{1,6}\s/.test(raw)) return;
@@ -803,14 +812,14 @@ function bareNumbers(lines: string[]): string[] {
     for (const match of prose.matchAll(BARE_NUMBER)) {
       const token = match[0];
       if (/^\d{4}$/.test(token) && Number(token) >= 1900 && Number(token) <= 2100) continue;
-      warnings.push(`workspace/argument.md line ${index + 1}: bare number ${token}`);
+      hits.push({ line: index + 1, token });
     }
   });
-  return warnings;
+  return hits;
 }
 
 /** The line with its code spans blanked to spaces of the same length, so offsets into the line still hold. */
-function maskCode(line: string): string {
+export function maskCode(line: string): string {
   return line.replace(/(`+)[\s\S]*?\1(?!`)/g, (span) => " ".repeat(span.length));
 }
 
