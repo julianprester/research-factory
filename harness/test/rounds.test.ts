@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 
+import { appendReopen, currentLoop, readReopens } from "../explain/reopen.ts";
 import {
   appendRound,
   argumentSha,
@@ -383,7 +384,7 @@ test("appendRound refuses an original round once a reopen round is recorded, eve
   // A legacy six-round file: no stop is stored, so the cap decides loop 0.
   writeAtomic(path.join(loopDir(run, "E01"), "rounds.json"), `${JSON.stringify(history("cccccc"))}\n`);
   appendRound(run, "E01", reopenRecord(7, 1, true), 6, 2);
-  refusedWritingNothing(run, originalRecord(8), 9, 2, /cannot record original round 8: reopen rounds follow it/, "loop 0 after a reopen under cap 9");
+  refusedWritingNothing(run, originalRecord(8), 9, 2, /a reopen is recorded, so the original rounds are closed/, "loop 0 after a reopen under cap 9");
   const records = readRounds(run, "E01");
   assert.equal(records.length, 7, "the reopen round stands and no original round follows it");
   assert.equal(records[6]?.reopen, 1);
@@ -407,4 +408,47 @@ test("appendRound: an omitted stop on loop 0 is accepted as before", (t) => {
   appendRound(run, "E01", one!, 2);
   appendRound(run, "E01", two!, 2);
   assert.deepEqual(readRounds(run, "E01"), [one, two]);
+});
+
+test("appendRound refuses an original round once reopens.json records a reopen, even before its first round (I2 variant)", (t) => {
+  const run = tempDir(t);
+  // A legacy six-round file: no stop is stored, so the cap decides loop 0.
+  writeAtomic(path.join(loopDir(run, "E01"), "rounds.json"), `${JSON.stringify(history("cccccc"))}\n`);
+  appendReopen(run, "E01", { n: 1, requestSha: "a".repeat(64), afterRound: 6 }, 2, 6);
+  refusedWritingNothing(run, originalRecord(7), 9, 2, /a reopen is recorded, so the original rounds are closed/, "loop 0 round 7 under cap 9");
+  assert.equal(readRounds(run, "E01").length, 6, "no original round was written");
+  assert.equal(readReopens(run, "E01").length, 1);
+  assert.deepEqual(currentLoop(readRounds(run, "E01"), readReopens(run, "E01"), 6, 2).reopen, 1, "the node still reads, in reopen 1, under the cap it was recorded with");
+});
+
+test("appendRound: an absent reopens.json changes nothing", (t) => {
+  const run = tempDir(t);
+  const [one, two] = history("cn");
+  appendRound(run, "E01", one!, 6);
+  appendRound(run, "E01", two!, 6);
+  assert.deepEqual(readRounds(run, "E01"), [one, two]);
+  assert.deepEqual(readdirSync(loopDir(run, "E01")), ["rounds.json"], "no reopens.json is created");
+});
+
+test("appendRound fails closed on a damaged reopens.json, for either loop, and writes nothing", (t) => {
+  const run = tempDir(t);
+  const [one, two] = history("cn");
+  appendRound(run, "E01", one!, 6);
+  const reopensFile = path.join(loopDir(run, "E01"), "reopens.json");
+  writeFileSync(reopensFile, "{ not json");
+  refusedWritingNothing(run, two!, 6, 2, /reopens:.*not valid JSON/, "a loop-0 round");
+  refusedWritingNothing(run, { ...two!, round: 2, reopen: 1 }, 6, 2, /reopens:.*not valid JSON/, "a reopen round");
+  assert.equal(readFileSync(reopensFile, "utf8"), "{ not json", "the damaged file is left as it was");
+  assert.equal(readRounds(run, "E01").length, 1);
+});
+
+test("appendRound fails closed on a linked reopens.json, and writes nothing", (t) => {
+  const run = tempDir(t);
+  const [one, two] = history("cn");
+  appendRound(run, "E01", one!, 6);
+  const elsewhere = path.join(run, "elsewhere.json");
+  writeFileSync(elsewhere, JSON.stringify([{ n: 1, requestSha: "a".repeat(64), afterRound: 1 }]));
+  symlinkSync(elsewhere, path.join(loopDir(run, "E01"), "reopens.json"));
+  refusedWritingNothing(run, two!, 6, 2, /link/, "a loop-0 round through a link");
+  assert.equal(readRounds(run, "E01").length, 1);
 });

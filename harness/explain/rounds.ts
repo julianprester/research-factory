@@ -207,6 +207,8 @@ export function appendRound(
     throw new Error(`rounds: cannot record round ${String(record.round)}: not a round record: ${JSON.stringify(record)?.slice(0, 160)}`);
   }
   const history = readRounds(runDir, nodeId);
+  // Read here, not left to the caller: a damaged or linked reopens.json throws, so nothing is written.
+  const reopens = readReopens(runDir, nodeId);
   if (checked.round !== history.length + 1) {
     throw new Error(`rounds: cannot record round ${checked.round}: the next round is ${history.length + 1}`);
   }
@@ -214,9 +216,10 @@ export function appendRound(
   if (loop === 0) {
     const stopped = stopOf(segment(history, 0), cap);
     if (stopped.stop) throw new Error(`STOP recorded (${stopped.reason}): no more rounds`);
-    // Once a reopen round exists, the original loop is over whatever the cap now says: no original round may follow.
-    if (history.some((earlier) => earlier.reopen !== undefined)) {
-      throw new Error(`rounds: cannot record original round ${checked.round}: reopen rounds follow it`);
+    // Once a reopen is recorded (in reopens.json, or by a reopen-tagged round), the original loop is over whatever
+    // the cap now says, even before the reopen's first round. The second test is what currentLoop would reject anyway.
+    if (reopens.length > 0 || history.some((earlier) => earlier.reopen !== undefined)) {
+      throw new Error(`rounds: cannot record original round ${checked.round}: a reopen is recorded, so the original rounds are closed`);
     }
   } else {
     const current = history[history.length - 1]?.reopen ?? 0;
@@ -244,6 +247,50 @@ export function appendRound(
 /** The records of one loop: `n` 0 is the original loop (those with no `reopen`), `n` ≥ 1 is reopen `n`. */
 function segment(history: RoundRecord[], n: number): RoundRecord[] {
   return history.filter((record) => (record.reopen ?? 0) === n);
+}
+
+// The reopen record, read from `reopens.json` (see `reopen.ts`). It lives here, not in `reopen.ts`, so
+// `appendRound` can refuse an original round while a reopen is recorded: `reopen.ts` imports this module.
+/** One reopen: its number, the request the writer sent, and the round it followed. */
+export interface ReopenRecord {
+  n: number;
+  /** The sha-256 of the writer's `workspace/reopen-request.md` when the reopen was made. */
+  requestSha: string;
+  /** The last recorded round when the reopen was made: loop `n` begins after it. */
+  afterRound: number;
+}
+
+const SHA256 = /^[0-9a-f]{64}$/;
+
+/** The reopens of `nodeId`, numbered 1..k. Absent file: none yet. Anything unreadable throws. */
+export function readReopens(runDir: string, nodeId: string): ReopenRecord[] {
+  const file = path.join(loopDir(runDir, nodeId), "reopens.json");
+  // No-follow, regular files only, as `readRounds` reads `rounds.json`.
+  const bytes = readRegular(runDir, path.relative(runDir, file).split(path.sep).join("/"));
+  if (bytes === undefined) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new Error(`reopens: ${file} is not valid JSON, so the recorded reopens cannot be read`);
+  }
+  if (!Array.isArray(parsed)) throw new Error(`reopens: ${file} is not an array of reopen records`);
+  return parsed.map((value, index) => {
+    const record = reopenOf(value);
+    if (record === undefined || record.n !== index + 1) {
+      throw new Error(`reopens: ${file} entry ${index} is not the record of reopen ${index + 1}: ${JSON.stringify(value)?.slice(0, 160)}`);
+    }
+    return record;
+  });
+}
+
+export function reopenOf(value: unknown): ReopenRecord | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { n, requestSha, afterRound } = value as Partial<ReopenRecord>;
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 1) return undefined;
+  if (typeof requestSha !== "string" || !SHA256.test(requestSha)) return undefined;
+  if (typeof afterRound !== "number" || !Number.isInteger(afterRound) || afterRound < 1) return undefined;
+  return { n, requestSha, afterRound };
 }
 
 /** The sha-256 of the node's `workspace/argument.md`, a regular file read without following a link. */
