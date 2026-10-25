@@ -11,8 +11,10 @@ import {
   explanationWorkerMayWrite,
   holdoutLocked,
   isExplanationNode,
+  isPaperNode,
   ownerMayWrite,
   ownersRefusal,
+  paperWorkerMayWrite,
   reviewerMayWrite,
   reviewsRefusal,
   siblingRefusal,
@@ -1351,4 +1353,115 @@ test("the explanation worker's script names end at the extension: A_01.Rx and A_
   assert.equal(may("workspace/scripts/A_01.R"), true, "the control: a real script name");
   assert.equal(may("workspace/scripts/A_01.Rx"), false);
   assert.equal(may("workspace/scripts/A_01.py.sh"), false);
+});
+
+/**
+ * A run with an explanation E01 under P01 handed on to Phase 4 `ready`, its paper
+ * W01, the exploration copy under the run, and a second explanation E02 under P01.
+ */
+function paperRun(t: TestContext): PuzzleRun & { explanation: string; paper: string; otherExplanation: string } {
+  const fixture = puzzleRun(t);
+  createChild(fixture.run, "P01", "Explanation of crowd", "owner-p3", [], "explanation");
+  updateNode(fixture.run, "E01", { phase: 4, status: "ready" }, "owner-p3");
+  createChild(fixture.run, "E01", "Paper of crowd", "owner-p4", [], "paper");
+  createChild(fixture.run, "P01", "Second explanation", "owner-p3", [], "explanation");
+  const exploration = path.join(fixture.run, "analysis-data", "exploration", "handbook");
+  mkdirSync(exploration, { recursive: true });
+  writeFileSync(path.join(exploration, "x.md"), "x\n");
+  return {
+    ...fixture,
+    explanation: findNode(fixture.run, "E01").dir,
+    paper: findNode(fixture.run, "W01").dir,
+    otherExplanation: findNode(fixture.run, "E02").dir,
+  };
+}
+
+test("isPaperNode recognises a W<nn> folder under papers and nothing else", (t) => {
+  const { paper, explanation } = paperRun(t);
+  assert.equal(isPaperNode(paper), true);
+  assert.equal(isPaperNode(explanation), false, "an explanation is not a paper");
+  assert.equal(isPaperNode(path.join(explanation, "framings", "W01-x")), false, "the parent folder must be papers");
+  assert.equal(isPaperNode(path.join(explanation, "papers", "E01-x")), false, "the name must be W<nn>-");
+  assert.equal(isExplanationNode(paper), false, "a paper is not an explanation");
+});
+
+test("paperWorkerMayWrite lets the writer write its manuscript, outline, reopen request, diagram specs, rounds and handoff", (t) => {
+  const { paper } = paperRun(t);
+  const may = (relPath: string) => paperWorkerMayWrite(paper, path.join(paper, relPath));
+  assert.equal(may("workspace/paper.qmd"), true);
+  assert.equal(may("workspace/outline.md"), true);
+  assert.equal(may("workspace/reopen-request.md"), true);
+  assert.equal(may("workspace/embeds/diagrams/theory.yml"), true);
+  assert.equal(may("rounds.md"), true);
+  assert.equal(may("handoff.md"), true);
+});
+
+test("paperWorkerMayWrite refuses every tool-written file, every other workspace file and every node.json", (t) => {
+  const { paper, explanation } = paperRun(t);
+  const may = (relPath: string) => paperWorkerMayWrite(paper, path.join(paper, relPath));
+  for (const relPath of [
+    "workspace/_variables.yml",
+    "workspace/variables_sources.csv",
+    "workspace/embeds/quotes/Q01.qmd",
+    "workspace/embeds/quotes/quotes.json",
+    "workspace/embeds/tables/x.qmd",
+    "workspace/embeds/figures/x.png",
+    "workspace/embeds/predictions.qmd",
+    "workspace/embeds/diagrams/theory.dot",
+    "workspace/embeds/diagrams/theory.png",
+    "workspace/embeds/diagrams/sub/theory.yml",
+    "workspace/checks/result.json",
+    "workspace/checks/pins.json",
+    "workspace/audit/index.md",
+    "workspace/references.bib",
+    "workspace/_quarto.yml",
+    "workspace/apa.csl",
+    "workspace/node.json",
+    "workspace/sub/node.json",
+    "workspace/embeds/node.json",
+    "node.json",
+    "tasks/A/handoff.md",
+  ]) {
+    assert.equal(may(relPath), false, relPath);
+  }
+  assert.equal(paperWorkerMayWrite(paper, path.join(paper, "..", "W02-x", "workspace", "paper.qmd")), false, "a sibling paper");
+  assert.equal(paperWorkerMayWrite(paper, path.join(explanation, "workspace", "argument.md")), false, "the parent explanation's argument");
+  assert.equal(paperWorkerMayWrite(paper, path.join(paper, "..", "..", "..", "..", "..", "x")), false, "a path that climbs out");
+});
+
+test("ownerMayWrite lets the owner write a paper node's brief, and not its manuscript", (t) => {
+  const { run, paper } = paperRun(t);
+  assert.equal(ownerMayWrite(run, 4, path.join(paper, "brief.md")), true, "the paper's own brief");
+  assert.equal(ownerMayWrite(run, 4, path.join(paper, "workspace", "paper.qmd")), false, "the writer's manuscript");
+});
+
+test("a paper worker reads its own folder, its explanation's outputs and the exploration copy", (t) => {
+  const { paper, explanation, run } = paperRun(t);
+  const call = workerGuard(t, paper);
+  assert.equal(call("read", { path: "workspace/paper.qmd" }), undefined, "its own manuscript");
+  assert.equal(call("read", { path: path.join(explanation, "workspace", "output", "numbers", "A_01.csv") }), undefined, "its explanation's numbers");
+  assert.equal(call("read", { path: path.join(explanation, "workspace", "argument.md") }), undefined, "its explanation's argument");
+  assert.equal(call("read", { path: path.join(explanation, "workspace", "reports", "01.md") }), undefined, "its explanation's literature report");
+  assert.equal(call("read", { path: path.join(run, "analysis-data", "exploration", "handbook", "x.md") }), undefined, "the exploration copy");
+  assert.equal(call("bash", { command: "cat workspace/paper.qmd" }), undefined, "its own file by bash");
+  assert.equal(call("bash", { command: `ls ${path.join(explanation, "workspace", "output", "numbers")}` }), undefined, "its explanation's outputs by bash");
+});
+
+test("a paper worker reads no dataset root, hold-out, other puzzle, other explanation or ancestor puzzle outside its explanation", (t) => {
+  const { paper, otherExplanation, p1, p2, dataset, run } = paperRun(t);
+  const call = workerGuard(t, paper);
+  assert.equal(call("read", { path: path.join(p2, "workspace", "puzzle.md") })?.block, true, "another puzzle");
+  assert.equal(call("read", { path: path.join(p1, "workspace", "puzzle.md") })?.block, true, "the ancestor puzzle's card, outside the explanation");
+  assert.equal(call("read", { path: path.join(p1, "workspace", "reviews", "merged.md") })?.block, true, "the ancestor puzzle's merged review");
+  assert.equal(call("read", { path: path.join(otherExplanation, "workspace", "argument.md") })?.block, true, "another explanation");
+  assert.equal(call("read", { path: path.join(dataset, "a.csv") })?.block, true, "the dataset root");
+  assert.equal(call("read", { path: path.join(run, "prep", "Z01-profile", "workspace", "split", "holdout.txt") })?.block, true, "a hold-out spelling");
+  assert.match(call("read", { path: path.join(p2, "workspace", "puzzle.md") })?.reason ?? "", /a paper reads only its explanation/);
+  assert.equal(call("bash", { command: `cat ${path.join(p2, "workspace", "puzzle.md")}` })?.block, true, "another puzzle by bash");
+  assert.equal(call("bash", { command: `cat ${path.join(otherExplanation, "workspace", "argument.md")}` })?.block, true, "another explanation by bash");
+  assert.equal(call("bash", { command: `cat ${path.join(p1, "workspace", "reviews", "merged.md")}` })?.block, true, "the ancestor's review by bash");
+  assert.equal(call("bash", { command: `head ${dataset}/a.csv` })?.block, true, "the dataset root by bash");
+  assert.equal(call("bash", { command: "cat holdout.csv" })?.block, true, "a hold-out by bash");
+  assert.equal(call("bash", { command: "docker ps" })?.block, true, "docker is refused for a phase-4 worker");
+  assert.equal(call("bash", { command: `node harness/tools/check-paper.ts ${paper}` }), undefined, "its own node folder and ancestors by bash");
 });

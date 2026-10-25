@@ -8,15 +8,16 @@
 // closed: it has no folder to be trusted with. An explanation worker runs in
 // its `tasks/<L>/` (or `tasks/lit-<nn>/`) folder and may write only that task's
 // files, its scripts or its report; a session with no task folder writes
-// nothing. Workers of Phase 1 to 4 nodes
+// nothing. A paper worker runs in its paper folder and may write only the
+// manuscript lane (`paperWorkerMayWrite`). Workers of Phase 1 to 4 nodes
 // also cannot `read` a hold-out path or run a `bash` command that names it. A
-// Phase 3 worker also cannot `read` the dataset root (Phase 1 measures it by
-// design; Phase 3 analyses only the exploration split) or run `docker`/`podman`.
+// Phase 3 or 4 worker also cannot `read` the dataset root (Phase 1 measures it by
+// design; Phases 3 and 4 use only the exploration split) or run `docker`/`podman`.
 // A Phase 2 puzzle worker can neither read a sibling puzzle's folder nor run a
 // command naming one (its `derivedFrom` parents stay readable, so an evolution
 // worker can read the cards and merged reviews it derives from). An explanation
 // worker is held to the same rule about its ancestor puzzle, which it may name
-// but not read outside its node.
+// but not read outside its node; a paper worker reads its explanation as well.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
@@ -31,6 +32,8 @@ import {
   holdoutLocked,
   holdoutRefusal,
   isExplanationNode,
+  isPaperNode,
+  paperWorkerMayWrite,
   siblingRefusal,
   taskOf,
   workerMayWrite,
@@ -71,27 +74,30 @@ function result(text: string) {
 }
 
 /**
- * True when `dir` is an explanation's `tasks/` folder or lies under one. Those
- * folders are writable by the task workers, so a `node.json` there is not a node.
+ * True when `dir` is an explanation's `tasks/` folder or a paper's `workspace/`
+ * folder, or lies under one. Those folders are writable by the workers, so a
+ * `node.json` there is not a node.
  */
-function isInsideExplanationTasks(dir: string): boolean {
+function isInsideWorkerFolder(dir: string): boolean {
   for (let current = dir; ; ) {
     const parent = path.dirname(current);
     if (parent === current) return false;
-    if (path.basename(current) === "tasks" && isExplanationNode(parent)) return true;
+    const name = path.basename(current);
+    if (name === "tasks" && isExplanationNode(parent)) return true;
+    if (name === "workspace" && isPaperNode(parent)) return true;
     current = parent;
   }
 }
 
 /**
  * The nearest ancestor of `start` (or `start` itself) that holds a `node.json`,
- * passing over an explanation's task folders: a worker writes those, so a stray
- * `node.json` there must not redirect the guards to the task folder.
+ * passing over an explanation's task folders and a paper's workspace: a worker
+ * writes those, so a stray `node.json` there must not redirect the guards.
  */
 export function findNodeDir(start: string): string | undefined {
   let dir = path.resolve(start);
   for (;;) {
-    if (fs.existsSync(path.join(dir, "node.json")) && !isInsideExplanationTasks(dir)) return dir;
+    if (fs.existsSync(path.join(dir, "node.json")) && !isInsideWorkerFolder(dir)) return dir;
     const parent = path.dirname(dir);
     if (parent === dir) return undefined;
     dir = parent;
@@ -114,11 +120,11 @@ export function datasetRootOf(nodeDir: string): string | undefined {
 }
 
 /**
- * Why a Phase 3 node may not run this read or bash, or undefined when it may. A
- * run whose dataset root cannot be found is refused every call: the guard has
- * no root to check against, so it fails closed.
+ * Why a Phase 3 or Phase 4 node may not run this read or bash, or undefined when
+ * it may. A run whose dataset root cannot be found is refused every call: the
+ * guard has no root to check against, so it fails closed.
  */
-function phase3Refusal(nodeDir: string, event: ToolCallEventLike): string | undefined {
+function dataRefusal(nodeDir: string, event: ToolCallEventLike): string | undefined {
   const dataset = datasetRootOf(nodeDir);
   if (dataset === undefined) {
     return `Refusing ${event.toolName}: cannot find the run's dataset root above ${nodeDir}`;
@@ -243,8 +249,10 @@ export default function workerExtension(pi: PiLike): void {
       const phase = nodePhase(nodeDir);
       const reason =
         (holdoutLocked(phase) ? holdoutRefusal(event.toolName, event.input) : undefined) ??
-        (phase === 2 || isExplanationNode(nodeDir) ? siblingRefusal(nodeDir, event.toolName, event.input) : undefined) ??
-        (phase === 3 ? phase3Refusal(nodeDir, event) : undefined);
+        (phase === 2 || isExplanationNode(nodeDir) || isPaperNode(nodeDir)
+          ? siblingRefusal(nodeDir, event.toolName, event.input)
+          : undefined) ??
+        (phase === 3 || phase === 4 ? dataRefusal(nodeDir, event) : undefined);
       return reason === undefined ? undefined : { block: true, reason };
     }
     if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
@@ -259,6 +267,15 @@ export default function workerExtension(pi: PiLike): void {
         block: true,
         reason: `Refusing to write ${filePath}: this session is not inside a node folder (no node.json above ${process.cwd()})`,
       };
+    }
+    if (isPaperNode(nodeDir)) {
+      if (!paperWorkerMayWrite(nodeDir, path.resolve(filePath))) {
+        return {
+          block: true,
+          reason: `Paper workers may only write workspace/paper.qmd, outline.md, reopen-request.md, workspace/embeds/diagrams/<name>.yml, rounds.md and handoff.md inside ${nodeDir}, not ${filePath}`,
+        };
+      }
+      return undefined;
     }
     if (isExplanationNode(nodeDir)) {
       const task = taskOf(nodeDir, process.cwd());

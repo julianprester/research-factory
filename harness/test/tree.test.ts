@@ -91,15 +91,13 @@ test("the constants describe the node tree", () => {
     dataset: "pattern",
     pattern: "puzzle",
     puzzle: "explanation",
-    explanation: "framing",
-    framing: "paper",
+    explanation: "paper",
   });
   assert.deepEqual(CHILD_TYPES, {
     dataset: ["pattern", "prep"],
     pattern: ["puzzle"],
     puzzle: ["explanation"],
-    explanation: ["framing"],
-    framing: ["paper"],
+    explanation: ["paper"],
   });
   for (const [type, children] of Object.entries(CHILD_TYPES)) {
     assert.equal(CHILD_TYPE[type], children[0], `${type}'s default child type is its first child type`);
@@ -194,6 +192,23 @@ test("createChild refuses a child type the parent cannot have", (t) => {
     ["D01", "T01", "Z01"],
     "a refused create writes no folder",
   );
+});
+
+test("a paper is created under an explanation in the explanation's phase, ready, and a framing is refused", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  createChild(run, "D01", "One", "t");
+  createChild(run, "T01", "status quo: crowd", "t");
+  createChild(run, "P01", "Explanation of crowd", "t", [], "explanation");
+  updateNode(run, "E01", { phase: 4, status: "ready" }, "t");
+
+  const paper = createChild(run, "E01", "Paper of crowd", "t");
+  assert.equal(paper.id, "W01");
+  assert.equal(paper.type, "paper");
+  assert.equal(paper.phase, 4, "a paper keeps its explanation's phase");
+  assert.equal(paper.status, "ready");
+  assert.equal(paper.dir, path.join(findNode(run, "E01").dir, "papers", "W01-paper-of-crowd"));
+  assert.throws(() => createChild(run, "E01", "Framed", "t", [], "framing"), /Node type explanation cannot have framing children/);
 });
 
 test("the ID counter is per type across the whole run", (t) => {

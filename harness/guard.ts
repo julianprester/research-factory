@@ -21,6 +21,12 @@
 // revision, data requests and task briefs (`explanationWorkerMayWrite`,
 // `ownerMayWrite`).
 //
+// A paper node (`explanations/E<nn>-<slug>/papers/W<nn>-<slug>`) is Phase 4's
+// writer: its one worker writes only the manuscript lane (`paperWorkerMayWrite`),
+// and reads its own folder, its explanation's folder and the exploration copy,
+// never the dataset, the hold-out, another puzzle or another explanation, and not
+// the ancestor puzzle's reviews (`siblingRefusal`).
+//
 // The sibling guards are heuristics, not a sandbox: they refuse the direct
 // spellings of a forbidden read so a model cannot wander by accident, but a
 // script that walks the tree or a command built from a variable is not seen.
@@ -37,7 +43,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { greatestTask, LIT_TASK, scriptTask, TASK_NAME } from "./explain/names.ts";
-import { CHILD_DIR } from "./tree.ts";
+import { CHILD_DIR, findRunDir } from "./tree.ts";
 
 /** Folders that hold node directories, one per child type in tree.ts. */
 const NODE_DIRS = new Set(Object.values(CHILD_DIR));
@@ -50,6 +56,18 @@ const EXPLANATIONS_DIR = CHILD_DIR.explanation;
 
 /** An explanation folder name: `E<nn>-<slug>`. */
 const EXPLANATION_FOLDER = /^E\d+-/;
+
+/** The folder paper nodes live in (`explanations/E01-c/papers/W01-d`). */
+const PAPERS_DIR = CHILD_DIR.paper;
+
+/** A paper folder name: `W<nn>-<slug>`. */
+const PAPER_FOLDER = /^W\d+-/;
+
+/** The paper writer's files under the node, by their path under it: the manuscript lane. */
+const PAPER_WRITER_FILES = new Set(["workspace/paper.qmd", "workspace/outline.md", "workspace/reopen-request.md", "rounds.md", "handoff.md"]);
+
+/** A diagram spec the writer may write: one `<name>.yml` directly in `workspace/embeds/diagrams/`. */
+const DIAGRAM_SPEC = /^[^.][^/]*\.yml$/;
 
 /** The shared scripts: only the greatest analysis task folder may write them (`assetsOwner`). */
 const SHARED_SCRIPTS = new Set(["assets.R", "assets.py"]);
@@ -157,6 +175,23 @@ export function explanationWorkerMayWrite(nodeDir: string, task: string, absPath
 }
 
 /**
+ * True only for what the paper writer may write: `workspace/paper.qmd`,
+ * `outline.md`, `reopen-request.md`, one diagram spec `workspace/embeds/diagrams/<name>.yml`,
+ * and the node's `rounds.md` and `handoff.md`. The rest of `workspace/` is written by
+ * tools (`init_paper` for `_variables.yml` and the pins, `quote_source` for quotes,
+ * the checks and the render for their results), and no `node.json` may be written
+ * anywhere under the node: a stray one would redirect `findNodeDir`.
+ */
+export function paperWorkerMayWrite(nodeDir: string, absPath: string): boolean {
+  const relative = relativeInside(nodeDir, absPath);
+  if (relative === undefined) return false;
+  const parts = relative.split(path.sep);
+  if (parts.includes(NODE_STATE_FILE)) return false;
+  if (PAPER_WRITER_FILES.has(parts.join("/"))) return true;
+  return parts.length === 4 && parts[0] === "workspace" && parts[1] === "embeds" && parts[2] === "diagrams" && DIAGRAM_SPEC.test(parts[3] ?? "");
+}
+
+/**
  * The part of a run-relative path after the explanation node it is inside (its
  * first `explanations/E<nn>-` pair), or undefined when it is not inside one.
  */
@@ -221,6 +256,9 @@ const PUZZLE_IN_COMMAND = /P\d+(?:-[A-Za-z0-9._-]*|[*?])/g;
 /** Shell glob metacharacters; a path with one of these is not a path the guard can see. */
 const GLOB = /[*?\[]/;
 
+/** An explanation named inside a shell command, the way PUZZLE_IN_COMMAND names a puzzle: `E02-x`, `E02-*`, `E02*` and `E02?`. */
+const EXPLANATION_IN_COMMAND = /(?<![A-Za-z0-9])E\d+(?:-[A-Za-z0-9._-]*|[*?])/g;
+
 /** `P01` and `P1` name the same puzzle; compare the number, not the spelling. */
 function canonicalPuzzleId(id: string): string | undefined {
   const match = /^P(\d+)$/.exec(id.trim());
@@ -233,6 +271,13 @@ function commandPuzzleId(token: string): string | undefined {
   const match = /^P(\d+)/.exec(token);
   const digits = match?.[1];
   return digits === undefined ? undefined : `P${Number.parseInt(digits, 10)}`;
+}
+
+/** The explanation a command token stands for (`E02-x` is E2), or undefined when it is not one. */
+function commandExplanationId(token: string): string | undefined {
+  const match = /^E(\d+)/.exec(token);
+  const digits = match?.[1];
+  return digits === undefined ? undefined : `E${Number.parseInt(digits, 10)}`;
 }
 
 /** The puzzle a folder name stands for, or undefined when the folder is not a puzzle. */
@@ -252,6 +297,12 @@ export function isPuzzleNode(nodeDir: string): boolean {
 export function isExplanationNode(nodeDir: string): boolean {
   const dir = path.resolve(nodeDir);
   return path.basename(path.dirname(dir)) === EXPLANATIONS_DIR && EXPLANATION_FOLDER.test(path.basename(dir));
+}
+
+/** A paper node: its own folder is `W<nn>-<slug>` and its parent folder is `papers`. */
+export function isPaperNode(nodeDir: string): boolean {
+  const dir = path.resolve(nodeDir);
+  return path.basename(path.dirname(dir)) === PAPERS_DIR && PAPER_FOLDER.test(path.basename(dir));
 }
 
 /**
@@ -289,6 +340,18 @@ interface PuzzleFolder {
   id: string;
 }
 
+/** Every `explanations/E<nn>-<slug>` folder a resolved path passes through. */
+function explanationFoldersInPath(absPath: string): string[] {
+  const segments = path.resolve(absPath).split(path.sep);
+  const folders: string[] = [];
+  for (let i = 0; i + 1 < segments.length; i += 1) {
+    if (segments[i] === EXPLANATIONS_DIR && EXPLANATION_FOLDER.test(segments[i + 1] ?? "")) {
+      folders.push(segments.slice(0, i + 2).join(path.sep));
+    }
+  }
+  return folders;
+}
+
 /** Every `puzzles/P<nn>-<slug>` folder a resolved path passes through. */
 function puzzleFoldersInPath(absPath: string): PuzzleFolder[] {
   const segments = path.resolve(absPath).split(path.sep);
@@ -300,6 +363,67 @@ function puzzleFoldersInPath(absPath: string): PuzzleFolder[] {
     folders.push({ dir: segments.slice(0, i + 2).join(path.sep), id });
   }
   return folders;
+}
+
+/** True when `absPath` is `root` or lies under it (both as real or resolved paths). */
+function within(root: string, absPath: string): boolean {
+  const relative = path.relative(root, absPath);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+/**
+ * Why a paper node may not run this tool call, or undefined when it may. The
+ * paper's folder, its parent explanation's folder and the exploration copy
+ * (`<run>/analysis-data/exploration/`) are its reads. Any other puzzle folder,
+ * which includes the ancestor puzzle's card and reviews, and any other
+ * explanation folder is refused; so is a bash command that names one of them, or
+ * that names the ancestor puzzle together with a `reviews/` segment. The dataset
+ * and the hold-out are refused by the caller (`datasetRefusal`, `holdoutRefusal`).
+ */
+function paperRefusal(paperDir: string, toolName: string, input: { path?: unknown; command?: unknown } | undefined): string | undefined {
+  const ownDir = realPathOrSelf(paperDir);
+  const explanationDir = path.dirname(path.dirname(ownDir));
+  const ownPuzzleId = puzzleIdOf(path.basename(path.dirname(path.dirname(explanationDir))));
+  const ownExplanationId = commandExplanationId(path.basename(explanationDir));
+  const runDir = findRunDir(paperDir);
+  const exploration = runDir === undefined ? undefined : realPathOrSelf(path.join(runDir, "analysis-data", "exploration"));
+
+  if (toolName === "read" && typeof input?.path === "string") {
+    const absPath = realPathOrSelf(input.path);
+    if (within(explanationDir, absPath) || (exploration !== undefined && within(exploration, absPath))) return undefined;
+    const puzzle = puzzleFoldersInPath(absPath)[0];
+    if (puzzle !== undefined) {
+      return `Reading ${input.path} is not allowed: a paper reads only its explanation and the exploration copy (${puzzle.dir} is a puzzle's folder)`;
+    }
+    const explanation = explanationFoldersInPath(absPath)[0];
+    if (explanation !== undefined) {
+      return `Reading ${input.path} is not allowed: a paper reads only its own explanation (${explanation} is another explanation's folder)`;
+    }
+    return undefined;
+  }
+
+  if (toolName === "bash" && typeof input?.command === "string") {
+    if (input.command.includes("..") && GLOB.test(input.command)) {
+      return "This command combines a `..` traversal with a glob: name every path you read explicitly";
+    }
+    const puzzles = [...input.command.matchAll(PUZZLE_IN_COMMAND)];
+    for (const match of puzzles) {
+      const id = commandPuzzleId(match[0]);
+      if (id !== undefined && id !== ownPuzzleId) {
+        return `This command names ${match[0]}: a paper names only its own explanation and its ancestor puzzle, and a shell command is checked by name only`;
+      }
+    }
+    for (const match of input.command.matchAll(EXPLANATION_IN_COMMAND)) {
+      if (commandExplanationId(match[0]) !== ownExplanationId) {
+        return `This command names ${match[0]}: a paper names only its own explanation, and a shell command is checked by name only`;
+      }
+    }
+    const namesAncestor = puzzles.some((match) => commandPuzzleId(match[0]) === ownPuzzleId);
+    if (namesAncestor && restrictedSegments(input.command).has("reviews")) {
+      return "This command names the ancestor puzzle's reviews/: a paper reads no review of its puzzle";
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -330,6 +454,7 @@ export function siblingRefusal(
   options: { allowDerived?: boolean } = {},
 ): string | undefined {
   const dir = path.resolve(nodeDir);
+  if (isPaperNode(dir)) return paperRefusal(dir, toolName, input);
   const isPuzzle = isPuzzleNode(dir);
   if (!isPuzzle && !isExplanationNode(dir)) return undefined;
   const allowDerived = options.allowDerived ?? true;

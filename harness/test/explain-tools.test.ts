@@ -1830,6 +1830,52 @@ test("tree_create refuses an explanation under a puzzle that is not in Phase 3",
   assert.match(made.content[0]!.text, /created E02 explanation 3 ready/);
 });
 
+test("tree_create makes a paper only for the phase-4 owner, under an explanation in phase 4", async (t) => {
+  const fx = fixture(t);
+  const phase3 = captureTools(t, fx.run, 3);
+  const before = subjects(fx.run).length;
+  const early = await rejectMessage(phase3.get("tree_create")!.execute("c", { parentId: "E01", title: "Paper of crowd" }));
+  assert.match(early, /paper/, "a paper under a phase-3 explanation is refused by the phase-3 owner");
+  assert.equal(subjects(fx.run).length, before, "a refused create makes no commit");
+
+  updateNode(fx.run, "E01", { phase: 4, status: "ready" }, "owner-p3");
+  settle(fx.run);
+  const wrongOwner = await rejectMessage(phase3.get("tree_create")!.execute("c", { parentId: "E01", title: "Paper of crowd" }));
+  assert.match(wrongOwner, /Not your phase/, "the phase-3 owner no longer owns the explanation");
+
+  const phase4 = captureTools(t, fx.run, 4);
+  const made = await phase4.get("tree_create")!.execute("c", { parentId: "E01", title: "Paper of crowd" });
+  assert.match(made.content[0]!.text, /^created W01 paper 4 ready paper-of-crowd$/);
+});
+
+test("tree_update refuses a paper's submitted status and any phase change, naming submit_paper", async (t) => {
+  const fx = fixture(t);
+  updateNode(fx.run, "E01", { phase: 4, status: "ready" }, "owner-p3");
+  settle(fx.run);
+  const phase4 = captureTools(t, fx.run, 4);
+  await phase4.get("tree_create")!.execute("c", { parentId: "E01", title: "Paper of crowd" });
+  const update = (params: Record<string, unknown>) => phase4.get("tree_update")!.execute("c", { nodeId: "W01", ...params });
+  assert.match(await rejectMessage(update({ status: "submitted" })), /use submit_paper/);
+  assert.match(await rejectMessage(update({ phase: 5 })), /use submit_paper/);
+  assert.match(await rejectMessage(update({ status: "ready", phase: 5 })), /use submit_paper/);
+  const active = await update({ status: "active" });
+  assert.match(active.content[0]!.text, /^updated W01 paper 4 active paper-of-crowd$/);
+});
+
+test("tree_update of an explanation in phase 4 sets input, active and closed, and still refuses submitted and a phase change", async (t) => {
+  const fx = fixture(t);
+  updateNode(fx.run, "E01", { phase: 4, status: "ready" }, "owner-p3");
+  settle(fx.run);
+  const phase4 = captureTools(t, fx.run, 4);
+  const update = (params: Record<string, unknown>) => phase4.get("tree_update")!.execute("c", { nodeId: "E01", ...params });
+  assert.match(await rejectMessage(update({ status: "submitted" })), /use submit/);
+  assert.match(await rejectMessage(update({ phase: 5 })), /use submit/);
+  for (const status of ["input", "active", "closed"]) {
+    const done = await update({ status });
+    assert.match(done.content[0]!.text, new RegExp(`^updated E01 explanation 4 ${status} `), status);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // The owner never reads the dataset or the hold-out (phases 3 and 4)
 // ---------------------------------------------------------------------------

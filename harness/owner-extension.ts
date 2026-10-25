@@ -274,12 +274,19 @@ export default function ownerExtension(pi: PiLike): void {
       const nodePhase = createPhase(parent, params.type);
       if (nodePhase !== phase) throw refuseNotYourPhase(nodePhase, phase);
       // An explanation belongs to a promoted puzzle: a puzzle still in Phase 2 has not passed `promote`'s gates.
-      if (parent.type === "puzzle" && (params.type ?? CHILD_TYPE[parent.type]) === "explanation" && parent.phase !== 3) {
+      const childType = params.type ?? CHILD_TYPE[parent.type];
+      if (parent.type === "puzzle" && childType === "explanation" && parent.phase !== 3) {
         throw new Error(`${parent.id} is in Phase ${parent.phase}, not Phase 3: explanations are created only under puzzles that promote has moved to Phase 3`);
+      }
+      // A paper is the Phase 4 writer's node: only the phase-4 owner makes one, under an explanation that submit has handed on.
+      if (childType === "paper") {
+        if (phase !== 4) throw new Error(`Not your phase: a paper is made by the phase-4 owner, and you own P${phase}`);
+        if (parent.phase !== 4) {
+          throw new Error(`${parent.id} is in Phase ${parent.phase}, not Phase 4: papers are created only under explanations that submit has moved to Phase 4`);
+        }
       }
       // The child's resolved type decides whether this is evolution; only a
       // puzzle with a derivedFrom is a child of the tournament.
-      const childType = params.type ?? CHILD_TYPE[parent.type];
       const derivedFrom = params.derivedFrom ?? [];
       if (childType === "puzzle" && derivedFrom.length > 0) refuseEvolvedAfterStop(dir);
       const node = createChild(dir, params.parentId, params.title, actor(phase), derivedFrom, params.type);
@@ -313,6 +320,13 @@ export default function ownerExtension(pi: PiLike): void {
         (params.status === "submitted" || (params.phase !== undefined && params.phase !== found.phase))
       ) {
         throw new Error("use submit: an explanation reaches Phase 4 only through the gated submit tool");
+      }
+      // And a paper reaches Phase 5 only through `submit_paper`, which runs the end checks.
+      if (
+        found.type === "paper" &&
+        (params.status === "submitted" || (params.phase !== undefined && params.phase !== found.phase))
+      ) {
+        throw new Error("use submit_paper: a paper reaches Phase 5 only through the gated submit_paper tool");
       }
       const node = updateNode(dir, params.nodeId, { status: params.status, phase: params.phase }, actor(phase), params.note);
       return result(`updated ${line(node)}`);

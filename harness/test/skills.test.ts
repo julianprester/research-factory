@@ -457,12 +457,13 @@ test("phase-1 and its roles only point at harness/tools files that exist", () =>
   for (const file of named) assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
 });
 
-test("DEFAULT_CONFIG configures Phases 0 to 3", () => {
+test("DEFAULT_CONFIG configures Phases 0 to 4", () => {
   assert.deepEqual(DEFAULT_CONFIG.phases, {
     "0": "harness/skills/phase-0",
     "1": "harness/skills/phase-1",
     "2": "harness/skills/phase-2",
     "3": "harness/skills/phase-3",
+    "4": "harness/skills/phase-4",
   });
   for (const [phase, skill] of Object.entries(DEFAULT_CONFIG.phases)) {
     assert.ok(existsSync(path.join(HARNESS_ROOT, skill, "SKILL.md")), `phase ${phase}'s skill ${skill} exists`);

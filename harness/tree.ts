@@ -40,8 +40,7 @@ export const CHILD_TYPES: Record<string, string[]> = {
   dataset: ["pattern", "prep"],
   pattern: ["puzzle"],
   puzzle: ["explanation"],
-  explanation: ["framing"],
-  framing: ["paper"],
+  explanation: ["paper"],
 };
 
 /**

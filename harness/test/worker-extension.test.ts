@@ -235,6 +235,55 @@ test("findNodeDir passes over an explanation's task folders, so a stray node.jso
   assert.equal(findNodeDir(path.join(puzzle, "workspace")), puzzle, "a puzzle node is found as before");
 });
 
+/** The explanation of `explanationNode`, handed on to Phase 4 with its paper W01; returns the paper's folder. */
+function paperNode(t: TestContext): string {
+  const run = findRunDir(explanationNode(t));
+  assert.ok(run, "the explanation sits in a run");
+  updateNode(run, "E01", { phase: 4, status: "ready" }, "owner-p3");
+  createChild(run, "E01", "Paper of crowd", "owner-p4", [], "paper");
+  return findNode(run, "W01").dir;
+}
+
+test("a paper worker writes its lane only, and no node.json anywhere under its workspace", (t) => {
+  const paper = paperNode(t);
+  const handlers = new Map<string, (event: { toolName: string; input?: { path?: unknown } }) => { block?: boolean; reason?: string } | undefined>();
+  workerExtension({
+    registerTool() {},
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+  });
+  const guard = handlers.get("tool_call");
+  assert.ok(guard, "the worker registers a tool_call handler");
+  const write = (filePath: string) => guard({ toolName: "write", input: { path: filePath } });
+
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+  process.chdir(paper);
+  for (const relPath of ["workspace/paper.qmd", "workspace/outline.md", "workspace/reopen-request.md", "workspace/embeds/diagrams/theory.yml", "rounds.md", "handoff.md"]) {
+    assert.equal(write(relPath), undefined, `${relPath} is in the lane`);
+  }
+  for (const relPath of ["workspace/_variables.yml", "workspace/embeds/quotes/Q01.qmd", "workspace/embeds/tables/x.qmd", "workspace/checks/result.json", "workspace/references.bib", "workspace/node.json", "node.json"]) {
+    const blocked = write(relPath);
+    assert.equal(blocked?.block, true, `${relPath} is outside the lane`);
+    assert.match(blocked?.reason ?? "", /may only write workspace\/paper\.qmd/);
+  }
+  assert.equal(write("../W02-x/workspace/paper.qmd")?.block, true, "a sibling paper");
+  assert.equal(write("../../workspace/argument.md")?.block, true, "the parent explanation's argument, reached through ..");
+});
+
+test("findNodeDir passes over a paper's workspace, so a stray node.json there cannot redirect the guards", (t) => {
+  const paper = paperNode(t);
+  const stray = '{"phase":1,"status":"ready"}\n';
+  mkdirSync(path.join(paper, "workspace", "embeds", "diagrams"), { recursive: true });
+  writeFileSync(path.join(paper, "workspace", "node.json"), stray);
+  writeFileSync(path.join(paper, "workspace", "embeds", "node.json"), stray);
+
+  assert.equal(findNodeDir(path.join(paper, "workspace")), paper, "the workspace's stray node.json is skipped");
+  assert.equal(findNodeDir(path.join(paper, "workspace", "embeds", "diagrams")), paper, "at any depth");
+  assert.equal(findNodeDir(paper), paper, "the paper folder itself");
+});
+
 test("findNodeDir still finds a run whose own folder is named tasks", (t) => {
   const base = mkdtempSync(path.join(tmpdir(), "ctc-tasks-named-"));
   t.after(() => rmSync(base, { recursive: true, force: true }));
