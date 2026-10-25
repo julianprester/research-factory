@@ -366,6 +366,23 @@ test("run_analysis refuses another task's script and any script name that is not
   assert.equal(calls.length, 0, "no container was started");
 });
 
+test("run_analysis runs a reopen task's own script, and refuses another reopen task's", async (t) => {
+  const explanation = analysisNode(t);
+  const task = path.join(explanation, "tasks", "R1A");
+  mkdirSync(task, { recursive: true });
+  mkdirSync(path.join(explanation, "workspace", "scripts"), { recursive: true });
+  writeFileSync(path.join(explanation, "workspace", "scripts", "R1A_01.R"), "cat('x')\n");
+  enter(t, task);
+
+  const { exec, calls } = recordingExec();
+  const tool = runAnalysisTool(t, exec);
+  await assert.rejects(() => tool.execute("call-1", { script: "R1B_01.R" }), /may run only its own R1A_nn\.R/);
+  assert.equal(calls.length, 0, "no container was started for another task's script");
+  await tool.execute("call-2", { script: "R1A_01.R" });
+  assert.equal(calls.length, 1, "one container run");
+  assert.equal(calls[0]?.args.at(-1), "scripts/R1A_01.R");
+});
+
 test("run_analysis refuses in a literature task", async (t) => {
   const explanation = analysisNode(t);
   const task = path.join(explanation, "tasks", "lit-01");

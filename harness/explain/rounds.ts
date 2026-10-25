@@ -31,6 +31,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { maskFences, normaliseHeading } from "../tools/check-puzzle.ts";
+import { ANALYSIS_TASK } from "./names.ts";
 
 /** Rounds after which the loop stops whether or not it is still changing (the config's default). */
 export const ROUND_CAP = 6;
@@ -96,10 +97,10 @@ const TASK_LINE = /^###\s+Task\s+([^:\s]*)\s*:\s*(\S.*?)\s*$/i;
 /**
  * A round plan: its questions and its tasks. Headings are the `##` sections
  * `Questions` and `Tasks` (case, emphasis and a trailing colon bend), and each
- * task is a `### Task <L>: <aim>` heading inside `## Tasks`, `L` one capital
- * letter. Fenced code is not structure. Null when either section is missing, a
- * task heading is not of that form, or no task is listed. A repeated letter is
- * returned as written: `open_round` names it.
+ * task is a `### Task <L>: <aim>` heading inside `## Tasks`, `L` an analysis task name:
+ * one capital letter, or a reopen task `R<n><L>`. Fenced code is not structure. Null
+ * when either section is missing, a task heading is not of that form, or no task is
+ * listed. A repeated letter is returned as written: `open_round` names it.
  */
 export function parsePlan(markdown: string): { questions: string; tasks: { letter: string; aim: string }[] } | null {
   const lines = markdown.split(/\r?\n/);
@@ -121,7 +122,7 @@ export function parsePlan(markdown: string): { questions: string; tasks: { lette
     if (section === "tasks" && TASK_HEADING.test(line)) {
       const task = TASK_LINE.exec(line);
       const letter = task?.[1] ?? "";
-      if (task === null || !/^[A-Z]$/.test(letter)) return null;
+      if (task === null || !ANALYSIS_TASK.test(letter)) return null;
       tasks.push({ letter, aim: task[2] ?? "" });
     }
   }

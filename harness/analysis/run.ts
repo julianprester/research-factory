@@ -9,6 +9,7 @@ import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import { ANALYSIS_SCRIPT } from "../explain/names.ts";
 import { commitFile, readRun } from "../tree.ts";
 
 /** One container run's outcome; `timedOut` is set when the time limit killed it. */
@@ -25,8 +26,6 @@ const MAX_BUFFER = 64 * 1024 * 1024;
 /** How long `docker kill` may take on a timed-out container. */
 const KILL_TIMEOUT_MS = 30_000;
 const OUTPUT_DIRS = ["numbers", "tables", "figures", "logs", "assets"];
-/** `B_01.R`-style task scripts and the shared `assets` script, in R or Python. */
-const SCRIPT_NAME = /^(?:[A-Z]_\d\d|assets)\.(?:R|py)$/;
 const INTERPRETERS = new Map([
   [".R", "Rscript"],
   [".py", "python3"],
@@ -296,7 +295,7 @@ export async function runScript(o: {
   timeoutMs: number;
   exec?: Exec;
 }): Promise<ScriptResult> {
-  if (!SCRIPT_NAME.test(o.script)) {
+  if (!ANALYSIS_SCRIPT.test(o.script)) {
     throw new Error(`"${o.script}" is not an analysis script name (X_nn.R|py, or assets.R|py)`);
   }
   const node = path.resolve(o.nodeDir);

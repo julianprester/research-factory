@@ -36,6 +36,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import { greatestTask, LIT_TASK, scriptTask, TASK_NAME } from "./explain/names.ts";
 import { CHILD_DIR } from "./tree.ts";
 
 /** Folders that hold node directories, one per child type in tree.ts. */
@@ -50,20 +51,11 @@ const EXPLANATIONS_DIR = CHILD_DIR.explanation;
 /** An explanation folder name: `E<nn>-<slug>`. */
 const EXPLANATION_FOLDER = /^E\d+-/;
 
-/** A task folder name under an explanation: a letter (`A`) or a literature task (`lit-02`). */
-const TASK_NAME = /^(?:[A-Z]|lit-\d\d)$/;
-
-/** A letter task's script `<L>_<nn>.R` or `.py`: its letter, then two digits. */
-const TASK_SCRIPT = /^([A-Z])_\d\d\.(?:R|py)$/;
-
-/** The shared scripts: only the greatest-lettered task folder may write them (`assetsOwner`). */
+/** The shared scripts: only the greatest analysis task folder may write them (`assetsOwner`). */
 const SHARED_SCRIPTS = new Set(["assets.R", "assets.py"]);
 
 /** The node-state file `findNodeDir` looks for; no task may write one, so no task can make itself a node. */
 const NODE_STATE_FILE = "node.json";
-
-/** A literature task `lit-<nn>` writes the report `workspace/reports/<nn>.md`. */
-const LIT_TASK = /^lit-(\d\d)$/;
 
 /** The `owners/phase-<n>/` subfolders the owner's write tool may not touch: the records the tools trust. */
 const PROTECTED_OWNER_DIRS = new Set(["tournament", "loop"]);
@@ -111,7 +103,7 @@ export function reviewerMayWrite(nodeDir: string, absPath: string): boolean {
 
 /**
  * The task a worker session is in: the `tasks/<name>` segment of `cwd` under
- * `nodeDir`, when `<name>` is a letter or `lit-<nn>`. The node folder itself, or
+ * `nodeDir`, when `<name>` is a task name (`A`, `R1A` or `lit-<nn>`). The node folder itself, or
  * a `tasks/` folder with no task under it, has none.
  */
 export function taskOf(nodeDir: string, cwd: string): string | undefined {
@@ -123,29 +115,30 @@ export function taskOf(nodeDir: string, cwd: string): string | undefined {
 }
 
 /**
- * The letter task that owns the shared `assets.R|.py`: the greatest single-capital
- * `tasks/<L>` folder under the node, or undefined when there is none. `lit-NN`
- * folders and any other name are ignored, and the list is read from disk each
- * time, so the owner is whatever folders exist when the write is checked.
+ * The analysis task that owns the shared `assets.R|.py`: the greatest `tasks/<name>`
+ * folder under the node (`greatestTask`: a reopen task `R<n><L>` beats every plain
+ * letter), or undefined when there is none. `lit-NN` folders and any other name are
+ * ignored, and the list is read from disk each time, so the owner is whatever folders
+ * exist when the write is checked.
  */
 function assetsOwner(nodeDir: string): string | undefined {
   let names: string[];
   try {
     names = fs
       .readdirSync(path.join(nodeDir, "tasks"), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && /^[A-Z]$/.test(entry.name))
+      .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name);
   } catch {
     return undefined;
   }
-  return names.sort().at(-1);
+  return greatestTask(names);
 }
 
 /**
  * True only for what an explanation worker of `task` may write: its task folder
- * (`tasks/<task>/**`, but never a `node.json` in it), and for a letter task its
+ * (`tasks/<task>/**`, but never a `node.json` in it), and for an analysis task its
  * own scripts (`workspace/scripts/<task>_<nn>.R|.py`) and, only when it is the
- * greatest-lettered task, the shared `assets.R|.py`; for a literature task
+ * greatest analysis task, the shared `assets.R|.py`; for a literature task
  * `lit-<nn>` its report `workspace/reports/<nn>.md`. The argument, `archive/`,
  * `output/`, another round's report and another task are not theirs.
  */
@@ -160,7 +153,7 @@ export function explanationWorkerMayWrite(nodeDir: string, task: string, absPath
   if (parts.length !== 3 || parts[0] !== "workspace" || parts[1] !== "scripts") return false;
   const name = parts[2] ?? "";
   if (SHARED_SCRIPTS.has(name)) return assetsOwner(nodeDir) === task;
-  return TASK_SCRIPT.exec(name)?.[1] === task;
+  return scriptTask(name) === task;
 }
 
 /**

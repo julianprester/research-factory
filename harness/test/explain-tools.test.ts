@@ -26,7 +26,7 @@ import {
   submit,
 } from "../explain/tools.ts";
 import ownerExtension from "../owner-extension.ts";
-import { ownerMayWrite } from "../guard.ts";
+import { explanationWorkerMayWrite, ownerMayWrite } from "../guard.ts";
 import { createChild, updateNode } from "../tree.ts";
 import {
   ARGUMENT,
@@ -1453,4 +1453,49 @@ test("a phase-3 owner's guard fails closed when the run's dataset cannot be read
   // write/edit are unchanged: the write guard still decides on its own.
   assert.equal(guard("write", { path: path.join(fx.run, "owners", "phase-3", "ledger.md") }), undefined);
   assert.equal(guard("write", { path: path.join(fx.node, "workspace", "scripts", "A_01.R") })?.block, true);
+});
+
+// ---------------------------------------------------------------------------
+// E01's real shape: the Phase 3 run's E01 loop, six rounds of plain letters A-V
+// ---------------------------------------------------------------------------
+
+/** Writes E01's loop as the Phase 3 run left it: rounds of plain letters, `stopped` putting the cap on round 6, and tasks/ holding A-V and lit-NN. */
+function eOneShape(fx: Fixture, stopped: boolean): void {
+  const groups = ["ABCD", "EFGH", "IJKL", "MNOP", "QRS", "TUV"];
+  const rounds = groups.map((group, index) => ({
+    round: index + 1,
+    changed: true,
+    argumentSha: "c".repeat(64),
+    summary: `round ${index + 1}`,
+    letters: [...group],
+    ...(stopped && index === groups.length - 1 ? { stop: "cap" } : {}),
+  }));
+  write(path.join(loopDir(fx.run, "E01"), "rounds.json"), JSON.stringify(rounds, null, 2));
+  for (const name of [..."ABCDEFGHIJKLMNOPQRSTUV", "lit-01", "lit-06", "lit-51"]) {
+    write(path.join(fx.node, "tasks", name, "handoff.md"), "Status: DONE\n");
+  }
+  settle(fx.run);
+}
+
+test("E01's real shape: the recorded cap stop still refuses round 7, and the letters A-V are all used", async (t) => {
+  const fx = fixture(t);
+  eOneShape(fx, true);
+  assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("W") })), /STOP recorded \(cap\)/);
+  assert.equal(existsSync(path.join(fx.node, "rounds", "07")), false, "a refused round writes nothing");
+});
+
+test("E01's real shape with the loop open: a used letter is refused, W opens round 7, and assets belong to V", async (t) => {
+  const fx = fixture(t, { roundCap: 20 });
+  eOneShape(fx, false);
+  assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("B") })), /letter B was used in round 1/);
+  const may = (task: string, relPath: string) => explanationWorkerMayWrite(fx.node, task, path.join(fx.node, relPath));
+  assert.equal(may("V", "workspace/scripts/assets.R"), true, "V is the greatest plain letter of the shape");
+  assert.equal(may("U", "workspace/scripts/assets.R"), false);
+  assert.equal(may("lit-51", "workspace/scripts/assets.R"), false, "lit-NN folders never own the assets");
+  assert.equal(may("V", "workspace/scripts/V_01.R"), true);
+
+  // Opening W creates tasks/W, which then holds the assets.
+  assert.match(await openRound(fx.run, { nodeId: "E01", plan: plan("W") }), /round 7\b/);
+  assert.equal(may("W", "workspace/scripts/assets.R"), true);
+  assert.equal(may("V", "workspace/scripts/assets.R"), false);
 });

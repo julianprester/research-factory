@@ -211,3 +211,13 @@ test("writeAtomic does not write through a link planted at the old predictable t
   writeAtomic(file, "text");
   assert.equal(readFileSync(file, "utf8"), "text");
 });
+
+test("parsePlan accepts a reopen task heading, and reads its letter from the R<n><L> form", () => {
+  const plan = parsePlan("## Questions\nWhy?\n\n## Tasks\n\n### Task R1A: reopen aim\n### Task R12C: another\n");
+  assert.deepEqual(plan?.tasks, [
+    { letter: "R1A", aim: "reopen aim" },
+    { letter: "R12C", aim: "another" },
+  ]);
+  assert.equal(parsePlan("## Questions\nWhy?\n\n## Tasks\n\n### Task R1: no letter\n"), null, "a reopen number with no letter");
+  assert.equal(parsePlan("## Questions\nWhy?\n\n## Tasks\n\n### Task R1a: lowercase\n"), null, "a lowercase letter after digits");
+});

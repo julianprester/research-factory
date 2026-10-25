@@ -827,3 +827,19 @@ test("F1 and F10 are different findings: a ruling for one does not rule the othe
   assert.deepEqual(checkRevision(findings, "F10: taken — changed\n"), ["revision.md has no ruling for F1"]);
   assert.deepEqual(checkRevision(findings, "F1: taken — changed\n"), ["revision.md has no ruling for F10"]);
 });
+
+test("check-argument accepts a reopen task's script name, and warns about its unlinked registry as it does a plain letter's", (t) => {
+  const fixture = nodeFixture(t);
+  write(path.join(fixture.nodeDir, "workspace/scripts/R1A_01.R"), "# reopen\n");
+  write(path.join(fixture.nodeDir, "workspace/output/numbers/R1A_01.csv"), "name,value,note\nx,5,\n");
+  const result = checkArgument(fixture.run, fixture.nodeDir, NO_CITATIONS);
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.warnings.length, 1, result.warnings.join("\n"));
+  assert.match(result.warnings[0] ?? "", /workspace\/scripts\/R1A_01\.R/);
+});
+
+test("check-argument still refuses a reopen-looking name with one digit", (t) => {
+  const fixture = nodeFixture(t);
+  write(path.join(fixture.nodeDir, "workspace/scripts/R1A_1.R"), "# bad\n");
+  assert.deepEqual(problemsOf(fixture), ["workspace/scripts/R1A_1.R is not a script name (X_nn.R, X_nn.py, assets.R or assets.py)"]);
+});

@@ -10,6 +10,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { type Exec, runScript, workspaceOf } from "../analysis/run.ts";
+import { ANALYSIS_SCRIPT, compareTasks, scriptTask } from "./names.ts";
+
+export { ANALYSIS_SCRIPT };
 
 export interface Row {
   name: string;
@@ -29,8 +32,6 @@ interface Entry {
   file: string;
 }
 
-/** The analysis script names runScript accepts: `X_nn.R|py` or `assets.R|py`. */
-export const ANALYSIS_SCRIPT = /^(?:[A-Z]_\d\d|assets)\.(?:R|py)$/;
 const INTEGER = /^[+-]?\d+$/;
 const NUMBER = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
 
@@ -240,20 +241,25 @@ function readAsset(output: string, name: string): Buffer | undefined {
   return readRegularFile(file);
 }
 
-/** The order scripts run in: letter, then number, with `assets.*` last. */
+/**
+ * The order scripts run in: the task (plain letters, then reopen tasks, see `compareTasks`), then the
+ * number, with `assets.*` and any other name last.
+ */
 export function scriptOrder(files: string[]): string[] {
   return [...files].sort((x, y) => {
     const a = orderOf(x);
     const b = orderOf(y);
-    return a.group - b.group || compareText(a.letter, b.letter) || a.number - b.number || compareText(a.file, b.file);
+    if (a.task === undefined || b.task === undefined) {
+      return Number(a.task === undefined) - Number(b.task === undefined) || compareText(a.file, b.file);
+    }
+    return compareTasks(a.task, b.task) || a.number - b.number || compareText(a.file, b.file);
   });
 }
 
-function orderOf(file: string): { group: number; letter: string; number: number; file: string } {
-  if (file.startsWith("assets.")) return { group: 1, letter: "", number: 0, file };
-  const match = /^([A-Za-z])_(\d+)/.exec(file);
-  if (match === null) return { group: 0, letter: "", number: 0, file };
-  return { group: 0, letter: match[1] ?? "", number: Number(match[2]), file };
+function orderOf(file: string): { task: string | undefined; number: number; file: string } {
+  const task = scriptTask(file);
+  if (task === undefined) return { task: undefined, number: 0, file };
+  return { task, number: Number(/_(\d+)\./.exec(file)?.[1] ?? 0), file };
 }
 
 /**

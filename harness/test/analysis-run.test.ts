@@ -294,6 +294,15 @@ test("runScript accepts assets scripts in either language", async (t) => {
   assert.deepEqual(calls.map((call) => call.args.at(-1)), ["scripts/assets.R", "scripts/assets.py"]);
 });
 
+test("runScript accepts a reopen task's script, and refuses a reopen name with one digit", async (t) => {
+  const { runDir } = makeRun(t);
+  const nodeDir = makeNode(runDir, ["R1A_01.R", "R1A_1.R"]);
+  const { exec, calls } = fakeExec();
+  await runScript({ runDir, nodeDir, script: "R1A_01.R", image: "img", timeoutMs: 1000, exec });
+  assert.deepEqual(calls.map((call) => call.args.at(-1)), ["scripts/R1A_01.R"]);
+  await assert.rejects(runScript({ runDir, nodeDir, image: "img", timeoutMs: 1000, exec, script: "R1A_1.R" }), /not an analysis script name/);
+});
+
 test("runScript refuses a script name outside the convention, or one that does not exist", async (t) => {
   const { runDir } = makeRun(t);
   const nodeDir = makeNode(runDir, ["B_1.R"]);

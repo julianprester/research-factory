@@ -1321,3 +1321,17 @@ test("assets belong to the only letter task, and a literature task never writes 
   assert.equal(may("A", "workspace/scripts/assets.R"), true, "A is the only letter task");
   assert.equal(may("lit-01", "workspace/scripts/assets.py"), false, "lit-01 beside A");
 });
+
+test("a reopen task writes its own scripts only, and the greatest task (a reopen one beats any plain letter) owns the assets", (t) => {
+  const { explanation } = explanationRun(t);
+  const may = (task: string, relPath: string) => explanationWorkerMayWrite(explanation, task, path.join(explanation, relPath));
+  for (const task of ["V", "R1A"]) mkdirSync(path.join(explanation, "tasks", task), { recursive: true });
+  assert.equal(may("R1A", "tasks/R1A/handoff.md"), true);
+  assert.equal(may("R1A", "workspace/scripts/R1A_01.R"), true);
+  assert.equal(may("R1A", "workspace/scripts/R1B_01.R"), false, "another reopen task's script");
+  assert.equal(may("R1A", "workspace/scripts/V_01.R"), false, "a plain letter's script");
+  assert.equal(may("R1A", "workspace/scripts/assets.R"), true, "R1A is above V");
+  assert.equal(may("V", "workspace/scripts/assets.R"), false, "V is below R1A");
+  assert.equal(may("V", "workspace/scripts/V_01.R"), true);
+  assert.equal(may("R1A", "workspace/scripts/R1A_1.R"), false, "the script number has two digits");
+});

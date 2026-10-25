@@ -53,7 +53,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { ANALYSIS_SCRIPT, parseCsv, readRegistry, type Row } from "../explain/reproduce.ts";
+import { ANALYSIS_SCRIPT, scriptTask } from "../explain/names.ts";
+import { parseCsv, readRegistry, type Row } from "../explain/reproduce.ts";
 import { findRunDir } from "../tree.ts";
 import { citationProblems, headerValue, maskFences, normaliseHeading, SECTION_HEADING } from "./check-puzzle.ts";
 
@@ -662,7 +663,7 @@ function unlinkedScriptWarnings(node: string, scripts: Found, links: { target: s
   if (scripts.kind !== "folder") return [];
   const stems = fs
     .readdirSync(scripts.dir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && /^[A-Z]_\d\d\.(?:R|py)$/.test(entry.name))
+    .filter((entry) => entry.isFile() && scriptTask(entry.name) !== undefined)
     .sort(byName)
     .map((entry) => ({ script: entry.name, stem: entry.name.replace(/\.[^.]+$/, "") }))
     .filter(({ stem }) => locate(node, `workspace/output/numbers/${stem}.csv`).kind === "file");

@@ -69,7 +69,8 @@ import { readConfig } from "../launch.ts";
 import { commitFiles, findNode, updateNode, type NodeRef } from "../tree.ts";
 import { argumentLinks, checkArgument, checkRevision, parseReport } from "../tools/check-argument.ts";
 import { maskFences, normaliseHeading } from "../tools/check-puzzle.ts";
-import { ANALYSIS_SCRIPT, reproduceWorkspace, workspaceHash } from "./reproduce.ts";
+import { ANALYSIS_SCRIPT, compareTasks, greatestTask } from "./names.ts";
+import { reproduceWorkspace, workspaceHash } from "./reproduce.ts";
 import {
   appendRound,
   argumentSha,
@@ -253,12 +254,12 @@ export async function openRound(runDir: string, input: OpenRoundInput): Promise<
   const tasks = requireFolderOrAbsent(node.dir, "tasks");
   // A folder that holds nothing but the owner's `brief.md` was made before the round: it is not a use of the letter.
   const used = tasks === "absent" ? [] : fs.readdirSync(path.join(node.dir, "tasks")).filter((name) => !isBriefOnly(node.dir, name));
-  const greatest = [...history.flatMap((record) => record.letters), ...used.filter((name) => /^[A-Z]$/.test(name))].sort().pop();
+  const greatest = greatestTask([...history.flatMap((record) => record.letters), ...used]);
   for (const { letter } of plan.tasks) {
     const earlier = history.find((record) => record.letters.includes(letter));
     if (earlier !== undefined) throw new Error(`letter ${letter} was used in round ${earlier.round}: a letter is never reused`);
     if (used.includes(letter)) throw new Error(`letter ${letter} already has a folder in tasks/: a letter is never reused`);
-    if (greatest !== undefined && letter <= greatest) {
+    if (greatest !== undefined && compareTasks(letter, greatest) <= 0) {
       throw new Error(`letter ${letter} is not above the greatest letter already used (${greatest}): letters only go up, so the assets task keeps the highest`);
     }
   }

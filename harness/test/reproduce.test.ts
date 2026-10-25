@@ -295,6 +295,11 @@ test("scriptOrder sorts by letter, then number, with assets last", () => {
   assert.deepEqual(scriptOrder(["B_01.R", "A_02.py", "assets.R", "A_01.R"]), ["A_01.R", "A_02.py", "B_01.R", "assets.R"]);
 });
 
+test("scriptOrder runs plain letters, then reopen tasks by number and letter, then assets", () => {
+  assert.deepEqual(scriptOrder(["assets.R", "R1A_01.R", "V_02.R", "A_01.R", "R2A_01.R"]), ["A_01.R", "V_02.R", "R1A_01.R", "R2A_01.R", "assets.R"]);
+  assert.deepEqual(scriptOrder(["R12A_01.R", "R9A_02.R", "R9A_01.R"]), ["R9A_01.R", "R9A_02.R", "R12A_01.R"]);
+});
+
 test("reproduceWorkspace: a deterministic workspace reproduces (ok true) and runs in a scratch folder", async (t) => {
   const runDir = makeRun(t);
   const scripts = ["A_01.R", "B_01.R"];

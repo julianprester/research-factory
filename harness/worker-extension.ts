@@ -22,6 +22,7 @@ import * as path from "node:path";
 import { Type } from "typebox";
 
 import { realExec, runScript, type Exec } from "./analysis/run.ts";
+import { ANALYSIS_TASK } from "./explain/names.ts";
 import { readConfig } from "./launch.ts";
 import {
   datasetRefusal,
@@ -201,7 +202,7 @@ export default function workerExtension(pi: PiLike): void {
       if (task === undefined) {
         throw new Error(`Refusing to run an analysis: this session is not inside a task folder (tasks/<L>/ under ${nodeDir})`);
       }
-      if (!/^[A-Z]$/.test(task)) {
+      if (!ANALYSIS_TASK.test(task)) {
         throw new Error(`Refusing to run an analysis: literature task ${task} runs no scripts`);
       }
       const script = params.script;
