@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -519,4 +519,52 @@ test("run_analysis runs assets.R only for the greatest-lettered task", async (t)
   await tool.execute("call-2", { script: "assets.R" });
   assert.equal(calls.length, 1, "task B owns the shared assets script");
   assert.equal(calls[0]?.args.at(-1), "scripts/assets.R");
+});
+
+/** quote_source, registered by the worker extension (the tool's test hook is not needed: it reads only the exploration copy). */
+function quoteSourceTool(): CapturedTool {
+  const { pi, tools } = fakePi();
+  workerExtension(pi);
+  const tool = tools.get("quote_source");
+  assert.ok(tool, "the worker extension registers quote_source");
+  return tool;
+}
+
+test("the worker extension registers quote_source with path, start and end parameters", () => {
+  const tool = quoteSourceTool();
+  assert.deepEqual(Object.keys((tool.parameters as { properties: Record<string, unknown> }).properties), ["path", "start", "end"]);
+});
+
+test("quote_source refuses in an explanation node, which is not a paper", async (t) => {
+  enter(t, explanationNode(t));
+  await assert.rejects(() => quoteSourceTool().execute("call-1", { path: "handbook/rules.md", start: 1, end: 2 }), /paper nodes only/);
+});
+
+test("quote_source refuses in a pattern node, which is not a paper", async (t) => {
+  patternNode(t);
+  await assert.rejects(() => quoteSourceTool().execute("call-1", { path: "handbook/rules.md", start: 1, end: 2 }), /paper nodes only/);
+});
+
+test("quote_source refuses outside any node folder", async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ctc-quote-outside-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  enter(t, dir);
+  await assert.rejects(() => quoteSourceTool().execute("call-1", { path: "handbook/rules.md", start: 1, end: 2 }), /not inside a node folder/);
+});
+
+test("quote_source in a paper node writes the fragment and returns its include line", async (t) => {
+  const paper = paperNode(t);
+  const run = findRunDir(paper);
+  assert.ok(run, "the paper sits in a run");
+  const handbook = path.join(run, "analysis-data", "exploration", "handbook");
+  mkdirSync(handbook, { recursive: true });
+  writeFileSync(path.join(handbook, "rules.md"), "# Rules\nBe patient.\n");
+  const split = path.join(run, "prep", "Z01-profile", "workspace", "split");
+  mkdirSync(split, { recursive: true });
+  writeFileSync(path.join(split, "holdout.txt"), "");
+  enter(t, paper);
+
+  const result = await quoteSourceTool().execute("call-1", { path: "handbook/rules.md", start: 1, end: 2 });
+  assert.equal(result.content[0]?.text, "{{< include embeds/quotes/Q01.qmd >}}");
+  assert.equal(existsSync(path.join(paper, "workspace", "embeds", "quotes", "Q01.qmd")), true);
 });

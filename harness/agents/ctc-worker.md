@@ -1,7 +1,7 @@
 ---
 name: ctc-worker
 description: Carries out one research node: reads brief.md, works inside workspace/, and finishes with handoff.md.
-tools: read, write, edit, bash, preregister, run_analysis
+tools: read, write, edit, bash, preregister, run_analysis, quote_source
 extensions:
   - ./harness/worker-extension.ts
   - <pi-claude-bridge extension>

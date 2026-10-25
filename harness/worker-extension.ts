@@ -25,6 +25,7 @@ import { Type } from "typebox";
 import { realExec, runScript, type Exec } from "./analysis/run.ts";
 import { ANALYSIS_TASK } from "./explain/names.ts";
 import { readConfig } from "./launch.ts";
+import { quoteSource } from "./paper/quotes.ts";
 import {
   datasetRefusal,
   dockerRefusal,
@@ -55,6 +56,11 @@ interface PiLike {
 const PreregisterParams = Type.Object({});
 const RunAnalysisParams = Type.Object({
   script: Type.String({ description: "The script's bare file name, for example A_01.R; it runs from workspace/scripts/." }),
+});
+const QuoteSourceParams = Type.Object({
+  path: Type.String({ description: "The file's path relative to the exploration copy, for example handbook/rules.md." }),
+  start: Type.Number({ description: "The first line to quote, 1-based and inclusive." }),
+  end: Type.Number({ description: "The last line to quote, inclusive; at most 20 lines in all." }),
 });
 
 /** The last lines of a script's log that run_analysis returns to the worker. */
@@ -240,6 +246,33 @@ export default function workerExtension(pi: PiLike): void {
       return {
         content: [{ type: "text", text: `${status}\n${tail}` }],
         details: { code: run.code, timedOut: run.timedOut },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "quote_source",
+    label: "Quote handbook lines",
+    description:
+      "Quote a verbatim line range of a file in the exploration copy for the paper, as a block quotation. Give the path relative to the exploration copy and 1-based inclusive start and end lines (at most 20). Returns the include line to put in paper.qmd. Refuses hold-out files. Paper nodes only.",
+    parameters: QuoteSourceParams,
+    async execute(_toolCallId: string, params: { path: string; start: number; end: number }) {
+      const cwd = process.cwd();
+      const nodeDir = findNodeDir(cwd);
+      if (nodeDir === undefined) {
+        throw new Error(`Refusing to quote: this session is not inside a node folder (no node.json above ${cwd})`);
+      }
+      if (!isPaperNode(nodeDir)) {
+        throw new Error("Refusing to quote: quote_source is for paper nodes only");
+      }
+      const runDir = findRunDir(nodeDir);
+      if (runDir === undefined) {
+        throw new Error(`Refusing to quote: there is no .git repository above ${nodeDir}`);
+      }
+      const quote = quoteSource(runDir, nodeDir, params);
+      return {
+        content: [{ type: "text", text: quote.embed }],
+        details: { id: quote.id },
       };
     },
   });
