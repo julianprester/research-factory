@@ -103,7 +103,7 @@ const TASK_LINE = /^###\s+Task\s+([^:\s]*)\s*:\s*(\S.*?)\s*$/i;
  * A round plan: its questions and its tasks. Headings are the `##` sections
  * `Questions` and `Tasks` (case, emphasis and a trailing colon bend), and each
  * task is a `### Task <L>: <aim>` heading inside `## Tasks`, `L` an analysis task name:
- * one capital letter, or a reopen task `R<n><L>`. Fenced code is not structure. Null
+ * a plain capital letter, or a reopen task `R<n><L>`. Fenced code is not structure. Null
  * when either section is missing, a task heading is not of that form, or no task is
  * listed. A repeated letter is returned as written: `open_round` names it.
  */
@@ -191,10 +191,9 @@ function recordOf(value: unknown): RoundRecord | undefined {
  * `reopenRounds` cannot un-latch it; a `stop` the record brings must be the reason the loop decides.
  *
  * It reads `reopens.json` itself, through the same no-follow reader, and refuses what the file rules out: an
- * original round once any reopen is recorded, and a reopen-`n` round whose entry `n` is not recorded. It does
- * not decide whether a loop may take a round beyond its own stop: the caller consults `currentLoop` for the
- * loop's decision, and `appendReopen` enforces `maxReopens`. `reopenRounds` is the config's default
- * (`reopen.ts`'s `REOPEN_ROUNDS`). Written atomically.
+ * original round once any reopen is recorded, and a reopen-`n` round whose entry `n` is not recorded.
+ * The caller consults `currentLoop` for the decision it reports; `appendReopen` enforces `maxReopens`.
+ * `reopenRounds` is the config's default (`reopen.ts`'s `REOPEN_ROUNDS`). Written atomically.
  */
 export function appendRound(
   runDir: string,

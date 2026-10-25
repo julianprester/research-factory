@@ -5,18 +5,21 @@
 // session. Three tools live here, all for an explanation node in Phase 3:
 //
 // **`openRound`** starts a round from the owner's plan (design §6.1). The code
-// refuses a plan it cannot read, a task letter that was ever used (letters are
+// refuses a plan it cannot read, a task letter that was ever used (names are
 // unique across the node's life: earlier rounds' records and the `tasks/` folder
 // both count), a round while the previous one is open, and any round once the
-// recorded history has stopped (a STOP is a latch; the cap comes from the run's
-// config). It writes `rounds/NN/plan.md` itself - the owner's write tool cannot -
+// current loop has stopped (a STOP is a latch; the cap comes from the run's
+// config). A reopen loop (design §9) takes `R<n><L>` tasks, and a plain letter
+// is refused there; the original loop takes plain letters only. It refuses a reopen
+// past `maxReopens`. It writes `rounds/NN/plan.md` itself - the owner's write tool cannot -
 // and on round 1 snapshots the parent puzzle's `workspace/puzzle.md` and its
 // `## Phase 3 must check` list, so workers never read the ancestor puzzle, and
 // prepares the exploration split (a missing or invalid split is refused here).
-// Letters only go up: a letter that is not above every letter already recorded or
-// present in `tasks/` is refused, because the assets task owns the highest letter
-// and the reproduction runs scripts in letter order. A `tasks/<L>/` folder with
-// nothing but the owner's `brief.md` does not count as a use of `<L>`.
+// Letters only go up within a loop: a letter that is not above every letter already
+// recorded or present in `tasks/` for that loop is refused, because the assets task
+// owns the highest letter and the reproduction runs scripts in letter order. A
+// `tasks/<L>/` folder with nothing but the owner's `brief.md` does not count as a
+// use of `<L>`.
 //
 // **`closeRound`** is the verdict gate (design §6.3). It refuses unless every
 // task of the round left a handoff whose first line is `Status: DONE` or
@@ -69,8 +72,9 @@ import { readConfig } from "../launch.ts";
 import { commitFiles, findNode, updateNode, type NodeRef } from "../tree.ts";
 import { argumentLinks, checkArgument, checkRevision, parseReport } from "../tools/check-argument.ts";
 import { maskFences, normaliseHeading } from "../tools/check-puzzle.ts";
-import { ANALYSIS_SCRIPT, compareTasks, greatestTask } from "./names.ts";
+import { ANALYSIS_SCRIPT, ANALYSIS_TASK, compareTasks, greatestTask, parseTask } from "./names.ts";
 import { reproduceWorkspace, workspaceHash } from "./reproduce.ts";
+import { currentLoop, MAX_REOPENS, REOPEN_ROUNDS } from "./reopen.ts";
 import {
   appendRound,
   argumentSha,
@@ -78,6 +82,7 @@ import {
   locate,
   loopDir,
   parsePlan,
+  readReopens,
   readRegular,
   readRounds,
   ROUND_CAP,
@@ -172,6 +177,31 @@ function capOf(runDir: string): number {
   return readConfig(runDir).roundCap ?? ROUND_CAP;
 }
 
+/** The config's rounds per reopen, and its reopens per explanation (`readConfig` defaults both). */
+function reopenRoundsOf(runDir: string): number {
+  return readConfig(runDir).reopenRounds ?? REOPEN_ROUNDS;
+}
+
+function maxReopensOf(runDir: string): number {
+  return readConfig(runDir).maxReopens ?? MAX_REOPENS;
+}
+
+/** The reopen an analysis task belongs to: 0 for a plain letter, `n` for `R<n><L>`. Any other name is refused. */
+function reopenOfTask(name: string): number {
+  const parsed = parseTask(name);
+  if (parsed?.kind !== "analysis") throw new Error(`${JSON.stringify(name)} is not an analysis task`);
+  return parsed.reopen;
+}
+
+/** Why `letter` is not a task of reopen `loop`'s namespace (plain letters for loop 0, `R<loop><L>` after), or undefined when it is. */
+function namespaceProblem(letter: string, loop: number): string | undefined {
+  const reopen = reopenOfTask(letter);
+  if (reopen === loop) return undefined;
+  if (loop === 0) return `letter ${letter} belongs to reopen ${reopen}: the original loop takes plain letters, A to Z`;
+  if (reopen === 0) return `letter ${letter} is a plain letter: reopen ${loop} takes tasks named R${loop}<letter>, such as R${loop}A`;
+  return `letter ${letter} belongs to reopen ${reopen}: reopen ${loop} takes tasks named R${loop}<letter>, such as R${loop}A`;
+}
+
 /** A path under the node that must be absent or a real folder; a link or a file there is refused. */
 function requireFolderOrAbsent(node: string, rel: string): "absent" | "folder" {
   const found = locate(node, rel);
@@ -225,10 +255,17 @@ function puzzleSnapshots(runDir: string, node: NodeRef): { puzzle: Buffer; mustC
 export async function openRound(runDir: string, input: OpenRoundInput): Promise<string> {
   const node = explanationNode(runDir, input.nodeId);
   const cap = capOf(runDir);
+  const reopenRounds = reopenRoundsOf(runDir);
+  const maxReopens = maxReopensOf(runDir);
 
   const history = readRounds(runDir, node.id);
-  const stopped = stopOf(history, cap);
-  if (stopped.stop) throw new Error(`STOP recorded (${stopped.reason}): no more rounds`);
+  const reopens = readReopens(runDir, node.id);
+  // The round belongs to the current loop: loop 0 until a reopen is recorded, then the highest reopen.
+  const current = currentLoop(history, reopens, cap, reopenRounds);
+  if (current.decision.stop) throw new Error(`STOP recorded (${current.decision.reason}): no more rounds`);
+  const loop = current.reopen;
+  // appendReopen enforces this at write time; the check here is the same rule for a reopens.json written past it.
+  if (loop > maxReopens) throw new Error(`reopen ${loop} is past maxReopens (${maxReopens}): no more reopens`);
 
   const round = history.length + 1;
   const name = roundName(round);
@@ -240,7 +277,7 @@ export async function openRound(runDir: string, input: OpenRoundInput): Promise<
   const plan = parsePlan(input.plan);
   if (plan === null) {
     throw new Error(
-      "the plan does not parse: it needs a `## Questions` section and a `## Tasks` section with at least one `### Task <L>: <aim>` heading, <L> one capital letter A-Z",
+      "the plan does not parse: it needs a `## Questions` section and a `## Tasks` section with at least one `### Task <L>: <aim>` heading, <L> a plain capital letter A-Z (in a reopen loop, R<n><L>, such as R1A)",
     );
   }
   const seen = new Set<string>();
@@ -254,8 +291,15 @@ export async function openRound(runDir: string, input: OpenRoundInput): Promise<
   const tasks = requireFolderOrAbsent(node.dir, "tasks");
   // A folder that holds nothing but the owner's `brief.md` was made before the round: it is not a use of the letter.
   const used = tasks === "absent" ? [] : fs.readdirSync(path.join(node.dir, "tasks")).filter((name) => !isBriefOnly(node.dir, name));
-  const greatest = greatestTask([...history.flatMap((record) => record.letters), ...used]);
+  // Only this loop's records and folders bound its letters: a reopen's tasks sort above every plain letter and above earlier reopens.
+  const inLoop = (name: string): boolean => ANALYSIS_TASK.test(name) && reopenOfTask(name) === loop;
+  const greatest = greatestTask([
+    ...history.filter((record) => (record.reopen ?? 0) === loop).flatMap((record) => record.letters),
+    ...used.filter(inLoop),
+  ]);
   for (const { letter } of plan.tasks) {
+    const problem = namespaceProblem(letter, loop);
+    if (problem !== undefined) throw new Error(problem);
     const earlier = history.find((record) => record.letters.includes(letter));
     if (earlier !== undefined) throw new Error(`letter ${letter} was used in round ${earlier.round}: a letter is never reused`);
     if (used.includes(letter)) throw new Error(`letter ${letter} already has a folder in tasks/: a letter is never reused`);
@@ -276,7 +320,8 @@ export async function openRound(runDir: string, input: OpenRoundInput): Promise<
   writeAtomic(path.join(node.dir, ...planFile.split("/")), input.plan.endsWith("\n") ? input.plan : `${input.plan}\n`);
   for (const { letter } of plan.tasks) fs.mkdirSync(path.join(node.dir, "tasks", letter), { recursive: true });
   const committed = [planFile, ...(snapshots === undefined ? [] : ["workspace/puzzle.md", "workspace/must-check.md"])];
-  commitFiles(runDir, committed.map((rel) => runRelative(runDir, node, rel)), ACTOR, `[P3:plan] ${node.id} round ${name}`);
+  const reopenNote = loop === 0 ? "" : ` (reopen ${loop})`;
+  commitFiles(runDir, committed.map((rel) => runRelative(runDir, node, rel)), ACTOR, `[P3:plan] ${node.id} round ${name}${reopenNote}`);
   return `opened round ${round} (rounds/${name}/plan.md) with tasks ${plan.tasks.map((task) => task.letter).join(", ")}`;
 }
 
@@ -317,8 +362,12 @@ export async function closeRound(runDir: string, input: CloseRoundInput): Promis
   const summary = typeof input.summary === "string" ? input.summary.trim() : "";
   if (summary === "") throw new Error("a verdict needs a summary: what changed in the argument, or why nothing did");
   const cap = capOf(runDir);
+  const reopenRounds = reopenRoundsOf(runDir);
 
   const history = readRounds(runDir, node.id);
+  const reopens = readReopens(runDir, node.id);
+  // The open round belongs to the current loop: open_round opened it while that loop had not stopped.
+  const loop = currentLoop(history, reopens, cap, reopenRounds).reopen;
   const round = history.length + 1;
   const name = roundName(round);
   const planBytes = readRegular(node.dir, `rounds/${name}/plan.md`);
@@ -357,11 +406,14 @@ export async function closeRound(runDir: string, input: CloseRoundInput): Promis
     argumentSha: sha,
     summary,
     letters: plan.tasks.map((task) => task.letter),
+    ...(loop === 0 ? {} : { reopen: loop }),
   };
-  // The stop is stored in the record that causes it, so a later change of roundCap cannot un-latch it.
-  const stopping = decideStop([...history, record], cap);
+  // The stop is stored in the record that causes it, so a later change of roundCap cannot un-latch it. A loop's
+  // stop counts that loop's own rounds, against roundCap for loop 0 and reopenRounds for a reopen.
+  const segment = history.filter((earlier) => (earlier.reopen ?? 0) === loop);
+  const stopping = decideStop([...segment, record], loop === 0 ? cap : reopenRounds);
   if (stopping.stop) record.stop = stopping.reason;
-  appendRound(runDir, node.id, record, cap);
+  appendRound(runDir, node.id, record, cap, reopenRounds);
   commitFiles(
     runDir,
     [
@@ -373,9 +425,9 @@ export async function closeRound(runDir: string, input: CloseRoundInput): Promis
       runRelative(runDir, node, "tasks"),
     ],
     ACTOR,
-    `[P3:verdict] ${node.id} round ${name} (${input.changed})`,
+    `[P3:verdict] ${node.id} round ${name} (${input.changed}${loop === 0 ? "" : `, reopen ${loop}`})`,
   );
-  return `round ${round} closed: ${showDecision(stopOf([...history, record], cap))}`;
+  return `round ${round} closed: ${showDecision(currentLoop([...history, record], reopens, cap, reopenRounds).decision)}`;
 }
 
 /** Targets `argument.md` links to, as `workspace/`-relative paths, with the forms a percent-encoding can take. */

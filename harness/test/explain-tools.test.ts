@@ -14,7 +14,8 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { workspaceHash } from "../explain/reproduce.ts";
-import { loopDir, readRounds } from "../explain/rounds.ts";
+import { appendReopen } from "../explain/reopen.ts";
+import { loopDir, readRounds, writeAtomic } from "../explain/rounds.ts";
 import {
   archiveScript,
   closeRound,
@@ -411,6 +412,159 @@ test("close_round reads handoffs, the argument and the plan without following a 
 test("close_round's cap comes from the config", async (t) => {
   const fx = fixture(t, { roundCap: 1 });
   assert.match(await runRound(fx, 1, ["A"], "substantial"), /STOP \(cap\)/);
+});
+
+// ---------------------------------------------------------------------------
+// Reopen loops (design §9): a reopen's tasks are R<n><L>, and each loop stops on its own rounds
+// ---------------------------------------------------------------------------
+
+const REOPEN_SHA = "b".repeat(64);
+
+/** An explanation whose loop 0 ran six substantial rounds (A to F) and stopped at the cap. */
+async function cappedFixture(t: TestContext, extra: Record<string, unknown> = {}): Promise<Fixture> {
+  const fx = fixture(t, extra);
+  for (const [index, letter] of ["A", "B", "C", "D", "E", "F"].entries()) {
+    const text = await runRound(fx, index + 1, [letter], "substantial");
+    if (index === 5) assert.match(text, /STOP \(cap\)/);
+  }
+  return fx;
+}
+
+/** `cappedFixture` with reopen 1 recorded after round 6, the way the writer's reopen records it: reopen 1 is current and empty. */
+async function reopenedFixture(t: TestContext, limits: { maxReopens?: number; reopenRounds?: number } = {}): Promise<Fixture> {
+  const fx = await cappedFixture(t, limits);
+  appendReopen(fx.run, "E01", { n: 1, requestSha: REOPEN_SHA, afterRound: 6 }, limits.maxReopens ?? 2, 6, limits.reopenRounds ?? 2);
+  return fx;
+}
+
+test("open_round in reopen 1 takes R1<L> tasks: R1A opens round 7 and creates tasks/R1A/, committed as a reopen plan", async (t) => {
+  const fx = await reopenedFixture(t);
+  assert.match(await openRound(fx.run, { nodeId: "E01", plan: plan("R1A") }), /round 7\b/);
+  assert.ok(lstatSync(path.join(fx.node, "tasks", "R1A")).isDirectory());
+  assert.equal(readFileSync(path.join(fx.node, "rounds", "07", "plan.md"), "utf8"), plan("R1A"));
+  assert.equal(subjects(fx.run)[0], "[P3:plan] E01 round 07 (reopen 1)");
+});
+
+test("open_round in reopen 1 refuses a plain letter and another reopen's task, naming the namespace, and writes nothing", async (t) => {
+  const fx = await reopenedFixture(t);
+  assert.match(
+    await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("A") })),
+    /letter A is a plain letter: reopen 1 takes tasks named R1<letter>, such as R1A/,
+  );
+  assert.match(
+    await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("R2A") })),
+    /letter R2A belongs to reopen 2: reopen 1 takes tasks named R1<letter>/,
+  );
+  assert.equal(existsSync(path.join(fx.node, "rounds", "07")), false, "a refused round writes nothing");
+  const taskFolders = readdirSync(path.join(fx.node, "tasks")).filter((name) => !name.startsWith("lit-"));
+  assert.deepEqual(taskFolders.sort(), ["A", "B", "C", "D", "E", "F"], "no task folder was made");
+});
+
+test("open_round in the original loop refuses a reopen task, naming reopen 1, and writes nothing", async (t) => {
+  const fx = fixture(t);
+  assert.match(
+    await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("R1A") })),
+    /letter R1A belongs to reopen 1: the original loop takes plain letters/,
+  );
+  assert.equal(existsSync(path.join(fx.node, "rounds")), false);
+  assert.equal(existsSync(path.join(fx.node, "tasks")), false);
+});
+
+test("open_round in reopen 1 refuses R1A again once round 7 used it, accepts R1B, and needs each task above the loop's greatest", async (t) => {
+  const fx = await reopenedFixture(t);
+  assert.match(await runRound(fx, 7, ["R1C"], "substantial"), /round 7 closed: continue/);
+  assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("R1C") })), /letter R1C was used in round 7/);
+  assert.match(
+    await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("R1A") })),
+    /letter R1A is not above the greatest letter already used \(R1C\)/,
+  );
+  assert.equal(existsSync(path.join(fx.node, "rounds", "08")), false);
+
+  // A reopen task folder that holds a handoff counts as used in reopen 1, though no record names it.
+  write(path.join(fx.node, "tasks", "R1D", "handoff.md"), "Status: DONE\n");
+  assert.match(
+    await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("R1B") })),
+    /letter R1B is not above the greatest letter already used \(R1D\)/,
+  );
+  assert.match(await openRound(fx.run, { nodeId: "E01", plan: plan("R1E") }), /round 8\b/);
+});
+
+test("close_round in reopen 1 records reopen: 1 on round 7 and says so in the verdict commit", async (t) => {
+  const fx = await reopenedFixture(t);
+  await openRound(fx.run, { nodeId: "E01", plan: plan("R1A") });
+  finish(fx, 7, ["R1A"], ARGUMENT("r7"));
+  assert.match(await closeRound(fx.run, { nodeId: "E01", changed: "substantial", summary: "s" }), /round 7 closed: continue/);
+  const record = readRounds(fx.run, "E01")[6];
+  assert.equal(record?.reopen, 1);
+  assert.equal(record?.stop, undefined, "a round that does not stop its loop stores no stop");
+  assert.equal(subjects(fx.run)[0], "[P3:verdict] E01 round 07 (substantial, reopen 1)");
+});
+
+test("close_round in reopen 1 refuses substantial when the argument is unchanged since round 6, the previous round of any loop", async (t) => {
+  const fx = await reopenedFixture(t);
+  await openRound(fx.run, { nodeId: "E01", plan: plan("R1A") });
+  finish(fx, 7, ["R1A"]);
+  assert.match(
+    await rejectMessage(closeRound(fx.run, { nodeId: "E01", changed: "substantial", summary: "s" })),
+    /argument\.md is unchanged since round 6/,
+  );
+  assert.equal(readRounds(fx.run, "E01").length, 6);
+});
+
+test("two reopen 1 rounds reach reopenRounds: round 8 stops reopen 1 at cap, and open_round is refused with STOP recorded (cap)", async (t) => {
+  const fx = await reopenedFixture(t);
+  await runRound(fx, 7, ["R1A"], "substantial");
+  assert.match(await runRound(fx, 8, ["R1B"], "substantial"), /round 8 closed: STOP \(cap\)/);
+  assert.equal(readRounds(fx.run, "E01")[7]?.stop, "cap", "the reopen's stop is stored in its record");
+  assert.equal(
+    await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("R1C") })),
+    "STOP recorded (cap): no more rounds",
+  );
+  assert.equal(existsSync(path.join(fx.node, "rounds", "09")), false);
+});
+
+test("close_round in a reopen stops at reopenRounds, not at roundCap: round 9 stops reopen 1 when reopenRounds is 3", async (t) => {
+  const fx = await reopenedFixture(t, { reopenRounds: 3 });
+  assert.match(await runRound(fx, 7, ["R1A"], "substantial"), /round 7 closed: continue/);
+  assert.match(await runRound(fx, 8, ["R1B"], "substantial"), /round 8 closed: continue/);
+  assert.match(await runRound(fx, 9, ["R1C"], "substantial"), /round 9 closed: STOP \(cap\)/);
+});
+
+test("two quiet reopen 1 rounds stop reopen 1 early; its first round may be none, and open_round is refused with STOP recorded (two-quiet)", async (t) => {
+  const fx = await reopenedFixture(t);
+  assert.match(await runRound(fx, 7, ["R1A"], "none"), /round 7 closed: continue/);
+  assert.match(await runRound(fx, 8, ["R1B"], "none"), /round 8 closed: STOP \(two-quiet\)/);
+  assert.equal(subjects(fx.run)[0], "[P3:verdict] E01 round 08 (none, reopen 1)");
+  assert.equal(
+    await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("R1C") })),
+    "STOP recorded (two-quiet): no more rounds",
+  );
+});
+
+test("with no reopens.json the original STOP (cap) refuses open_round, and raising roundCap mid-run does not lift it (Review Focus 3)", async (t) => {
+  const fx = await cappedFixture(t);
+  assert.equal(existsSync(path.join(loopDir(fx.run, "E01"), "reopens.json")), false);
+  config(fx.run, { roundCap: 99 });
+  assert.equal(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("G") })), "STOP recorded (cap): no more rounds");
+  assert.equal(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("R1A") })), "STOP recorded (cap): no more rounds");
+  assert.equal(existsSync(path.join(fx.node, "rounds", "07")), false);
+});
+
+test("open_round refuses a reopen past maxReopens when reopens.json was written past it, and writes nothing", async (t) => {
+  const fx = await cappedFixture(t, { maxReopens: 1 });
+  appendReopen(fx.run, "E01", { n: 1, requestSha: REOPEN_SHA, afterRound: 6 }, 1, 6, 2);
+  await runRound(fx, 7, ["R1A"], "none");
+  await runRound(fx, 8, ["R1B"], "none");
+  // Written by hand, as a damaged or hostile file could: reopen 2 is past maxReopens (1), and reopen 1 has stopped.
+  writeAtomic(
+    path.join(loopDir(fx.run, "E01"), "reopens.json"),
+    JSON.stringify([
+      { n: 1, requestSha: REOPEN_SHA, afterRound: 6 },
+      { n: 2, requestSha: REOPEN_SHA, afterRound: 8 },
+    ]),
+  );
+  assert.match(await rejectMessage(openRound(fx.run, { nodeId: "E01", plan: plan("R2A") })), /reopen 2 is past maxReopens \(1\)/);
+  assert.equal(existsSync(path.join(fx.node, "rounds", "09")), false);
 });
 
 // ---------------------------------------------------------------------------

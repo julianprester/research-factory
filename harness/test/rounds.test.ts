@@ -311,7 +311,7 @@ test("appendRound: a loop-0 round after loop 0 stopped is refused, even with reo
   stoppedOriginal(run);
   enterReopen(run, 1, 6);
   const loopZero = (round: number): RoundRecord => ({ ...reopenRecord(round, 1, true), reopen: undefined });
-  assert.throws(() => appendRound(run, "E01", loopZero(7), 6, 2), /STOP recorded \(cap\): no more rounds/, "before any reopen");
+  assert.throws(() => appendRound(run, "E01", loopZero(7), 6, 2), /STOP recorded \(cap\): no more rounds/, "before any reopen round");
   appendRound(run, "E01", reopenRecord(7, 1, true), 6, 2);
   assert.throws(() => appendRound(run, "E01", loopZero(8), 6, 2), /STOP recorded \(cap\): no more rounds/, "after a reopen round");
   assert.equal(readRounds(run, "E01").length, 7);
