@@ -1,20 +1,10 @@
 bibliography: references.bib
 csl: apa.csl
-link-citations: true
 
 format:
   html:
     embed-resources: true
-    toc: true
-    toc-depth: 2
-    number-sections: false
-    fig-cap-location: bottom
-    tbl-cap-location: top
-  docx:
-    toc: false
-    number-sections: false
-    fig-cap-location: bottom
-    tbl-cap-location: top
+  docx: default
 
 execute:
   enabled: false

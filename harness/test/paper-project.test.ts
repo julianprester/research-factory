@@ -3,7 +3,7 @@
 // so the explanation and its paper are the nodes the tools see. Every test names the rule it pins.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -260,16 +260,33 @@ test("initPaper refuses an explanation that is not in phase 4", (t) => {
   assert.equal(existsSync(at(f.paper, "workspace/paper.qmd")), false);
 });
 
-test("the audit index is a generated list: rounds with verdicts, kept and archived scripts, review findings", (t) => {
+test("the audit index holds no prose: one line per round, plain lists of scripts and reasons, finding ids and severities", (t) => {
   const f = fixture(t);
   initPaper(f.run, f.paper);
-  const audit = read(f.paper, "audit/index.md");
-  assert.match(audit, /Round 01: Changed: substantial — The mechanism section now states the copying step\./);
-  assert.doesNotMatch(audit, /Second line/);
-  assert.match(audit, /- scripts\/A_01\.R/);
-  assert.match(audit, /- archive\/A_02: superseded by A_03/);
-  assert.match(audit, /- F1 \[major\]/);
-  assert.match(audit, /- F2 \[minor\]/);
+  assert.equal(
+    read(f.paper, "audit/index.md"),
+    [
+      "# Audit index",
+      "",
+      "## Rounds",
+      "",
+      "- round 01 | changed: yes | reopen: 0 | stop: none",
+      "",
+      "## Kept scripts",
+      "",
+      "- scripts/A_01.R",
+      "",
+      "## Archived scripts",
+      "",
+      "- archive/A_02: superseded by A_03",
+      "",
+      "## Review findings",
+      "",
+      "- F1 [major]",
+      "- F2 [minor]",
+      "",
+    ].join("\n"),
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -301,6 +318,27 @@ test("an authors file with no names keeps the visible placeholder", (t) => {
   const f = fixture(t);
   put(path.join(f.run, "authors.yml"), "# none yet\n\n");
   initPaper(f.run, f.paper);
+  assert.match(read(f.paper, "paper.qmd"), /Author names to be added/);
+});
+
+test("a linked authors file falls back to the placeholder, and the summary says so", (t) => {
+  const f = fixture(t);
+  const target = path.join(f.run, "elsewhere-authors.yml");
+  put(target, "- Ada Lovelace\n");
+  symlinkSync(target, path.join(f.run, "authors.yml"));
+  const summary = initPaper(f.run, f.paper);
+  assert.match(summary, /^warning: authors\.yml is a link: using the placeholder$/m);
+  assert.match(read(f.paper, "paper.qmd"), /Author names to be added/);
+  assert.doesNotMatch(read(f.paper, "paper.qmd"), /Ada Lovelace/);
+});
+
+test("an unreadable authors file falls back to the placeholder, and the summary says so", (t) => {
+  if (process.getuid?.() === 0) return t.skip("root reads every file");
+  const f = fixture(t);
+  put(path.join(f.run, "authors.yml"), "- Ada Lovelace\n");
+  chmodSync(path.join(f.run, "authors.yml"), 0o000);
+  const summary = initPaper(f.run, f.paper);
+  assert.match(summary, /^warning: authors\.yml cannot be read/m);
   assert.match(read(f.paper, "paper.qmd"), /Author names to be added/);
 });
 
@@ -415,6 +453,67 @@ test("repinPaper refuses until the outline changed since the reopen, and then wr
   });
 });
 
+/** The reopen of the explanation: the paper's pins take the outline as it stands, and the explanation goes back to phase 4 ready. */
+function reopenExplanation(f: Fixture): void {
+  const outlineAtReopen = sha256(read(f.paper, "outline.md"));
+  updateNode(f.run, "E01", { phase: 3, status: "ready" }, "owner-p4");
+  updateNode(f.run, "E01", { phase: 4, status: "ready" }, "owner-p3");
+  put(at(f.paper, "workspace/checks/pins.json"), JSON.stringify({ ...JSON.parse(read(f.paper, "checks/pins.json")), reopens: 1, outlineShaAtReopen: outlineAtReopen }, null, 2));
+  put(at(f.paper, "workspace/outline.md"), "# Outline\n\n## Sections\nRevised.\n\n## Omitted\n\n## Needs\n");
+}
+
+/** The problems check-paper gives for the paper's generated copies (the copies of the explanation's assets, tables and figures). */
+function copyProblemsOf(problems: string[]): string[] {
+  return problems.filter((line) => /(differs from|has no counterpart|is missing|is a link|not a regular file)/.test(line));
+}
+
+test("repinPaper refreshes the generated copies from the reopened explanation, and check-paper's copy comparisons pass again", async (t) => {
+  const f = fixture(t);
+  initPaper(f.run, f.paper);
+  // The reopen revises the explanation's outputs: a variable, a new table fragment, and the figure is gone.
+  const assets = {
+    "_variables.yml": 'm1_or_lspec: ".401"\nm2_or_lspec: ".512"\n',
+    "variables_sources.csv": "variable,value,rendered,source\nm1_or_lspec,0.401,.401,output/numbers/12_model1.csv#m1\nm2_or_lspec,0.512,.512,output/numbers/12_model1.csv#m1\n",
+  };
+  for (const [name, text] of Object.entries(assets)) put(at(f.explanation, `workspace/output/assets/${name}`), text);
+  put(at(f.explanation, "workspace/output/assets/T2.qmd"), "| Group | N |\n|---|---|\n| B | 9 |\n");
+  rmSync(at(f.explanation, "workspace/output/figures/F1.png"));
+  reopenExplanation(f);
+
+  const stale = await checkPaper(f.run, f.paper, { citations: () => [] });
+  assert.ok(copyProblemsOf(stale.problems).length > 0, "the stale copies are problems before the repin");
+
+  repinPaper(f.run, f.paper);
+  for (const [name, text] of Object.entries(assets)) assert.equal(read(f.paper, name), text);
+  assert.equal(read(f.paper, "embeds/tables/T2.qmd"), "| Group | N |\n|---|---|\n| B | 9 |\n");
+  assert.equal(existsSync(at(f.paper, "workspace/embeds/figures/F1.png")), false, "the figure the explanation no longer has is removed");
+
+  const after = await checkPaper(f.run, f.paper, { citations: () => [] });
+  assert.deepEqual(copyProblemsOf(after.problems), []);
+  assert.deepEqual(after.problems, [
+    "argument.md links output/numbers/12_model1.csv#m1, which paper.qmd does not embed and ## Omitted does not list",
+  ]);
+});
+
+test("repinPaper refuses a linked table or figure of the explanation, and writes nothing", (t) => {
+  const f = fixture(t);
+  initPaper(f.run, f.paper);
+  reopenExplanation(f);
+  const target = path.join(f.run, "elsewhere.qmd");
+  writeFileSync(target, "secret\n");
+  const before = snapshot(f.paper);
+
+  symlinkSync(target, at(f.explanation, "workspace/output/assets/Linked.qmd"));
+  assert.throws(() => repinPaper(f.run, f.paper), /link/);
+  assert.deepEqual(snapshot(f.paper), before);
+
+  rmSync(at(f.explanation, "workspace/output/assets/Linked.qmd"));
+  symlinkSync(target, at(f.explanation, "workspace/output/figures/Linked.png"));
+  assert.throws(() => repinPaper(f.run, f.paper), /link/);
+  assert.deepEqual(snapshot(f.paper), before);
+  assert.equal(existsSync(at(f.paper, "workspace/embeds/tables/Linked.qmd")), false);
+});
+
 test("repinPaper refuses when the Predictions changed, and when no reopen is pinned", (t) => {
   const f = fixture(t);
   initPaper(f.run, f.paper);
@@ -440,13 +539,22 @@ test("repinPaper refuses an explanation that is not back in phase 4 ready", (t) 
 // ---------------------------------------------------------------------------
 // The templates
 
-test("the harness templates are dpkw's apa.csl and a _quarto.yml with no filters, extensions or project", () => {
+test("the harness templates are dpkw's apa.csl and a _quarto.yml with only the bibliography, csl, formats and execute keys", () => {
   if (existsSync(DPKW_CSL)) assert.equal(readFileSync(path.join(TEMPLATES, "apa.csl")).equals(readFileSync(DPKW_CSL)), true);
-  const quarto = readFileSync(path.join(TEMPLATES, "_quarto.yml"), "utf8");
-  assert.match(quarto, /^bibliography: references\.bib$/m);
-  assert.match(quarto, /^csl: apa\.csl$/m);
-  assert.match(quarto, /^ {2}html:\n {4}embed-resources: true$/m);
-  assert.match(quarto, /^ {2}docx:$/m);
-  assert.match(quarto, /^execute:\n {2}enabled: false$/m);
-  assert.doesNotMatch(quarto, /filters|extensions|project|lua|shortcodes/);
+  assert.equal(
+    readFileSync(path.join(TEMPLATES, "_quarto.yml"), "utf8"),
+    [
+      "bibliography: references.bib",
+      "csl: apa.csl",
+      "",
+      "format:",
+      "  html:",
+      "    embed-resources: true",
+      "  docx: default",
+      "",
+      "execute:",
+      "  enabled: false",
+      "",
+    ].join("\n"),
+  );
 });
