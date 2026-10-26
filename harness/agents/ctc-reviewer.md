@@ -3,8 +3,7 @@ name: ctc-reviewer
 description: Reviews one Phase 2 puzzle independently: reads the card and the pattern evidence, writes one review with a closing Status line.
 tools: read, write, bash
 extensions:
-  - ./harness/reviewer-extension.ts
-  - <pi-claude-bridge extension>
+  - ../../harness/reviewer-extension.ts
 ---
 
 You are a CTC reviewer. An owner has launched you to review exactly one puzzle, independently of its other reviewer.

@@ -122,14 +122,14 @@ test("phase-0 has the phase-0 frontmatter and describes the Phase 0 workflow", (
   assert.match(body, /node\.json/, "the body says to read the root node.json");
 });
 
-test("every Phase 0 role file exists and is named by absolute path in the skill", () => {
+test("every Phase 0 role file exists and is named by repo-relative path in the skill", () => {
   const body = read("harness/skills/phase-0/SKILL.md");
   for (const role of ROLES) {
     const file = path.join(SKILLS, "roles", `${role}.md`);
     assert.ok(existsSync(file), `${file} exists`);
     const markdown = readFileSync(file, "utf8");
     assert.match(frontmatter(markdown).name ?? "", new RegExp(role), `${role}.md names itself`);
-    assert.ok(body.includes(file), `phase-0's Skill lines use the absolute path ${file}`);
+    assert.ok(body.includes(path.relative(HARNESS_ROOT, file)), `phase-0's Skill lines name ${path.relative(HARNESS_ROOT, file)}`);
   }
 });
 
@@ -356,14 +356,14 @@ test("a blind scanner that misses its criterion reports unmeasurable, not open",
   );
 });
 
-test("every Phase 1 role file exists and is named by absolute path in the skill", () => {
+test("every Phase 1 role file exists and is named by repo-relative path in the skill", () => {
   const body = read("harness/skills/phase-1/SKILL.md");
   for (const role of PHASE1_ROLES) {
     const file = path.join(SKILLS, "roles", `${role}.md`);
     assert.ok(existsSync(file), `${file} exists`);
     const markdown = readFileSync(file, "utf8");
     assert.match(frontmatter(markdown).name ?? "", new RegExp(role), `${role}.md names itself`);
-    assert.ok(body.includes(file), `phase-1's Skill lines use the absolute path ${file}`);
+    assert.ok(body.includes(path.relative(HARNESS_ROOT, file)), `phase-1's Skill lines name ${path.relative(HARNESS_ROOT, file)}`);
   }
 });
 
@@ -551,14 +551,14 @@ test("phase-2 puts the ledger, the closing call and the STOP latch in order", ()
   assert.match(body, /Never promote around `promote`/i, "promotion only through the gated tool");
 });
 
-test("every Phase 2 role file exists and is named by absolute path in the skill", () => {
+test("every Phase 2 role file exists and is named by repo-relative path in the skill", () => {
   const body = read("harness/skills/phase-2/SKILL.md");
   for (const role of PHASE2_ROLES) {
     const file = path.join(SKILLS, "roles", `${role}.md`);
     assert.ok(existsSync(file), `${file} exists`);
     const markdown = readFileSync(file, "utf8");
     assert.match(frontmatter(markdown).name ?? "", new RegExp(role), `${role}.md names itself`);
-    assert.ok(body.includes(file), `phase-2's Skill lines use the absolute path ${file}`);
+    assert.ok(body.includes(path.relative(HARNESS_ROOT, file)), `phase-2's Skill lines name ${path.relative(HARNESS_ROOT, file)}`);
   }
 });
 
@@ -888,9 +888,16 @@ test("a combination child's card carries the second parent's evidence itself", (
   assert.match(evolve, /never see the second pattern's Measure, Result, Verdict or Worst fits/);
 });
 
-test("the worker and reviewer agents leave their model to the run config", () => {
+test("the worker and reviewer agents leave their model to the run config and resolve repo-relative extensions", () => {
   for (const file of ["harness/agents/ctc-worker.md", "harness/agents/ctc-reviewer.md"]) {
-    assert.ok(!("model" in frontmatter(read(file))), `${file} has no model: frontmatter line`);
+    const markdown = read(file);
+    assert.ok(!("model" in frontmatter(markdown)), `${file} has no model: frontmatter line`);
+    const extension = /^extensions:\n\s+- (.+)$/m.exec(markdown)?.[1];
+    assert.ok(extension, `${file} names its harness extension`);
+    assert.ok(
+      existsSync(path.resolve(HARNESS_ROOT, ".pi/agents", extension)),
+      `${file}'s extension resolves relative to the project agent directory`,
+    );
   }
 });
 
@@ -974,14 +981,14 @@ test("phase-3 has the phase-3 frontmatter and describes the explanation loop", (
   assert.match(prose, /call it again|call `reproduce` again/i, "reproduce PARTIAL is repeated");
 });
 
-test("every Phase 3 role file exists and is named by absolute path in the skill", () => {
+test("every Phase 3 role file exists and is named by repo-relative path in the skill", () => {
   const body = read("harness/skills/phase-3/SKILL.md");
   for (const role of PHASE3_ROLES) {
     const file = path.join(SKILLS, "roles", `${role}.md`);
     assert.ok(existsSync(file), `${file} exists`);
     const markdown = readFileSync(file, "utf8");
     assert.match(frontmatter(markdown).name ?? "", new RegExp(role), `${role}.md names itself`);
-    assert.ok(body.includes(file), `phase-3's Skill lines use the absolute path ${file}`);
+    assert.ok(body.includes(path.relative(HARNESS_ROOT, file)), `phase-3's Skill lines name ${path.relative(HARNESS_ROOT, file)}`);
   }
 });
 
@@ -1424,13 +1431,13 @@ test("phase-4 has the phase-4 frontmatter and describes the paper workflow", () 
   assert.ok(body.includes(path.join(SKILLS, "phase-owner", "SKILL.md")) || body.includes("harness/skills/phase-owner/SKILL.md"));
 });
 
-test("every Phase 4 role file exists and is named by absolute path in the phase-4 skill", () => {
+test("every Phase 4 role file exists and is named by repo-relative path in the phase-4 skill", () => {
   const body = read("harness/skills/phase-4/SKILL.md");
   for (const role of PHASE4_ROLES) {
     const file = path.join(SKILLS, "roles", `${role}.md`);
     assert.ok(existsSync(file), `${file} exists`);
     assert.match(frontmatter(readFileSync(file, "utf8")).name ?? "", new RegExp(role), `${role}.md names itself`);
-    assert.ok(body.includes(file), `phase-4 names the absolute path ${file}`);
+    assert.ok(body.includes(path.relative(HARNESS_ROOT, file)), `phase-4 names ${path.relative(HARNESS_ROOT, file)}`);
   }
 });
 
@@ -1513,7 +1520,7 @@ test("the vendored style skills are the scipi originals, and SOURCE.md names the
     assert.ok(existsSync(vendored), `${rel} is vendored`);
     const origin = path.join(SCIPI_SKILLS, rel);
     if (existsSync(origin)) assert.ok(readFileSync(vendored).equals(readFileSync(origin)), `${rel} is byte-identical to its origin`);
-    assert.ok(source.includes(`scipi/skills/${rel}`), `SOURCE.md names the origin of ${rel}`);
+    assert.ok(source.includes(`skills/${rel}`), `SOURCE.md names the origin-relative path of ${rel}`);
   }
   assert.match(source, /\b\d{4}-\d{2}-\d{2}\b/, "SOURCE.md has a date");
   assert.match(source, /\b[0-9a-f]{7,40}\b|no git/, "SOURCE.md has the scipi commit, or says there is none");
