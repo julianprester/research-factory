@@ -78,6 +78,20 @@ function acceptedOf(node: PaperNode): PassRecord[] {
   });
 }
 
+/**
+ * The accepted passes that still stand for the paper as it is: the records, unless the paper has changed since the last
+ * one was accepted (its `afterSha` is not the paper's sha now), when none stand and both passes must run again.
+ */
+export function acceptedPasses(runDir: string, paperDir: string): PassRecord[] {
+  const node = paperNodeOf(runDir, paperDir);
+  return standing(acceptedOf(node), sha256(manuscriptOf(node)));
+}
+
+function standing(records: PassRecord[], paperSha: string): PassRecord[] {
+  const last = records.at(-1);
+  return last === undefined || last.afterSha === paperSha ? records : [];
+}
+
 /** The begin record of `pass`, or undefined when there is none; a record that cannot be read is an error. */
 function beginOf(node: PaperNode, pass: Pass): BeginRecord | undefined {
   const bytes = readRegular(node.paper, `workspace/checks/pass-${pass}.begin.json`);
@@ -133,16 +147,12 @@ export function beginPass(runDir: string, paperDir: string, pass: string): { pap
   const name = passOf(pass);
   const node = paperNodeOf(runDir, paperDir);
   const file = paths(node);
-  const accepted = acceptedOf(node);
+  const qmd = manuscriptOf(node);
+  const paperSha = sha256(qmd);
+  const accepted = standing(acceptedOf(node), paperSha);
   if (accepted.some((record) => record.pass === name)) throw new Error(`${name} is already accepted for ${node.paperId}`);
   for (const earlier of PASSES.slice(0, PASSES.indexOf(name))) {
     if (!accepted.some((record) => record.pass === earlier)) throw new Error(`${name} comes after ${earlier}: accept ${earlier} first`);
-  }
-  const qmd = manuscriptOf(node);
-  const paperSha = sha256(qmd);
-  const last = accepted.at(-1);
-  if (last !== undefined && last.afterSha !== paperSha) {
-    throw new Error(`workspace/paper.qmd changed since ${last.pass} was accepted: check the paper again first`);
   }
   if (!checkedOk(node, paperSha)) {
     throw new Error(`checks/result.json is not ok for the current paper.qmd: run check_paper before a style pass`);
@@ -175,7 +185,7 @@ export function endPass(runDir: string, paperDir: string, pass: string): { accep
     return { accepted: false, diff };
   }
 
-  const records = [...acceptedOf(node), { pass: name, beforeSha: begin.paperSha, afterSha: sha256(qmd) }];
+  const records = [...standing(acceptedOf(node), begin.paperSha), { pass: name, beforeSha: begin.paperSha, afterSha: sha256(qmd) }];
   writeAtomic(file.passes, `${JSON.stringify(records, null, 2)}\n`);
   fs.rmSync(file.begin(name), { force: true });
   commitFiles(

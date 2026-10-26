@@ -26,6 +26,18 @@ import {
 } from "./explain/tools.ts";
 import { datasetRefusal, holdoutRefusal, ownerMayWrite } from "./guard.ts";
 import {
+  checkPaperTool,
+  initPaperTool,
+  passBeginTool,
+  passEndTool,
+  reopenExplanationTool,
+  repinPaperTool,
+  submitPaperTool,
+  type NodeInput,
+  type NoteInput,
+  type PassInput,
+} from "./paper/tools.ts";
+import {
   checkDuplicates,
   judgeRound,
   promote,
@@ -126,6 +138,22 @@ const SubmitParams = Type.Object({
   note: Type.Optional(Type.String({ description: "Why it is ready: recorded in the commit message, not on the node" })),
 });
 
+const PaperNodeParams = Type.Object({
+  nodeId: Type.String({ description: "The paper node, e.g. W01" }),
+});
+
+const PassParams = Type.Object({
+  nodeId: Type.String({ description: "The paper node, e.g. W01" }),
+  pass: Type.Union([Type.Literal("concise"), Type.Literal("humanize")], {
+    description: "The style pass: concise first, then humanize",
+  }),
+});
+
+const PaperNoteParams = Type.Object({
+  nodeId: Type.String({ description: "The paper node, e.g. W01" }),
+  note: Type.Optional(Type.String({ description: "Why: recorded in the commit message, not on the node" })),
+});
+
 interface TreeListInput {
   phase?: number;
   status?: string;
@@ -197,6 +225,12 @@ function actor(phase: number): string {
 function requirePhase2(tool: string): void {
   const phase = ownerPhase();
   if (phase !== 2) throw new Error(`Not your phase: ${tool} is a phase-2 tool and you own P${phase}`);
+}
+
+/** The paper tools are Phase 4's alone. */
+function requirePhase4(tool: string): void {
+  const phase = ownerPhase();
+  if (phase !== 4) throw new Error(`Not your phase: ${tool} is a phase-4 tool and you own P${phase}`);
 }
 
 /** The explanation-loop tools are Phase 3's alone. */
@@ -427,6 +461,90 @@ export default function ownerExtension(pi: PiLike): void {
     async execute(_toolCallId: string, params: SubmitInput) {
       requirePhase3("submit");
       return result(await submit(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "init_paper",
+    label: "Initialise a paper",
+    description:
+      "Scaffold the paper node (workspace/paper.qmd skeleton, outline.md, the copies of the explanation's variables, tables and figures, the Predictions fragment, the pins and the audit index). Creates what is missing and keeps what exists. Refuses when the explanation is not in Phase 4.",
+    parameters: PaperNodeParams,
+    async execute(_toolCallId: string, params: NodeInput) {
+      requirePhase4("init_paper");
+      return result(initPaperTool(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "check_paper",
+    label: "Check the paper",
+    description:
+      "Run the paper's checks (embeds, citations, the Predictions, the pins, bare numbers, the outline and the Quarto render) and record the result for the paper as it stands in checks/result.json. Never changes paper.qmd. Submit needs an ok result for the current paper.",
+    parameters: PaperNodeParams,
+    async execute(_toolCallId: string, params: NodeInput) {
+      requirePhase4("check_paper");
+      return result(await checkPaperTool(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "pass_begin",
+    label: "Begin a style pass",
+    description:
+      "Begin a style pass (concise, then humanize) on a paper whose check is ok for its current paper.qmd. Records the paper's embeds; the pass may reword prose only.",
+    parameters: PassParams,
+    async execute(_toolCallId: string, params: PassInput) {
+      requirePhase4("pass_begin");
+      return result(passBeginTool(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "pass_end",
+    label: "End a style pass",
+    description:
+      "End a style pass. Accepted when no embed (variable, include, image, quote or citation) changed; otherwise the pass is rejected, paper.qmd is restored byte for byte from the begin commit, and the changed embeds are named.",
+    parameters: PassParams,
+    async execute(_toolCallId: string, params: PassInput) {
+      requirePhase4("pass_end");
+      return result(passEndTool(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "submit_paper",
+    label: "Submit a paper",
+    description:
+      "Submit the paper to Phase 5. Refuses, naming the gate, unless: the check is ok for the current paper.qmd; both style passes are accepted in order and the paper is what the last left; the pins still match the explanation; the bibliography finalises without problems; and a final check with the render is clean. Then the paper and its check are committed, the paper is Phase 5 ready and the explanation is closed.",
+    parameters: PaperNoteParams,
+    async execute(_toolCallId: string, params: NoteInput) {
+      requirePhase4("submit_paper");
+      return result(await submitPaperTool(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "reopen_explanation",
+    label: "Reopen the explanation",
+    description:
+      "Send the paper's explanation back to Phase 3 for a short extra loop, with the writer's workspace/reopen-request.md as the question. Refused at maxReopens, while the explanation is not in Phase 4, and without a request. The paper stays active and stale until repin_paper runs after its outline has changed.",
+    parameters: PaperNoteParams,
+    async execute(_toolCallId: string, params: NoteInput) {
+      requirePhase4("reopen_explanation");
+      return result(reopenExplanationTool(runDir(), params));
+    },
+  });
+
+  pi.registerTool({
+    name: "repin_paper",
+    label: "Re-pin the paper",
+    description:
+      "After a reopen and the outline's revision, refresh the paper's generated copies from the explanation and re-pin it to the explanation's current argument and reproduction. Refused while the outline has not changed or the Predictions differ from the pinned ones.",
+    parameters: PaperNodeParams,
+    async execute(_toolCallId: string, params: NodeInput) {
+      requirePhase4("repin_paper");
+      return result(repinPaperTool(runDir(), params));
     },
   });
 

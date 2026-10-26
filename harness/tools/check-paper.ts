@@ -625,7 +625,7 @@ function predictionProblems(paper: string, explanation: string, qmd: string | un
  * workspace hash (`owners/phase-3/loop/<E>/reproduction.json`) and the sha of the Predictions section. A pin that
  * differs is `stale`; a missing reproduction record is named, and its hash is not compared.
  */
-function pinProblems(runDir: string, paper: string, explanation: string, explanationId: string): string[] {
+export function pinProblems(runDir: string, paper: string, explanation: string, explanationId: string): string[] {
   const pinsFile = readFile(paper, "workspace/checks/pins.json");
   if (pinsFile.kind === "absent") return ["checks/pins.json is missing (run init_paper)"];
   if (pinsFile.kind === "refused") return [pinsFile.problem];

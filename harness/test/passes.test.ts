@@ -7,7 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { beginPass, endPass, PASSES } from "../paper/passes.ts";
+import { acceptedPasses, beginPass, endPass, PASSES } from "../paper/passes.ts";
 import { sha256, paperRun, put } from "./paper-fixture.ts";
 import { git } from "./explain-fixture.ts";
 
@@ -165,4 +165,19 @@ test("a second endPass after an accepted pass is refused: its begin was consumed
   beginPass(f.run, f.paperDir, "concise");
   assert.equal(endPass(f.run, f.paperDir, "concise").accepted, true);
   assert.throws(() => endPass(f.run, f.paperDir, "concise"), /no pass-begin/);
+});
+
+test("an edit to the paper after the passes makes both passes run again: the stale records stand for nothing", (t) => {
+  const f = setup(t);
+  beginPass(f.run, f.paperDir, "concise");
+  rewrite(f.qmd, "Readers copy the first example they meet, and", "Readers copy the first example, and");
+  assert.equal(endPass(f.run, f.paperDir, "concise").accepted, true);
+  rewrite(f.qmd, "Readers copy the first example, and", "Readers copy the first example; and");
+  assert.deepEqual(acceptedPasses(f.run, f.paperDir), [], "stale: nothing stands");
+  checkOk(f.paperDir);
+  assert.throws(() => beginPass(f.run, f.paperDir, "humanize"), /comes after concise/);
+  beginPass(f.run, f.paperDir, "concise");
+  rewrite(f.qmd, "Readers copy the first example; and", "Readers copy the first example, and");
+  assert.equal(endPass(f.run, f.paperDir, "concise").accepted, true);
+  assert.deepEqual(acceptedPasses(f.run, f.paperDir).map((record) => record.pass), ["concise"]);
 });
