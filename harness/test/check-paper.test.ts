@@ -80,6 +80,9 @@ const PAPER_TEXT = [
   "",
 ].join("\n");
 
+/** An outline that omits nothing and needs nothing: the paper embeds the argument's one number, table and figure. */
+const OUTLINE = ["# Outline", "", "## Sections", "Introduction, then the evidence.", "", "## Omitted", "", "## Needs", ""].join("\n");
+
 interface Fixture {
   run: string;
   explanation: string;
@@ -152,6 +155,7 @@ function fixture(t: TestContext): Fixture {
   put(at(paper, "workspace/embeds/figures/F1.png"), figure);
   put(at(paper, "workspace/embeds/predictions.qmd"), `${PREDICTIONS}\n`);
   put(at(paper, "workspace/checks/pins.json"), pins(ARGUMENT, "hash-one", PREDICTIONS));
+  put(at(paper, "workspace/outline.md"), OUTLINE);
   quoteSource(run, paper, { path: "handbook/rules.md", start: 3, end: 4 });
   return { run, explanation, paper };
 }
@@ -1231,4 +1235,34 @@ test("an ISO date in the prose still counts its month and day", async (t) => {
   withProse(f, "Filed 2026-10-26.");
   const { problems } = await check(f, { bareNumberLimit: 0 });
   assert.ok(/has 2 bare numbers in prose \(limit 0\): line \d+ 10, line \d+ 26$/.test(problems.join("\n")), problems.join("\n"));
+});
+
+// ---------------------------------------------------------------------------
+// The outline: coverage of the argument's links, and ## Needs until a reopen has run (Task 8).
+
+test("an argument link the paper neither embeds nor omits is a check-paper problem", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/paper.qmd"), PAPER_TEXT.replace("{{< var m1_or_lspec >}}", "{{< var n_pages >}}"));
+  const problems = (await check(f)).problems;
+  assert.ok(
+    problems.includes(
+      "argument.md links output/numbers/12_model1.csv#m1, which paper.qmd does not embed and ## Omitted does not list",
+    ),
+    problems.join("\n"),
+  );
+});
+
+test("a non-empty ## Needs blocks check-paper until a reopen has run, and an empty one does not", async (t) => {
+  const f = fixture(t);
+  const needs = OUTLINE.replace("## Needs\n", "## Needs\n- the per-page rate of the subject-to-change class\n");
+  put(at(f.paper, "workspace/outline.md"), needs);
+  assert.deepEqual((await check(f)).problems, ["outline lists needs: send them in one reopen request"]);
+  put(at(f.paper, "workspace/checks/pins.json"), pins(ARGUMENT, "hash-one", PREDICTIONS).replace('"reopens": 0', '"reopens": 1'));
+  assert.deepEqual(await check(f), { problems: [], warnings: [] });
+});
+
+test("a paper with no outline is a check-paper problem naming it", async (t) => {
+  const f = fixture(t);
+  rmSync(at(f.paper, "workspace/outline.md"));
+  assert.deepEqual((await check(f)).problems, ["workspace/outline.md is missing"]);
 });

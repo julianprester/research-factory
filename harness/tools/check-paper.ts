@@ -38,6 +38,7 @@ import { argumentSha, loopDir, locate, readRegular } from "../explain/rounds.ts"
 import { parseCsv } from "../explain/reproduce.ts";
 import { PAPER_BARE_NUMBER_LIMIT, readConfig } from "../launch.ts";
 import { CITATION_TOKEN, IMAGE, INCLUDE_SHORTCODE, VAR_SHORTCODE, scanEmbeds, type EmbedSet } from "../paper/embeds.ts";
+import { coverage } from "../paper/outline.ts";
 import { verifyQuotes } from "../paper/quotes.ts";
 import { findRunDir, nodeIdOf } from "../tree.ts";
 import { NUMERAL, loadRegistry, resolvesOnce, sectionText, YAML_VARIABLE } from "./check-argument.ts";
@@ -50,7 +51,7 @@ export interface PaperOptions {
   render?: (nodeDir: string) => Promise<{ problems: string[] }>;
   /** The most bare numbers a paper may hold in prose; defaults to `paperBareNumberLimit` in config.json. */
   bareNumberLimit?: number;
-  /** The outline check (Task 8); defaults to no problems. */
+  /** The outline check: the coverage of the argument's targets and the needs (`outline.ts`); injectable for tests. */
   outline?: (runDir: string, nodeDir: string) => string[];
 }
 
@@ -176,11 +177,14 @@ export async function checkPaper(
     }
   }
 
-  const outline = opts.outline ?? (() => []);
-  try {
-    problems.push(...outline(runDir, paper));
-  } catch (error) {
-    problems.push(`outline check failed: ${message(error)}`);
+  // Coverage is read from the manuscript's embeds, so with no paper.qmd it is not run (the missing file is the problem).
+  const outline = opts.outline ?? ((runDir, nodeDir) => coverage(runDir, nodeDir).problems);
+  if (qmd !== undefined) {
+    try {
+      problems.push(...outline(runDir, paper));
+    } catch (error) {
+      problems.push(`outline check failed: ${message(error)}`);
+    }
   }
   const render = opts.render ?? (async () => ({ problems: [] }));
   try {
