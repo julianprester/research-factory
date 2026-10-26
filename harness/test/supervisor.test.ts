@@ -541,3 +541,55 @@ test("a phase-3 tree: never-started, then an explanation that runs, then done wi
   const second = decide([phase3, phase4], "head-2", first.memory);
   assert.deepEqual(second.actions, [{ kind: "done", waitingForUnconfiguredPhases: { 4: 1 } }]);
 });
+
+test("a phase-4 tree: an explanation is started, a paper in progress keeps the run alive, and a reopen sends work back to phase 3", (t) => {
+  const run = makeRun(t);
+  initRun(run, "data", "interest");
+  createChild(run, "D01", "E03 Etiquette", "owner-p1");
+  const puzzle = createChild(run, "T01", "status quo: crowd", "owner-p2");
+  updateNode(run, puzzle.id, { phase: 3, status: "ready" }, "owner-p2");
+  updateNode(run, "T01", { status: "closed" }, "owner-p2");
+  const explanation = createChild(run, puzzle.id, "Argument", "owner-p3");
+  updateNode(run, explanation.id, { phase: 4, status: "ready" }, "owner-p3");
+  updateNode(run, puzzle.id, { status: "closed" }, "owner-p3");
+
+  const view = (phase: number, owner: "idle" | "gone" | "working", started = true): PhaseView =>
+    viewPhase(run, phase, owner, { configured: phase !== 5, started, entry: false });
+
+  // A submitted explanation with no Phase 4 owner: start it.
+  assert.deepEqual(view(4, "gone", false).ready, [explanation.id]);
+  assert.deepEqual(decide([view(4, "gone", false)], "head-1", memory()).actions, [{ kind: "start", phase: 4, reason: "never-started" }]);
+
+  // The writer's owner takes the explanation as input and creates the paper, active. Not done, and no nudge.
+  updateNode(run, explanation.id, { status: "input" }, "owner-p4");
+  const paper = createChild(run, explanation.id, "Paper", "owner-p4");
+  assert.deepEqual([paper.phase, paper.status], [4, "ready"]);
+  updateNode(run, paper.id, { status: "active" }, "owner-p4");
+  const writing = view(4, "idle");
+  assert.deepEqual([writing.inputs, writing.running, writing.finished], [[explanation.id], [paper.id], []]);
+  let state = memory();
+  for (let tick = 0; tick < 4; tick++) {
+    const result = decide([view(3, "gone", false), writing], "head-1", state);
+    assert.deepEqual(result.actions, [], `tick ${tick}: the active paper leaves the owner alone`);
+    state = result.memory;
+  }
+
+  // The paper is submitted (phase 5 ready) and the explanation closed: phase 5 is waiting, not nudged, and two quiet ticks finish.
+  updateNode(run, paper.id, { status: "ready", phase: 5 }, "owner-p4");
+  updateNode(run, explanation.id, { status: "closed" }, "owner-p4");
+  const phase4 = view(4, "idle");
+  const phase5 = view(5, "gone", false);
+  assert.deepEqual([phase4.ready, phase4.running, phase4.inputs], [[], [], []]);
+  assert.deepEqual(phase5.ready, [paper.id]);
+  const first = decide([phase4, phase5], "head-2", memory());
+  assert.deepEqual(first.actions, [], "one quiet tick is not done");
+  const second = decide([phase4, phase5], "head-2", first.memory);
+  assert.deepEqual(second.actions, [{ kind: "done", waitingForUnconfiguredPhases: { 5: 1 } }]);
+
+  // A reopen sends the explanation back to phase 3 ready: phase 3 has work, and its idle owner is nudged.
+  updateNode(run, explanation.id, { phase: 3, status: "ready" }, "owner-p4");
+  const phase3 = view(3, "idle");
+  assert.deepEqual(phase3.ready, [explanation.id]);
+  const nudged = decide([phase3, view(4, "idle")], "head-3", memory());
+  assert.ok(nudged.actions.some((action) => action.kind === "nudge" && action.phase === 3), "phase 3 is nudged to take the reopen");
+});
