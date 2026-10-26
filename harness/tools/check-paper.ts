@@ -2,21 +2,27 @@
 // paper's embeds resolve, its numbers are not typed, its citations are the ones it should be, its Predictions
 // are the argument's, and its pins still match the explanation they were taken from.
 //
-// The paper is written by a worker and the explanation's outputs by scripts, so every read is without following
-// a link (`readRegular`, `locate`): a link, or a file where a folder belongs, is a problem named by its path. The
-// checks never throw for the contents of a paper; an unreadable input is a problem. A node that is not a paper
-// under an explanation of the run is a usage error and throws, as `check-argument.ts` does.
+// The manuscript is read raw. Quarto and pandoc render code spans, fences, comments and raw blocks, so a check
+// that masks them can be blinded by them. The gate therefore refuses the constructs it cannot read: a fenced
+// block of any kind, raw HTML, a TeX command that reads or writes files, and any shortcode but `var` and
+// `include`. An allow-list then says which include and image targets may exist, and a fragment is scanned
+// raw as well.
 //
-// The problems, in order: `workspace/paper.qmd` missing; each `{{< var k >}}` not in `_variables.yml`, or with no
-// source row that resolves to exactly one row of the explanation's registry; the paper's copies of
-// `_variables.yml` and `variables_sources.csv` (and `apa.csl`, `_quarto.yml` when the harness templates exist),
-// its table fragments and figures, each byte for byte against the explanation's; each include or image that is
-// missing, a link, outside `workspace/embeds/` or empty; each quotation's problem (`verifyQuotes`), a quote
-// fragment no include names, a hand-typed block quotation; a citation key that is neither a numeric chunk id nor
-// in `references.bib` (while drafting), a numeric chunk id or a key missing from `references.bib` (once it
-// exists), and the citation check's problems on the draft; the Predictions fragment not included or not the
-// argument's `## Predictions`; the pins missing, unreadable or stale; the bare numbers in prose beyond the limit;
-// then the outline problems (`opts.outline`, Task 8) and the render problems (`opts.render`, Task 9).
+// Every read is without following a link (`readRegular`, `locate`): a link, or a file where a folder belongs, is
+// a problem named by its path. `checkPaper` never throws for the contents of a paper, or for an unreadable one:
+// each section is guarded, and a failure is a problem line. A node that is not a paper under an explanation of
+// the run is a usage error and throws, as `check-argument.ts` does.
+//
+// The problems, in order: `workspace/paper.qmd` missing; the front matter (keys, `bibliography`, `csl`); the raw
+// syntax (fences, HTML, TeX commands, shortcodes, reference-style images, hand-typed block quotations); each
+// `{{< var k >}}` not in `_variables.yml`, or with no source row that resolves to exactly one row of the
+// explanation's registry; the paper's copies of `_variables.yml` and `variables_sources.csv` (and `apa.csl`,
+// `_quarto.yml` when the harness templates exist), its table fragments and figures, each byte for byte against
+// the explanation's; each include or image outside the allow-list, missing, empty, or a fragment with a shortcode
+// or fenced code; the quotations (`verifyQuotes`) and each quote fragment no include names; the citation keys;
+// the Predictions fragment (byte for byte: `sectionText` and a newline); the pins; the workspace root (no Quarto
+// project file, extension, filter or stylesheet); the bare numbers beyond the limit; then the outline problems
+// (`opts.outline`, Task 8) and the render problems (`opts.render`, Task 9).
 //
 // Warnings: an author placeholder in the front matter, and each bare number while the count is within the limit.
 //
@@ -30,10 +36,10 @@ import { fileURLToPath } from "node:url";
 import { argumentSha, loopDir, locate, readRegular } from "../explain/rounds.ts";
 import { parseCsv } from "../explain/reproduce.ts";
 import { PAPER_BARE_NUMBER_LIMIT, readConfig } from "../launch.ts";
-import { proseLines, scanEmbeds, type EmbedSet } from "../paper/embeds.ts";
+import { CITATION_TOKEN, IMAGE, INCLUDE_SHORTCODE, VAR_SHORTCODE, scanEmbeds, type EmbedSet } from "../paper/embeds.ts";
 import { verifyQuotes } from "../paper/quotes.ts";
 import { findRunDir, nodeIdOf } from "../tree.ts";
-import { bareNumberHits, loadRegistry, resolvesOnce, sectionText, YAML_VARIABLE } from "./check-argument.ts";
+import { NUMERAL, loadRegistry, resolvesOnce, sectionText, YAML_VARIABLE } from "./check-argument.ts";
 import { citationProblems } from "./check-puzzle.ts";
 
 export interface PaperOptions {
@@ -47,7 +53,7 @@ export interface PaperOptions {
   outline?: (runDir: string, nodeDir: string) => string[];
 }
 
-/** What a file read found: absent, refused by name (a link, a folder, a file that is not regular), or its bytes. */
+/** What a file read found: absent, refused by name (a link, a folder, a file that is not regular, unreadable), or its bytes. */
 type Read = { kind: "absent" } | { kind: "refused"; problem: string } | { kind: "file"; bytes: Buffer };
 
 /** The harness templates `apa.csl` and `_quarto.yml` are copied from (Task 10 adds them). */
@@ -56,9 +62,44 @@ const TEMPLATED = ["apa.csl", "_quarto.yml"];
 const AUTHOR_PLACEHOLDER = "Author names to be added";
 const NO_EMBEDS: EmbedSet = { vars: [], includes: [], images: [], quotes: [], citations: [] };
 
+/** The front matter keys a paper may set. Anything else (filters, includes, execution, formats, resources) is a problem. */
+const FRONT_KEYS = new Set([
+  "title",
+  "subtitle",
+  "author",
+  "keywords",
+  "abstract",
+  "date",
+  "bibliography",
+  "csl",
+  "link-citations",
+  "lang",
+  "toc",
+  "number-sections",
+  "fig-cap-location",
+  "tbl-cap-location",
+]);
+/** The only include targets: a table fragment, a verified quotation and the Predictions fragment. */
+const INCLUDE_TARGETS = [/^embeds\/tables\/[^/]+\.qmd$/, /^embeds\/quotes\/Q\d+\.qmd$/, /^embeds\/predictions\.qmd$/];
+/** The only image targets: a figure copied from the explanation, and a rendered diagram. */
+const IMAGE_TARGETS = [/^embeds\/figures\/[^/]+$/, /^embeds\/diagrams\/[^/]+\.png$/];
+/** Workspace root entries Quarto would read as project configuration, extensions or styling. */
+const ROOT_REFUSED = ["_metadata.yml", "_extensions"];
+const ROOT_FILE_REFUSED = /\.(?:lua|css)$/;
+
+const FENCE = /^\s*(?:`{3}|~{3})/;
+/** `<` followed by a letter, `/`, `!` or `?`: a tag, a closing tag, a comment or a declaration. `p < .05` and `x <3` are not. */
+const RAW_HTML = /<(?=[A-Za-z/!?])/;
+const TEX_COMMAND = /\\(input|include|write|openin|read|immediate|usepackage|verbatiminput)(?![A-Za-z])/g;
+/** Any shortcode, closed or not on this text; masked before the HTML and TeX rules, since `{{<var x>}}` starts with `<v`. */
+const ANY_SHORTCODE = /\{\{<[\s\S]*?>\}\}/g;
+/** A block quotation, as a prose line starts: after leading spaces and list markers. */
+const QUOTE_LINE = /^\s*(?:(?:[-*+]|\d+[.)])\s+)*>/;
+const YEAR = /^\d{4}$/;
+
 /**
- * Checks the paper node at `nodeDir` inside the run at `runDir`. Throws for a `nodeDir` that is not a paper
- * under an explanation of that run: a usage error, not a finding about the paper.
+ * Checks the paper node at `nodeDir` inside the run at `runDir`. Throws for a `nodeDir` that is not a paper under an
+ * explanation of that run: a usage error, not a finding about the paper. Nothing else throws.
  */
 export async function checkPaper(
   runDir: string,
@@ -86,19 +127,26 @@ export async function checkPaper(
   else if (manuscript.kind === "refused") problems.push(manuscript.problem);
   else qmd = manuscript.bytes.toString("utf8");
   const embeds = qmd === undefined ? NO_EMBEDS : scanEmbeds(qmd);
-  if (qmd !== undefined) warnings.push(...authorWarnings(qmd));
 
-  const argument = readFile(explanation, "workspace/argument.md");
-  problems.push(...variableProblems(paper, explanation, embeds.vars));
-  problems.push(...sourceProblems(paper, explanation));
-  if (qmd !== undefined) problems.push(...embedProblems(paper, embeds));
-  problems.push(...quoteProblems(runDir, paper, qmd, embeds));
-  if (qmd !== undefined) problems.push(...citeProblems(paper, embeds, opts.citations ?? ((file) => citationProblems(file))));
-  problems.push(...predictionProblems(paper, qmd, embeds, argument));
-  problems.push(...pinProblems(runDir, paper, explanation, explanationId, argument));
+  if (qmd !== undefined) {
+    warnings.push(...authorWarnings(qmd));
+    guarded(problems, "workspace/paper.qmd", () => frontProblems(qmd));
+    guarded(problems, "workspace/paper.qmd", () => syntaxProblems(qmd));
+  }
+  guarded(problems, "the explanation's registry", () => variableProblems(paper, explanation, embeds.vars));
+  guarded(problems, "the paper's copies", () => sourceProblems(paper, explanation));
+  if (qmd !== undefined) guarded(problems, "workspace/embeds", () => embedProblems(paper, embeds));
+  guarded(problems, "workspace/embeds/quotes", () => verifyQuotes(runDir, paper));
+  if (qmd !== undefined) guarded(problems, "workspace/embeds/quotes", () => unincludedQuotes(paper, embeds));
+  if (qmd !== undefined) {
+    guarded(problems, "workspace/references.bib", () => citeProblems(paper, embeds, opts.citations ?? ((file) => citationProblems(file))));
+  }
+  guarded(problems, "workspace/embeds/predictions.qmd", () => predictionProblems(paper, explanation, qmd, embeds));
+  guarded(problems, "workspace/checks/pins.json", () => pinProblems(runDir, paper, explanation, explanationId));
+  guarded(problems, "the workspace root", () => rootProblems(paper));
   if (qmd !== undefined) {
     const limit = opts.bareNumberLimit ?? configLimit(runDir, problems);
-    const hits = bareNumberHits(numberProse(qmd));
+    const hits = paperNumbers(qmd);
     if (hits.length > limit) {
       const listed = hits.slice(0, 10).map((hit) => `line ${hit.line} ${hit.token}`).join(", ");
       const plural = hits.length === 1 ? "" : "s";
@@ -124,30 +172,136 @@ export async function checkPaper(
 }
 
 // ---------------------------------------------------------------------------
-// Reading without following a link.
+// Reading without following a link, and never throwing.
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The bytes of `rel` under `node`, or what stopped the read (a link on the path, a folder, a file that is not regular). */
+/** The system code of a file-system error (`EACCES`, `ELOOP`, …), or undefined for any other error. */
+function codeOf(error: unknown): string | undefined {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+/** The problem for a failed read of `subject`: an unreadable path names its error code, anything else says it could not be checked. */
+function failureOf(error: unknown, subject: string): string {
+  const code = codeOf(error);
+  return code === undefined ? `${subject} could not be checked: ${message(error)}` : `${subject} cannot be read: ${code}`;
+}
+
+/** Runs one section of the check; a failure in it is a problem line, and the other sections still run. */
+function guarded(problems: string[], subject: string, check: () => string[]): void {
+  try {
+    problems.push(...check());
+  } catch (error) {
+    problems.push(failureOf(error, subject));
+  }
+}
+
+/** The bytes of `rel` under `node`, or what stopped the read: a link on the path, a folder, a file that is not regular, or an unreadable path. */
 function readFile(node: string, rel: string): Read {
   try {
     const bytes = readRegular(node, rel);
     return bytes === undefined ? { kind: "absent" } : { kind: "file", bytes };
   } catch (error) {
-    return { kind: "refused", problem: message(error) };
+    const code = codeOf(error);
+    return { kind: "refused", problem: code === undefined ? message(error) : `${rel} cannot be read: ${code}` };
   }
 }
 
-/** The entries of a folder, by name; a folder that cannot be listed is a problem, not a throw. */
+/** The entries of a folder, sorted by name; a folder that is absent has none, and one that cannot be listed is a problem. */
 function entriesOf(dir: string, shown: string, problems: string[]): fs.Dirent[] {
   try {
     return fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   } catch (error) {
-    problems.push(`${shown} cannot be listed: ${message(error)}`);
+    if (codeOf(error) === "ENOENT") return [];
+    problems.push(`${shown} cannot be listed: ${codeOf(error) ?? message(error)}`);
     return [];
   }
+}
+
+// ---------------------------------------------------------------------------
+// The front matter and the raw syntax.
+
+/** The front matter's top-level keys, and the values `bibliography` and `csl` must have. */
+function frontProblems(qmd: string): string[] {
+  const lines = qmd.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return [];
+  const close = lines.findIndex((line, index) => index > 0 && /^(?:---|\.\.\.)\s*$/.test(line));
+  if (close < 0) return ["workspace/paper.qmd front matter is not closed"];
+  const problems: string[] = [];
+  for (let index = 1; index < close; index++) {
+    const line = lines[index] ?? "";
+    // Indented lines, list items and comments belong to the key above them.
+    if (line.trim() === "" || /^\s/.test(line) || /^-\s/.test(line) || line.startsWith("#")) continue;
+    const match = /^([A-Za-z][\w-]*):(.*)$/.exec(line);
+    if (match === null) {
+      problems.push(`workspace/paper.qmd front matter line ${index + 1} is not a key: value line`);
+      continue;
+    }
+    const key = match[1] ?? "";
+    const value = (match[2] ?? "").trim().replace(/^["']|["']$/g, "");
+    if (!FRONT_KEYS.has(key)) problems.push(`workspace/paper.qmd front matter key ${key} is not allowed`);
+    if (key === "bibliography" && value !== "references.bib") {
+      problems.push("workspace/paper.qmd front matter bibliography must be references.bib");
+    }
+    if (key === "csl" && value !== "apa.csl") problems.push("workspace/paper.qmd front matter csl must be apa.csl");
+  }
+  return problems;
+}
+
+/**
+ * The raw syntax the gate can read, one problem per construct, each naming its line. Shortcodes are counted against
+ * their raw `{{<` openers: an opener that is not a `var` or `include` that parses is a problem (so odd spacing cannot
+ * hide one), and a name other than those two is a problem by name.
+ */
+function syntaxProblems(qmd: string): string[] {
+  const problems: string[] = [];
+  const raw = qmd.split(/\r?\n/);
+  const hidden = blank(qmd, ANY_SHORTCODE).split(/\r?\n/);
+  const leftoverImages = blank(qmd, IMAGE).split(/\r?\n/);
+  raw.forEach((line, index) => {
+    const where = `workspace/paper.qmd line ${index + 1}`;
+    const text = hidden[index] ?? "";
+    if (FENCE.test(line)) problems.push(`${where}: fenced code is not allowed (no code blocks, whatever the info string)`);
+    if (RAW_HTML.test(text)) problems.push(`${where}: raw HTML is not allowed`);
+    for (const match of text.matchAll(TEX_COMMAND)) problems.push(`${where}: TeX command \\${match[1]} is not allowed`);
+    if ((leftoverImages[index] ?? "").includes("![")) {
+      problems.push(`${where}: reference-style image is not allowed; write it inline as ![alt](embeds/figures/F.png)`);
+    }
+  });
+
+  const matched = new Set([...qmd.matchAll(VAR_SHORTCODE), ...qmd.matchAll(INCLUDE_SHORTCODE)].map((match) => match.index ?? -1));
+  for (const opener of qmd.matchAll(/\{\{</g)) {
+    const index = opener.index ?? 0;
+    if (matched.has(index)) continue;
+    const where = `workspace/paper.qmd line ${lineOf(qmd, index)}`;
+    const name = /^\{\{<\s*([^\s>}]*)/.exec(qmd.slice(index, index + 64))?.[1] ?? "";
+    if (name === "" || name === "var" || name === "include") {
+      problems.push(`${where}: malformed {{< shortcode; write {{< var name >}} or {{< include embeds/… >}}`);
+    } else {
+      problems.push(`${where}: shortcode ${name} is not allowed (only var and include)`);
+    }
+  }
+
+  // A block quotation is one an include brings in: a prose line that starts with `>` (after list markers) is typed by hand.
+  raw.forEach((line, index) => {
+    if (QUOTE_LINE.test(line) && !(index > 0 && QUOTE_LINE.test(raw[index - 1] ?? ""))) {
+      problems.push(`workspace/paper.qmd line ${index + 1}: a hand-typed block quotation; quote it with quote_source and include the fragment`);
+    }
+  });
+  return problems;
+}
+
+/** The line (1-based) that holds `index` of `text`. */
+function lineOf(text: string, index: number): number {
+  return text.slice(0, index).split("\n").length;
+}
+
+/** The text with every match of `pattern` blanked to spaces, newlines kept, so every line keeps its number. */
+function blank(text: string, pattern: RegExp): string {
+  return text.replace(pattern, (span) => span.replace(/[^\n]/g, " "));
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +322,8 @@ function variableProblems(paper: string, explanation: string, vars: string[]): s
       const match = YAML_VARIABLE.exec(line);
       if (match !== null) names.add(match[1] ?? "");
     }
+  } else if (yml.kind === "refused") {
+    problems.push(yml.problem);
   }
 
   let rows: { variable: string; source: string }[] = [];
@@ -189,6 +345,8 @@ function variableProblems(paper: string, explanation: string, vars: string[]): s
     } catch (error) {
       problems.push(`workspace/variables_sources.csv: ${message(error)}`);
     }
+  } else if (csv.kind === "refused") {
+    problems.push(csv.problem);
   }
 
   const registryProblems: string[] = [];
@@ -224,14 +382,14 @@ function sourceProblems(paper: string, explanation: string): string[] {
   for (const name of TEMPLATED) {
     const template = path.join(TEMPLATE_DIR, name);
     if (!fs.existsSync(template)) continue;
-    try {
-      problems.push(...sameBytes(readFile(paper, `workspace/${name}`), `workspace/${name}`, `harness/templates/${name}`, fs.readFileSync(template)));
-    } catch (error) {
-      problems.push(`harness/templates/${name} cannot be read: ${message(error)}`);
-    }
+    problems.push(...sameBytes(readFile(paper, `workspace/${name}`), `workspace/${name}`, `harness/templates/${name}`, fs.readFileSync(template)));
   }
-  problems.push(...copyProblems(paper, explanation, "workspace/embeds/tables", "workspace/output/assets"));
-  problems.push(...copyProblems(paper, explanation, "workspace/embeds/figures", "workspace/output/figures"));
+  for (const [folder, source] of [
+    ["workspace/embeds/tables", "workspace/output/assets"],
+    ["workspace/embeds/figures", "workspace/output/figures"],
+  ] as const) {
+    guarded(problems, folder, () => copyProblems(paper, explanation, folder, source));
+  }
   return problems;
 }
 
@@ -271,51 +429,63 @@ function copyProblems(paper: string, explanation: string, folder: string, source
 }
 
 // ---------------------------------------------------------------------------
-// Embeds: includes and images resolve, quotations are verified and included, and nothing is typed by hand.
+// Embeds: includes and images are on the allow-list, resolve, and their fragments hold text only.
 
-/** Each include and image resolves to a non-empty regular file under `workspace/embeds/`. */
 function embedProblems(paper: string, embeds: EmbedSet): string[] {
   const problems: string[] = [];
-  for (const target of [...new Set(embeds.includes)]) problems.push(...embedFile(paper, target, "includes"));
-  for (const target of [...new Set(embeds.images)]) problems.push(...embedFile(paper, target, "shows image"));
+  for (const target of [...new Set(embeds.includes)]) {
+    if (!INCLUDE_TARGETS.some((pattern) => pattern.test(target))) {
+      problems.push(
+        target.startsWith("embeds/")
+          ? `workspace/paper.qmd includes ${target}, which is not an allowed embed (embeds/tables/*.qmd, embeds/quotes/Q<nn>.qmd, embeds/predictions.qmd)`
+          : `workspace/paper.qmd includes ${target}, which is outside workspace/embeds/`,
+      );
+      continue;
+    }
+    problems.push(...includeFile(paper, target));
+  }
+  for (const target of [...new Set(embeds.images)]) {
+    if (!IMAGE_TARGETS.some((pattern) => pattern.test(target))) {
+      problems.push(`workspace/paper.qmd shows image ${target}, which is not an allowed embed`);
+      continue;
+    }
+    problems.push(...imageFile(paper, target));
+  }
   return problems;
 }
 
-function embedFile(paper: string, target: string, verb: string): string[] {
-  const rel = path.posix.normalize(target);
-  if (!rel.startsWith("embeds/")) return [`workspace/paper.qmd ${verb} ${target}, which is outside workspace/embeds/`];
-  const file = readFile(paper, `workspace/${rel}`);
-  if (file.kind === "absent") return [`workspace/paper.qmd ${verb} ${target}, which is missing`];
+/** An included fragment: present, a regular file, not empty, and text only (no shortcode, no fenced code). */
+function includeFile(paper: string, target: string): string[] {
+  const file = readFile(paper, `workspace/${target}`);
+  if (file.kind === "absent") return [`workspace/paper.qmd includes ${target}, which is missing`];
   if (file.kind === "refused") return [file.problem];
-  if (file.bytes.toString("utf8").trim() === "") return [`workspace/paper.qmd ${verb} ${target}, which is empty`];
-  return [];
+  const text = file.bytes.toString("utf8");
+  if (text.trim() === "") return [`workspace/paper.qmd includes ${target}, which is empty`];
+  const shown = `workspace/${target}`;
+  const problems: string[] = [];
+  if (text.includes("{{<")) problems.push(`${shown}: contains a {{< shortcode (fragments hold text only)`);
+  if (text.split(/\r?\n/).some((line) => FENCE.test(line))) problems.push(`${shown}: contains fenced code (fragments hold text only)`);
+  return problems;
 }
 
-/** The quotation problems: `verifyQuotes`, then each fragment left out of the paper, then each block quotation typed by hand. */
-function quoteProblems(runDir: string, paper: string, qmd: string | undefined, embeds: EmbedSet): string[] {
-  const problems: string[] = [];
-  try {
-    problems.push(...verifyQuotes(runDir, paper));
-  } catch (error) {
-    problems.push(`quotations cannot be checked: ${message(error)}`);
-  }
-  if (qmd === undefined) return problems;
+function imageFile(paper: string, target: string): string[] {
+  const file = readFile(paper, `workspace/${target}`);
+  if (file.kind === "absent") return [`workspace/paper.qmd shows image ${target}, which is missing`];
+  if (file.kind === "refused") return [file.problem];
+  return file.bytes.length === 0 ? [`workspace/paper.qmd shows image ${target}, which is empty`] : [];
+}
+
+/** Each quote fragment in `embeds/quotes/` is named by an include of the paper. */
+function unincludedQuotes(paper: string, embeds: EmbedSet): string[] {
   const found = locate(paper, "workspace/embeds/quotes");
-  if (found.kind === "folder") {
-    for (const entry of entriesOf(path.join(paper, "workspace", "embeds", "quotes"), "workspace/embeds/quotes", problems)) {
-      if (!entry.isFile() || !/^Q\d+\.qmd$/.test(entry.name)) continue;
-      if (!embeds.includes.includes(`embeds/quotes/${entry.name}`)) {
-        problems.push(`workspace/embeds/quotes/${entry.name} is not included by paper.qmd`);
-      }
+  if (found.kind !== "folder") return [];
+  const problems: string[] = [];
+  for (const entry of entriesOf(path.join(paper, "workspace", "embeds", "quotes"), "workspace/embeds/quotes", problems)) {
+    if (!entry.isFile() || !/^Q\d+\.qmd$/.test(entry.name)) continue;
+    if (!embeds.includes.includes(`embeds/quotes/${entry.name}`)) {
+      problems.push(`workspace/embeds/quotes/${entry.name} is not included by paper.qmd`);
     }
   }
-  // A block quotation is one an include brings in: a line of prose that starts with `>` is typed by hand.
-  const lines = proseLines(qmd);
-  lines.forEach((line, index) => {
-    if (/^\s*>/.test(line) && !(index > 0 && /^\s*>/.test(lines[index - 1] ?? ""))) {
-      problems.push(`workspace/paper.qmd line ${index + 1}: a hand-typed block quotation; quote it with quote_source and include the fragment`);
-    }
-  });
   return problems;
 }
 
@@ -341,11 +511,7 @@ function citeProblems(paper: string, embeds: EmbedSet, citations: (file: string)
     }
   }
   if (!finalised) {
-    try {
-      for (const problem of citations(path.join(paper, "workspace", "paper.qmd"))) problems.push(`workspace/paper.qmd: ${problem}`);
-    } catch (error) {
-      problems.push(`citation check for workspace/paper.qmd failed: ${message(error)}`);
-    }
+    for (const problem of citations(path.join(paper, "workspace", "paper.qmd"))) problems.push(`workspace/paper.qmd: ${problem}`);
   }
   return problems;
 }
@@ -358,9 +524,13 @@ function bibKeys(bib: string): Set<string> {
 // ---------------------------------------------------------------------------
 // The Predictions, and the pins.
 
-/** The Predictions fragment is included by the paper and is the argument's `## Predictions` section. */
-function predictionProblems(paper: string, qmd: string | undefined, embeds: EmbedSet, argument: Read): string[] {
+/**
+ * The Predictions fragment is included by the paper, and is the argument's `## Predictions` section followed by one
+ * newline, byte for byte: no trimming and no line-ending changes, so a stray space or a blank line is a difference.
+ */
+function predictionProblems(paper: string, explanation: string, qmd: string | undefined, embeds: EmbedSet): string[] {
   const problems: string[] = [];
+  const argument = readFile(explanation, "workspace/argument.md");
   if (argument.kind === "absent") problems.push("the explanation's workspace/argument.md is missing");
   else if (argument.kind === "refused") problems.push(argument.problem);
   if (qmd !== undefined && !embeds.includes.includes("embeds/predictions.qmd")) {
@@ -370,8 +540,8 @@ function predictionProblems(paper: string, qmd: string | undefined, embeds: Embe
   if (fragment.kind === "absent") problems.push("workspace/embeds/predictions.qmd is missing");
   else if (fragment.kind === "refused") problems.push(fragment.problem);
   else if (argument.kind === "file") {
-    const expected = sectionText(argument.bytes.toString("utf8"), "Predictions");
-    if (fragment.bytes.toString("utf8").replace(/\r\n/g, "\n").trim() !== expected) {
+    const expected = Buffer.from(`${sectionText(argument.bytes.toString("utf8"), "Predictions")}\n`, "utf8");
+    if (!fragment.bytes.equals(expected)) {
       problems.push("workspace/embeds/predictions.qmd differs from the argument's ## Predictions section");
     }
   }
@@ -383,7 +553,7 @@ function predictionProblems(paper: string, qmd: string | undefined, embeds: Embe
  * workspace hash (`owners/phase-3/loop/<E>/reproduction.json`) and the sha of the Predictions section. A pin that
  * differs is `stale`; a missing reproduction record is named, and its hash is not compared.
  */
-function pinProblems(runDir: string, paper: string, explanation: string, explanationId: string, argument: Read): string[] {
+function pinProblems(runDir: string, paper: string, explanation: string, explanationId: string): string[] {
   const pinsFile = readFile(paper, "workspace/checks/pins.json");
   if (pinsFile.kind === "absent") return ["checks/pins.json is missing (run init_paper)"];
   if (pinsFile.kind === "refused") return [pinsFile.problem];
@@ -418,6 +588,7 @@ function pinProblems(runDir: string, paper: string, explanation: string, explana
     }
   }
 
+  const argument = readFile(explanation, "workspace/argument.md");
   let argumentHash: string | undefined;
   let predictionsHash: string | undefined;
   if (argument.kind === "file") {
@@ -442,7 +613,50 @@ function pinProblems(runDir: string, paper: string, explanation: string, explana
 }
 
 // ---------------------------------------------------------------------------
+// The workspace root: no Quarto project configuration, extension, filter or stylesheet the writer could plant.
+
+function rootProblems(paper: string): string[] {
+  const problems: string[] = [];
+  for (const name of ROOT_REFUSED) {
+    const found = locate(paper, `workspace/${name}`);
+    if (found.kind === "refused") problems.push(found.problem);
+    else if (found.kind !== "absent") problems.push(`workspace/${name} is not allowed (Quarto would read it)`);
+  }
+  for (const entry of entriesOf(path.join(paper, "workspace"), "workspace", problems)) {
+    if (ROOT_FILE_REFUSED.test(entry.name)) problems.push(`workspace/${entry.name} is not allowed (Quarto would read it)`);
+  }
+  return problems;
+}
+
+// ---------------------------------------------------------------------------
 // Bare numbers and the warnings.
+
+/**
+ * The bare numbers of the paper's text, each with its 1-based line. Counted: digit runs of two or more digits and
+ * decimals, even when a letter or a percent sign follows (`12x`, `95th`, `12%`); in link text, image captions,
+ * headings, citation brackets (only the `@key` is blanked) and front matter values. Not counted: the shortcodes
+ * (includes and variables), link and image targets, URLs, identifiers in `{#…}`, block quotations, and a four-digit
+ * year from 1900 to 2100.
+ */
+function paperNumbers(qmd: string): { line: number; token: string }[] {
+  const raw = qmd.split(/\r?\n/);
+  let text = blank(qmd, ANY_SHORTCODE);
+  text = blank(text, /(?<=\])\([^)\n]*\)/g);
+  text = text.replace(/^(\s*\[[^\]\n]+\]:)\s*(\S+)/gm, (span, label: string) => label + " ".repeat(span.length - label.length));
+  text = blank(text, /[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+/g);
+  text = blank(text, CITATION_TOKEN);
+  text = blank(text, /\{#[A-Za-z][\w:.-]*\}/g);
+  const hits: { line: number; token: string }[] = [];
+  text.split(/\r?\n/).forEach((line, index) => {
+    if (QUOTE_LINE.test(raw[index] ?? "")) return;
+    for (const match of line.matchAll(new RegExp(NUMERAL, "g"))) {
+      const token = match[0];
+      if (YEAR.test(token) && Number(token) >= 1900 && Number(token) <= 2100) continue;
+      hits.push({ line: index + 1, token });
+    }
+  });
+  return hits;
+}
 
 /** The author placeholder in the front matter, as a warning. */
 function authorWarnings(qmd: string): string[] {
@@ -450,24 +664,6 @@ function authorWarnings(qmd: string): string[] {
   return front?.[1]?.includes(AUTHOR_PLACEHOLDER)
     ? [`workspace/paper.qmd's author is still the placeholder "${AUTHOR_PLACEHOLDER}"`]
     : [];
-}
-
-const blank = (span: string): string => " ".repeat(span.length);
-
-/**
- * The paper's prose lines for the bare-number detector: fenced code, front matter, comments and inline code are
- * already blank; here a block quotation, a shortcode (`{{< var >}}`, `{{< include >}}`), a citation bracket, an
- * attribute (`{#tbl-12}`) and a bare cross-reference are blanked too, so none of them counts.
- */
-function numberProse(qmd: string): string[] {
-  return proseLines(qmd).map((line) =>
-    line
-      .replace(/^\s*>.*$/, blank)
-      .replace(/\{\{<[\s\S]*?>\}\}/g, blank)
-      .replace(/\[[^\]]*@[^\]]*\]/g, blank)
-      .replace(/\{#[^}]*\}/g, blank)
-      .replace(/(?<![\w@.])-?@(?:fig|tbl|sec|eq)-[\w:.-]*/g, blank),
-  );
 }
 
 /** The bare-number limit from config.json; a config that cannot be read is a problem, and the default applies. */

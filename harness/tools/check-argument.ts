@@ -91,8 +91,13 @@ const FINDING = /^[-*+]\s+\[(F\d+)\]\s+\[(blocking|major|minor)\]\s+([^:]+?):\s+
 const STATUS = /^Status:\s*(DONE_WITH_CONCERNS|DONE|BLOCKED)\s*$/;
 const RULING = /^\s*(?:[-*+]\s+)?(F\d+):\s*(taken|overruled)\b\s*(?:[—–-]\s*)?(.*)$/i;
 const RESULT = /^Result:\s*(ok|concerns)\b/i;
-/** A bare number: a decimal, or two or more digits (with thousands separators), not part of a word or identifier. */
-const BARE_NUMBER = /(?<![\w.])(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\.\d+|\d{2,})(?!\w)/g;
+/**
+ * The digits of a bare number: a decimal, or two or more digits (with thousands separators), not part of a word or
+ * identifier. The argument's detector and the paper's (`check-paper.ts`) share it; they differ only in what follows.
+ */
+export const NUMERAL = String.raw`(?<![\w.])(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\.\d+|\d{2,})`;
+/** A bare number in argument.md: a numeral not followed by a word character. */
+const BARE_NUMBER = new RegExp(`${NUMERAL}(?!\\w)`, "g");
 
 export interface ReportFinding {
   id: string;

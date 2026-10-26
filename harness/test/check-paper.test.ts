@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -475,16 +475,10 @@ test("four bare numbers in prose are a problem listing them with their lines", a
   assert.match(problems[0] ?? "", /^workspace\/paper\.qmd has 4 bare numbers in prose \(limit 3\): line \d+ 12, line \d+ 34, line \d+ 56, line \d+ 78$/);
 });
 
-test("a year, and numbers in code, headings, includes, shortcodes and citation brackets, are not bare numbers", async (t) => {
+test("a year, an include, a shortcode and a citation bracket are not bare numbers", async (t) => {
   const f = fixture(t);
   const extra = [
-    "In 1999 and 2050 the rule held, see `12 34`.",
-    "",
-    "```",
-    "12 34 56 78",
-    "```",
-    "",
-    "## Table 78",
+    "In 1999 and 2050 the rule held.",
     "",
     "The share is {{< var m1_or_lspec >}} [@123].",
     "",
@@ -581,4 +575,411 @@ test("the CLI exits 2 on a usage error", (t) => {
   const f = fixture(t);
   assert.equal(spawnSync(process.execPath, [CHECK_PAPER], { encoding: "utf8" }).status, 2);
   assert.equal(spawnSync(process.execPath, [CHECK_PAPER, path.join(f.paper, "nowhere")], { encoding: "utf8" }).status, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Review round 1: the gate reads the raw paper. Quarto and pandoc render code spans, fences, comments and
+// raw blocks, so nothing is hidden from it; a construct it cannot judge is a problem.
+
+/** Whether the process may chmod away its own read access (root may read anything, so the probe would not bite). */
+const ROOT = process.getuid?.() === 0;
+
+/** The paper with `extra` appended to its prose. */
+function withProse(f: Fixture, extra: string): void {
+  put(at(f.paper, "workspace/paper.qmd"), `${PAPER_TEXT}\n${extra}\n`);
+}
+
+/** The paper with one front matter line added after the author line. */
+function withFront(line: string): string {
+  return PAPER_TEXT.replace('author: "Test Author"', `author: "Test Author"\n${line}`);
+}
+
+// Scanning is raw (review 1).
+
+test("a variable in inline code is a variable: it must be in _variables.yml", async (t) => {
+  const f = fixture(t);
+  withProse(f, "`x {{< var v >}}`");
+  assert.deepEqual((await check(f)).problems, ["variable v is not in workspace/_variables.yml"]);
+});
+
+test("a variable in a fence with an invalid opener is still a variable", async (t) => {
+  const f = fixture(t);
+  withProse(f, "``` a`b\n{{< var v >}}\n");
+  const { problems } = await check(f);
+  assert.ok(problems.some((p) => /line \d+: fenced code is not allowed/.test(p)), problems.join("\n"));
+  assert.ok(problems.includes("variable v is not in workspace/_variables.yml"), problems.join("\n"));
+});
+
+test("a citation in inline code is a citation: a draft key must be numeric or in references.bib", async (t) => {
+  const f = fixture(t);
+  withProse(f, "`x [@smith2020]`");
+  assert.deepEqual((await check(f)).problems, [
+    "workspace/paper.qmd cites @smith2020, which is neither a numeric chunk id nor in references.bib",
+  ]);
+});
+
+test("an image in inline code is an image: an unlisted image target is a problem", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/embeds/evil.png"), "arbitrary bytes\n");
+  withProse(f, "`x ![i](embeds/evil.png)`");
+  assert.deepEqual((await check(f)).problems, ["workspace/paper.qmd shows image embeds/evil.png, which is not an allowed embed"]);
+});
+
+// Raw constructs (review 2 and 6).
+
+test("a fence with a code chunk info string is a problem naming its line", async (t) => {
+  const f = fixture(t);
+  withProse(f, "```{python}\nprint(1)\n```");
+  const { problems } = await check(f);
+  assert.ok(problems.some((p) => /^workspace\/paper\.qmd line \d+: fenced code is not allowed/.test(p)), problems.join("\n"));
+});
+
+test("a raw LaTeX block with \\input is a problem: the fence and the command both", async (t) => {
+  const f = fixture(t);
+  withProse(f, "```{=latex}\n\\input{x}\n```");
+  const { problems } = await check(f);
+  assert.ok(problems.some((p) => /line \d+: fenced code is not allowed/.test(p)), problems.join("\n"));
+  assert.ok(problems.some((p) => /line \d+: TeX command \\input is not allowed/.test(p)), problems.join("\n"));
+});
+
+test("a tilde fence is a problem too", async (t) => {
+  const f = fixture(t);
+  withProse(f, "~~~\ncode\n~~~");
+  const { problems } = await check(f);
+  assert.ok(problems.some((p) => /fenced code is not allowed/.test(p)), problems.join("\n"));
+});
+
+test("raw HTML tags and comments are problems naming their lines", async (t) => {
+  const f = fixture(t);
+  withProse(f, "<span>x</span>\n<!-- hidden -->\n</div>");
+  const { problems } = await check(f);
+  for (const offset of [0, 1, 2]) {
+    const line = PAPER_LINE + offset;
+    assert.ok(problems.some((p) => p.startsWith(`workspace/paper.qmd line ${line}: raw HTML is not allowed`)), problems.join("\n"));
+  }
+});
+
+test("a raw script element is a problem", async (t) => {
+  const f = fixture(t);
+  withProse(f, "<script>x</script>");
+  const { problems } = await check(f);
+  assert.ok(problems.some((p) => /raw HTML is not allowed/.test(p)), problems.join("\n"));
+});
+
+test("a bare < followed by a space or a digit is not HTML", async (t) => {
+  const f = fixture(t);
+  withProse(f, "The effect was p < .05, and x <3.");
+  assert.deepEqual((await check(f)).problems, []);
+});
+
+test("each TeX command the list names is a problem", async (t) => {
+  const f = fixture(t);
+  const commands = ["input", "include", "write", "openin", "read", "immediate", "usepackage", "verbatiminput"];
+  withProse(f, commands.map((name) => `\\${name}{x}`).join("\n"));
+  const { problems } = await check(f);
+  commands.forEach((name, index) => {
+    assert.ok(problems.includes(`workspace/paper.qmd line ${PAPER_LINE + index}: TeX command \\${name} is not allowed`), problems.join("\n"));
+  });
+});
+
+/** The first line of the prose `withProse` appends: the paper's line count before it, plus one. */
+const PAPER_LINE = PAPER_TEXT.split("\n").length + 1;
+
+// Shortcodes (review 3).
+
+test("an env shortcode is a problem: it prints the environment", async (t) => {
+  const f = fixture(t);
+  withProse(f, "{{< env HOME >}}");
+  assert.ok((await check(f)).problems.some((p) => /line \d+: shortcode env is not allowed \(only var and include\)/.test(p)));
+});
+
+test("a meta shortcode is a problem: it prints the title", async (t) => {
+  const f = fixture(t);
+  withProse(f, "{{< meta title >}}");
+  assert.ok((await check(f)).problems.some((p) => /line \d+: shortcode meta is not allowed/.test(p)));
+});
+
+test("every other shortcode name is a problem too", async (t) => {
+  const f = fixture(t);
+  const names = ["kbd", "brand", "video", "embed", "pagebreak"];
+  withProse(f, names.map((name) => `{{< ${name} x >}}`).join("\n"));
+  const { problems } = await check(f);
+  for (const name of names) {
+    assert.ok(problems.some((p) => p.includes(`shortcode ${name} is not allowed`)), `${name}\n${problems.join("\n")}`);
+  }
+});
+
+test("the var shortcode in the spellings Quarto accepts is a variable, with no problem", async (t) => {
+  const f = fixture(t);
+  withProse(f, "{{<var m1_or_lspec>}} and {{< var  n_pages >}} and {{< var\nm1_or_lspec >}}");
+  assert.deepEqual(await check(f), { problems: [], warnings: [] });
+});
+
+test("a malformed var shortcode is a problem naming its line", async (t) => {
+  const f = fixture(t);
+  withProse(f, "{{< var >}}");
+  assert.ok((await check(f)).problems.some((p) => /line \d+: malformed \{\{< shortcode/.test(p)));
+});
+
+test("a shortcode that never closes is a problem naming its line", async (t) => {
+  const f = fixture(t);
+  withProse(f, "The count {{< var n_pages");
+  assert.ok((await check(f)).problems.some((p) => /line \d+: malformed \{\{< shortcode/.test(p)));
+});
+
+// Includes and images (review 2).
+
+test("an include outside the allow-list is a problem, and its fragment is not counted", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/embeds/notes/n.qmd"), "Counted 12 34 56 78\n");
+  withProse(f, "{{< include embeds/notes/n.qmd >}}");
+  assert.deepEqual((await check(f)).problems, [
+    "workspace/paper.qmd includes embeds/notes/n.qmd, which is not an allowed embed (embeds/tables/*.qmd, embeds/quotes/Q<nn>.qmd, embeds/predictions.qmd)",
+  ]);
+});
+
+test("an image outside the allowed folders is a problem, whatever its bytes", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/embeds/evil.png"), "arbitrary bytes\n");
+  withProse(f, "![x](embeds/evil.png)");
+  assert.deepEqual((await check(f)).problems, ["workspace/paper.qmd shows image embeds/evil.png, which is not an allowed embed"]);
+});
+
+test("a reference-style image is a problem", async (t) => {
+  const f = fixture(t);
+  withProse(f, "![x][ref]\n\n[ref]: embeds/figures/F1.png");
+  assert.ok((await check(f)).problems.some((p) => /reference-style image is not allowed/.test(p)));
+});
+
+test("an img element is a problem", async (t) => {
+  const f = fixture(t);
+  withProse(f, '<img src="../../x.png">');
+  assert.ok((await check(f)).problems.some((p) => /raw HTML is not allowed/.test(p)));
+});
+
+test("a table fragment with a shortcode is a problem: fragments are scanned raw", async (t) => {
+  const f = fixture(t);
+  const table = "| a |\n{{< var m1_or_lspec >}}\n";
+  put(at(f.paper, "workspace/embeds/tables/T1.qmd"), table);
+  put(at(f.explanation, "workspace/output/assets/T1.qmd"), table);
+  assert.ok((await check(f)).problems.some((p) => /^workspace\/embeds\/tables\/T1\.qmd: contains a \{\{< shortcode/.test(p)));
+});
+
+test("a table fragment with a fence is a problem", async (t) => {
+  const f = fixture(t);
+  const table = "| a |\n```\ncode\n```\n";
+  put(at(f.paper, "workspace/embeds/tables/T1.qmd"), table);
+  put(at(f.explanation, "workspace/output/assets/T1.qmd"), table);
+  assert.ok((await check(f)).problems.some((p) => /^workspace\/embeds\/tables\/T1\.qmd: contains fenced code/.test(p)));
+});
+
+// Hand-typed block quotations (review 5).
+
+test("a block quotation in a list item is a hand-typed quotation", async (t) => {
+  const f = fixture(t);
+  withProse(f, "- > Rules of the house.");
+  assert.ok((await check(f)).problems.some((p) => /line \d+: a hand-typed block quotation/.test(p)));
+});
+
+test("a numbered or starred list item with a quotation is a hand-typed quotation", async (t) => {
+  const f = fixture(t);
+  withProse(f, "1. > Rules of the house.\n  * > More rules.");
+  const { problems } = await check(f);
+  assert.equal(problems.filter((p) => /hand-typed block quotation/.test(p)).length, 1, problems.join("\n"));
+});
+
+// Bare numbers (review 4). Every probe runs at limit 0, so one number is one count.
+
+test("a number in link text counts", async (t) => {
+  const f = fixture(t);
+  withProse(f, "[40 12 56 78](https://example.org/a)");
+  const { problems } = await check(f, { bareNumberLimit: 0 });
+  assert.ok(problems.some((p) => p.startsWith("workspace/paper.qmd has 4 bare numbers in prose (limit 0)")), problems.join("\n"));
+});
+
+test("a number in an image caption counts", async (t) => {
+  const f = fixture(t);
+  withProse(f, "![The 40 12 56 78 share](embeds/figures/F1.png)");
+  const { problems } = await check(f, { bareNumberLimit: 0 });
+  assert.ok(problems.some((p) => p.startsWith("workspace/paper.qmd has 4 bare numbers in prose (limit 0)")), problems.join("\n"));
+});
+
+test("numbers in a citation bracket count: only the key is blanked", async (t) => {
+  const f = fixture(t);
+  withProse(f, "[12 34 56 78, @smith2020]");
+  const { problems } = await check(f, { bareNumberLimit: 0, citations: (): string[] => [] });
+  assert.ok(problems.some((p) => p.startsWith("workspace/paper.qmd has 4 bare numbers in prose (limit 0)")), problems.join("\n"));
+});
+
+test("a number in a non-identifier attribute-looking text counts", async (t) => {
+  const f = fixture(t);
+  withProse(f, "{# 12 34 56 78 }");
+  const { problems } = await check(f, { bareNumberLimit: 0 });
+  assert.ok(problems.some((p) => p.startsWith("workspace/paper.qmd has 4 bare numbers in prose (limit 0)")), problems.join("\n"));
+});
+
+test("numbers with letters or a percent sign after them count", async (t) => {
+  const f = fixture(t);
+  withProse(f, "12x 95th 12e6 12ms");
+  const { problems } = await check(f, { bareNumberLimit: 0 });
+  assert.ok(problems.some((p) => p.startsWith("workspace/paper.qmd has 4 bare numbers in prose (limit 0)")), problems.join("\n"));
+});
+
+test("numbers in the front matter's values count", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/paper.qmd"), withFront('abstract: "Forty 12 34 56 78 cases"'));
+  const { problems } = await check(f, { bareNumberLimit: 0 });
+  assert.ok(problems.some((p) => p.startsWith("workspace/paper.qmd has 4 bare numbers in prose (limit 0)")), problems.join("\n"));
+});
+
+test("a number in a heading counts", async (t) => {
+  const f = fixture(t);
+  withProse(f, "## Table 78");
+  const { problems } = await check(f, { bareNumberLimit: 0 });
+  assert.ok(problems.some((p) => /has 1 bare number in prose \(limit 0\): line \d+ 78$/.test(p)), problems.join("\n"));
+});
+
+test("a year and a cross-reference id are not counted", async (t) => {
+  const f = fixture(t);
+  withProse(f, "In 1999 and 2050 see @fig-12 and {#tbl-12}.");
+  assert.deepEqual(await check(f, { bareNumberLimit: 0, citations: (): string[] => [] }), { problems: [], warnings: [] });
+});
+
+// Front matter (review 6).
+
+test("a front matter key outside the allow-list is a problem", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/paper.qmd"), withFront("filters:\n  - x.lua"));
+  assert.deepEqual((await check(f)).problems, ["workspace/paper.qmd front matter key filters is not allowed"]);
+});
+
+test("each Quarto key that can run code or inject markup is a problem", async (t) => {
+  const f = fixture(t);
+  const keys = ["include-in-header", "include-before-body", "execute", "format", "resources"];
+  put(at(f.paper, "workspace/paper.qmd"), withFront(keys.map((key) => `${key}: x`).join("\n")));
+  const { problems } = await check(f);
+  for (const key of keys) assert.ok(problems.includes(`workspace/paper.qmd front matter key ${key} is not allowed`), problems.join("\n"));
+});
+
+test("a bibliography other than references.bib is a problem", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/paper.qmd"), PAPER_TEXT.replace("bibliography: references.bib", "bibliography: other.bib"));
+  assert.deepEqual((await check(f)).problems, ["workspace/paper.qmd front matter bibliography must be references.bib"]);
+});
+
+test("a csl other than apa.csl is a problem", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/paper.qmd"), withFront("csl: other.csl"));
+  assert.deepEqual((await check(f)).problems, ["workspace/paper.qmd front matter csl must be apa.csl"]);
+});
+
+test("every allowed front matter key passes", async (t) => {
+  const f = fixture(t);
+  const allowed = [
+    'subtitle: "A plain subtitle"',
+    "keywords:\n  - etiquette",
+    'abstract: "Plain words only"',
+    'date: "October"',
+    "lang: en",
+    "toc: true",
+    "number-sections: true",
+    "fig-cap-location: bottom",
+    "tbl-cap-location: top",
+    "link-citations: true",
+    "csl: apa.csl",
+  ];
+  put(at(f.paper, "workspace/paper.qmd"), withFront(allowed.join("\n")));
+  assert.deepEqual(await check(f), { problems: [], warnings: [] });
+});
+
+// The workspace root (review 6): no Quarto project file, extension or filter the writer could plant.
+
+test("a _metadata.yml, an _extensions folder, a lua filter and a stylesheet in the workspace root are each a problem", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/_metadata.yml"), "filters: [x.lua]\n");
+  mkdirSync(at(f.paper, "workspace/_extensions/x"), { recursive: true });
+  put(at(f.paper, "workspace/filter.lua"), "-- lua\n");
+  put(at(f.paper, "workspace/style.css"), "p {}\n");
+  const { problems } = await check(f);
+  for (const name of ["_metadata.yml", "_extensions", "filter.lua", "style.css"]) {
+    assert.ok(problems.some((p) => p.startsWith(`workspace/${name} is not allowed`)), `${name}\n${problems.join("\n")}`);
+  }
+});
+
+// Quotations and citations (minor 9 and 10).
+
+test("an @ in a URL is not a citation", async (t) => {
+  const f = fixture(t);
+  withProse(f, "See https://x.org/@user for details.");
+  assert.deepEqual(await check(f), { problems: [], warnings: [] });
+});
+
+test("a Unicode citation key is read whole: [@müller2020] is the key müller2020", async (t) => {
+  const f = fixture(t);
+  withProse(f, "As [@müller2020] shows.");
+  assert.deepEqual((await check(f)).problems, [
+    "workspace/paper.qmd cites @müller2020, which is neither a numeric chunk id nor in references.bib",
+  ]);
+});
+
+test("a quoted include path is accepted", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/paper.qmd"), PAPER_TEXT.replace("{{< include embeds/tables/T1.qmd >}}", '{{< include "embeds/tables/T1.qmd" >}}'));
+  assert.deepEqual(await check(f), { problems: [], warnings: [] });
+});
+
+test("a quoted include outside embeds/ names the path it refuses", async (t) => {
+  const f = fixture(t);
+  withProse(f, '{{< include "../../x.qmd" >}}');
+  assert.ok((await check(f)).problems.includes("workspace/paper.qmd includes ../../x.qmd, which is outside workspace/embeds/"));
+});
+
+// The Predictions fragment is byte for byte (review 8).
+
+test("a Predictions fragment with leading spaces is a problem", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/embeds/predictions.qmd"), `  ${PREDICTIONS}\n`);
+  assert.deepEqual((await check(f)).problems, ["workspace/embeds/predictions.qmd differs from the argument's ## Predictions section"]);
+});
+
+test("a Predictions fragment with trailing blank lines is a problem", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/embeds/predictions.qmd"), `${PREDICTIONS}\n\n`);
+  assert.deepEqual((await check(f)).problems, ["workspace/embeds/predictions.qmd differs from the argument's ## Predictions section"]);
+});
+
+test("a Predictions fragment with CRLF endings is a problem", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/embeds/predictions.qmd"), `${PREDICTIONS}\r\n`);
+  assert.deepEqual((await check(f)).problems, ["workspace/embeds/predictions.qmd differs from the argument's ## Predictions section"]);
+});
+
+// Never throws (review 7).
+
+test("an unreadable embeds folder is a problem naming it, and checkPaper does not throw", { skip: ROOT }, async (t) => {
+  const f = fixture(t);
+  const embeds = at(f.paper, "workspace/embeds");
+  chmodSync(embeds, 0o000);
+  try {
+    const { problems } = await check(f);
+    assert.ok(
+      problems.some((p) => p.includes("workspace/embeds") && /cannot be read: EACCES|cannot be listed/.test(p)),
+      problems.join("\n"),
+    );
+  } finally {
+    chmodSync(embeds, 0o755);
+  }
+});
+
+test("the CLI exits 1, not 2, for an unreadable embeds folder", { skip: ROOT }, (t) => {
+  const f = fixture(t);
+  const embeds = at(f.paper, "workspace/embeds");
+  chmodSync(embeds, 0o000);
+  try {
+    const result = spawnSync(process.execPath, [CHECK_PAPER, f.paper], { encoding: "utf8" });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stdout, /workspace\/embeds/);
+  } finally {
+    chmodSync(embeds, 0o755);
+  }
 });

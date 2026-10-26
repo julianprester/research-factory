@@ -1,14 +1,23 @@
-// The embeds a paper names (design §5, §8.1): its `{{< var >}}` keys, its `{{< include >}}` paths, its
-// images and its citation keys. `scanEmbeds` reads a Quarto manuscript, and `embedSetDiff` says how two
-// scans differ, so a style pass that changes an embed is caught by counts (design §8).
+// The embeds a paper names (design §5, §8.1): its `{{< var >}}` keys, its `{{< include >}}` paths, its images
+// and its citation keys. `scanEmbeds` reads the raw manuscript and masks nothing: Quarto and pandoc render code
+// spans, fences, comments and raw blocks too, so an embed in any of them is an embed. `checkPaper` refuses the
+// constructs that would hide one (fences, raw HTML, TeX commands, other shortcodes), so a raw scan is the whole
+// story.
 //
-// Fenced code, inline code, HTML comments and the YAML front matter are not prose and hold no embeds:
-// they are blanked line by line first, so every line keeps its number. A citation is an `@key` that is
-// not part of a word (an email is not one) and that is not a cross-reference (`fig-`, `tbl-`, `sec-`, `eq-`).
-import { maskCode } from "../tools/check-argument.ts";
-import { maskFences } from "../tools/check-puzzle.ts";
+// `embedSetDiff` says how two scans differ, so a style pass that adds or drops an embed is caught by counts.
+// A citation is an `@key` or `-@key` that is not a part of a word, a path or a URL (`foo@bar.com`,
+// `https://x.org/@user`), and that is not a cross-reference (`fig-`, `tbl-`, `sec-`, `eq-`). Keys may hold Unicode
+// letters.
 
-/** Each list is sorted, with repeats kept: a multiset of the embeds in one manuscript. */
+/** A var shortcode, in the spellings Quarto accepts: `{{<var x>}}`, extra spaces and a newline inside. The key is the first group. */
+export const VAR_SHORTCODE = /\{\{<\s*var\s+([^\s>}]+)\s*>\}\}/g;
+/** An include shortcode with its path bare or in quotation marks. The path is the first group, or the second when quoted. */
+export const INCLUDE_SHORTCODE = /\{\{<\s*include\s+(?:"([^"\n]+)"|([^\s>"}]+))\s*>\}\}/g;
+/** An inline image `![alt](target "title")`; the target is the first group. A reference-style image is not one. */
+export const IMAGE = /!\[[^\]\n]*\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"\n]*")?\s*\)/g;
+/** A citation or cross-reference token: `@key`, or `-@key`, not preceded by a word, a dot, a slash or an `@`. The key is the first group. */
+export const CITATION_TOKEN = /(?<![\p{L}\p{N}_@./])-?@([\p{L}\p{N}_](?:[\p{L}\p{N}_:.-]*[\p{L}\p{N}_])?)/gu;
+
 export interface EmbedSet {
   vars: string[];
   includes: string[];
@@ -17,45 +26,24 @@ export interface EmbedSet {
   citations: string[];
 }
 
-const VAR = /\{\{<\s*var\s+([^\s>]+)\s*>\}\}/g;
-const INCLUDE = /\{\{<\s*include\s+([^\s>]+)\s*>\}\}/g;
-const IMAGE = /!\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g;
-/** `[@key]`, `[-@key]`, `@key`: the `@` is not part of a word, so `foo@bar.com` is not a citation. */
-const CITATION = /(?<![\w@.])-?@([\w](?:[\w:.-]*[\w])?)/g;
 const CROSS_REFERENCE = /^(?:fig|tbl|sec|eq)-/;
 const QUOTES_PREFIX = "embeds/quotes/";
 
-/**
- * The lines of a Quarto document with everything that is not prose blanked to spaces: fenced code, the YAML
- * front matter, HTML comments and inline code. Every line keeps its number, so a line of the result is the
- * line of the source.
- */
-export function proseLines(qmd: string): string[] {
-  const lines = maskFences(qmd);
-  if (lines[0]?.trim() === "---") {
-    const close = lines.findIndex((line, index) => index > 0 && /^(?:---|\.\.\.)\s*$/.test(line));
-    if (close > 0) for (let index = 0; index <= close; index++) lines[index] = "";
-  }
-  const text = lines.join("\n").replace(/<!--[\s\S]*?-->/g, (comment) => comment.replace(/[^\n]/g, " "));
-  return text.split("\n").map(maskCode);
-}
-
-/** The embeds of a manuscript: its variables, includes (and the quotation ones), images and citation keys. */
+/** The embeds of a manuscript, read raw: its variables, includes (and the quotation ones), images and citation keys. */
 export function scanEmbeds(qmd: string): EmbedSet {
-  const text = proseLines(qmd).join("\n");
-  const includes = matchesOf(text, INCLUDE);
+  const includes = captures(qmd, INCLUDE_SHORTCODE);
   return {
-    vars: matchesOf(text, VAR),
+    vars: captures(qmd, VAR_SHORTCODE),
     includes,
-    images: matchesOf(text, IMAGE),
+    images: captures(qmd, IMAGE),
     quotes: includes.filter((target) => target.startsWith(QUOTES_PREFIX)),
-    citations: matchesOf(text, CITATION).filter((key) => !CROSS_REFERENCE.test(key)),
+    citations: captures(qmd, CITATION_TOKEN).filter((key) => !CROSS_REFERENCE.test(key)),
   };
 }
 
-/** The first capture of each match, sorted. */
-function matchesOf(text: string, pattern: RegExp): string[] {
-  return [...text.matchAll(pattern)].map((match) => match[1] ?? "").sort();
+/** The first or second capture of each match of a global pattern (the second for a quoted include path), sorted. */
+function captures(text: string, pattern: RegExp): string[] {
+  return [...text.matchAll(pattern)].map((match) => match[1] ?? match[2] ?? "").sort();
 }
 
 const CATEGORIES: [keyof EmbedSet, string][] = [
