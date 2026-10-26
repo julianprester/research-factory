@@ -4,7 +4,7 @@
 // image-backed tests skip with their reason when ctc-paper:1 is not built.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
@@ -46,11 +46,24 @@ function fakeQuarto(fake: Fake): { exec: Exec; calls: string[][] } {
 /** The html and docx a clean render writes, with one table in the HTML for the one table include. */
 const CLEAN = { "checks/render/paper.html": "<html><table><tr><td>A</td></tr></table></html>", "checks/render/paper.docx": "PK docx" };
 
-function setup(t: import("node:test").TestContext, paper: string = PAPER) {
+/** A paper with numeric chunk-id citations, as drafted before `submit_paper` finalises them. */
+const DRAFT = PAPER.replace("Readers copy.", "Readers copy [@939306] [@961198].");
+/** The warnings Quarto prints for numeric chunk ids against an empty bibliography (verified). */
+const NUMERIC_WARNINGS = "[WARNING] Citeproc: citation 939306 not found\n[WARNING] Citeproc: citation 961198 not found\n";
+
+/** The files under a folder, relative and sorted, leaving out nothing. */
+function filesUnder(dir: string, rel = ""): string[] {
+  return readdirSync(path.join(dir, rel), { withFileTypes: true })
+    .flatMap((entry) => (entry.isDirectory() ? filesUnder(dir, path.join(rel, entry.name)) : [path.join(rel, entry.name)]))
+    .sort();
+}
+
+/** A set-up paper. `finalised` (the default) writes `references.bib`; a draft has none, as before `submit_paper`. */
+function setup(t: import("node:test").TestContext, paper: string = PAPER, finalised = true) {
   const f = paperRun(t, undefined);
   put(path.join(f.paper, "workspace", "paper.qmd"), paper);
   put(path.join(f.paper, "workspace", "embeds", "tables", "T1.qmd"), "| Group | N |\n|---|---|\n| A | 12 |\n");
-  put(path.join(f.paper, "workspace", "references.bib"), "");
+  if (finalised) put(path.join(f.paper, "workspace", "references.bib"), "");
   put(path.join(f.paper, "workspace", "_quarto.yml"), readFileSync(path.join(TEMPLATES, "_quarto.yml")));
   put(path.join(f.paper, "workspace", "apa.csl"), readFileSync(path.join(TEMPLATES, "apa.csl")));
   return f;
@@ -192,6 +205,78 @@ test("renderPaper reports a missing config and a missing paper without throwing"
 });
 
 // ---------------------------------------------------------------------------
+// Draft mode: no references.bib yet, so the render runs on a scratch copy with an empty one.
+
+const SCRATCH = (f: { run: string; paper: string }) => path.join(f.run, ".analysis", "paper-render", path.basename(f.paper));
+
+test("a draft render mounts a scratch copy with an empty references.bib; the real workspace gets only the two outputs", async (t) => {
+  const f = setup(t, DRAFT, false);
+  const before = filesUnder(path.join(f.paper, "workspace"));
+  const inner = fakeQuarto({ write: CLEAN, stdout: NUMERIC_WARNINGS });
+  const seen: { folder: string; bib?: string }[] = [];
+  const exec: Exec = async (args, opts) => {
+    const folder = workOf(args);
+    seen.push({ folder, bib: existsSync(path.join(folder, "references.bib")) ? readFileSync(path.join(folder, "references.bib"), "utf8") : undefined });
+    return inner.exec(args, opts);
+  };
+  assert.deepEqual(await renderPaper(f.run, f.paper, exec), { problems: [] });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.folder, SCRATCH(f), "the scratch copy is what is mounted");
+  assert.equal(seen[0]?.bib, "", "the scratch holds an empty references.bib");
+  assert.ok(!existsSync(path.join(f.paper, "workspace", "references.bib")), "the real workspace gets no references.bib");
+  assert.deepEqual(filesUnder(path.join(f.paper, "workspace")), [...before, "checks/render/paper.docx", "checks/render/paper.html"].sort());
+  assert.equal(readFileSync(path.join(f.paper, "workspace", "checks", "render", "paper.html"), "utf8"), CLEAN["checks/render/paper.html"]);
+  assert.equal(readFileSync(path.join(f.paper, "workspace", "checks", "render", "paper.docx"), "utf8"), CLEAN["checks/render/paper.docx"]);
+});
+
+test("a draft render passes with the numeric citation warnings, and an old real output does not survive a failed draft", async (t) => {
+  const f = setup(t, DRAFT, false);
+  put(path.join(f.paper, "workspace", "checks", "render", "paper.html"), "<old/>");
+  put(path.join(f.paper, "workspace", "checks", "render", "paper.docx"), "old");
+  const failed = await renderPaper(f.run, f.paper, fakeQuarto({ write: { "checks/render/paper.html": "<table><tr><td>A</td></tr></table><p>?@fig-nope</p>", "checks/render/paper.docx": "PK" }, stdout: NUMERIC_WARNINGS }).exec);
+  assert.deepEqual(failed.problems, ["workspace/checks/render/paper.html has an unresolved cross-reference: ?@fig-nope"]);
+  assert.ok(!existsSync(path.join(f.paper, "workspace", "checks", "render", "paper.html")), "the stale html is gone");
+  assert.ok(!existsSync(path.join(f.paper, "workspace", "checks", "render", "paper.docx")), "the stale docx is gone");
+  assert.ok(!existsSync(path.join(f.paper, "workspace", "references.bib")));
+});
+
+test("a draft with an unresolved cross-reference is still a problem", async (t) => {
+  const f = setup(t, DRAFT.replace("Readers copy", "Readers copy @fig-nope"), false);
+  const html = "<table><tr><td>A</td></tr></table><p>See ?@fig-nope.</p>";
+  const result = await renderPaper(f.run, f.paper, fakeQuarto({ write: { "checks/render/paper.html": html, "checks/render/paper.docx": "PK" }, stdout: NUMERIC_WARNINGS }).exec);
+  assert.deepEqual(result.problems, ["workspace/checks/render/paper.html has an unresolved cross-reference: ?@fig-nope"]);
+});
+
+test("a draft with a non-numeric unresolved citation is still a problem; the numeric ones beside it are not", async (t) => {
+  const f = setup(t, DRAFT.replace("Readers copy", "Readers copy [@nobody2099]"), false);
+  const stdout = `${NUMERIC_WARNINGS}[WARNING] Citeproc: citation nobody2099 not found\n`;
+  const result = await renderPaper(f.run, f.paper, fakeQuarto({ write: CLEAN, stdout }).exec);
+  assert.deepEqual(result.problems, ["workspace/paper.qmd render: [WARNING] Citeproc: citation nobody2099 not found"]);
+  assert.ok(!existsSync(path.join(f.paper, "workspace", "checks", "render", "paper.html")), "a draft that fails publishes no html");
+});
+
+test("a draft refuses a link in the workspace and runs nothing", async (t) => {
+  const f = setup(t, DRAFT, false);
+  const outside = path.join(f.run, "outside.txt");
+  writeFileSync(outside, "secret");
+  symlinkSync(outside, path.join(f.paper, "workspace", "notes.txt"));
+  const fake = fakeQuarto({ write: CLEAN, stdout: NUMERIC_WARNINGS });
+  const result = await renderPaper(f.run, f.paper, fake.exec);
+  assert.equal(fake.calls.length, 0, "no container is run");
+  assert.ok(result.problems.some((p) => /notes\.txt is a link/.test(p)), result.problems.join("\n"));
+  assert.ok(!existsSync(path.join(f.paper, "workspace", "references.bib")));
+});
+
+test("a finalised paper (references.bib present) keeps a numeric citation warning as a problem", async (t) => {
+  const f = setup(t, DRAFT, true);
+  const result = await renderPaper(f.run, f.paper, fakeQuarto({ write: CLEAN, stdout: NUMERIC_WARNINGS }).exec);
+  assert.deepEqual(result.problems, [
+    "workspace/paper.qmd render: [WARNING] Citeproc: citation 939306 not found",
+    "workspace/paper.qmd render: [WARNING] Citeproc: citation 961198 not found",
+  ]);
+});
+
+// ---------------------------------------------------------------------------
 // The image-backed tests: the real Quarto in ctc-paper:1.
 
 const IMAGE_PRESENT = spawnSync("docker", ["image", "inspect", "ctc-paper:1"], { encoding: "utf8" }).status === 0;
@@ -233,4 +318,13 @@ test("a render that changes or adds a file the checks read is a problem", async 
     "workspace/checks/pins.json was changed by the render",
     "workspace/extra.txt was added by the render",
   ]);
+});
+
+test("the paper image renders a draft with numeric citations and no references.bib, leaving no bibliography behind", { skip: SKIP, timeout: 600_000 }, async (t) => {
+  const f = setup(t, DRAFT, false);
+  const result = await renderPaper(f.run, f.paper);
+  assert.deepEqual(result.problems, []);
+  assert.ok(!existsSync(path.join(f.paper, "workspace", "references.bib")), "no references.bib in the real workspace");
+  assert.equal(readFileSync(path.join(f.paper, "workspace", "checks", "render", "paper.docx")).subarray(0, 2).toString(), "PK");
+  assert.ok(readFileSync(path.join(f.paper, "workspace", "checks", "render", "paper.html"), "utf8").length > 0);
 });

@@ -8,6 +8,11 @@
 // snapshotted before and after: a file the render changed or added is a problem (the outputs under checks/render
 // are the render's own). An earlier render's outputs are removed first, so an old docx cannot pass a failed render.
 //
+// A draft (no `workspace/references.bib` yet: `submit_paper` writes it) cannot render in place, because Quarto fails on
+// the front matter's bibliography. So the render runs on a scratch copy under `.analysis/paper-render/<node>/` with an
+// empty `references.bib`; numeric chunk-id citations then warn "citation <digits> not found", which is ignored (the
+// check-citations pass has verified them). The real workspace receives only the two outputs, and only when the draft renders clean.
+//
 // The problems: a WARNING line of the render's output (a citation not found, an empty include); a non-zero exit or
 // a timeout (the container is killed by name, as `runScript` does); a missing or empty html or docx; and a table
 // include whose HTML holds fewer `<table` elements than the paper has table includes. The count is a floor: a
@@ -17,8 +22,8 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { realExec, type Exec } from "../analysis/run.ts";
-import { locate, readRegular } from "../explain/rounds.ts";
+import { ignoreScratch, realExec, type Exec } from "../analysis/run.ts";
+import { locate, readRegular, writeAtomic } from "../explain/rounds.ts";
 import { readConfig } from "../launch.ts";
 import { scanEmbeds } from "./embeds.ts";
 
@@ -30,6 +35,10 @@ export const RENDER_DIR = "checks/render";
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 /** A cross-reference Quarto could not resolve: printed as `?@` and a label. */
 const UNRESOLVED_REFERENCE = /\?@[\p{L}\p{N}_-]+/gu;
+/** The draft's citation warning for a numeric chunk id: the empty bibliography has no entry for it (see the header). */
+const NUMERIC_CITATION = /Citeproc: citation \d+ not found$/;
+/** The render's outputs in the workspace, in draft mode published only when clean. */
+const OUTPUTS = [`${RENDER_DIR}/paper.html`, `${RENDER_DIR}/paper.docx`];
 
 export interface PaperDockerOptions {
   image: string;
@@ -132,9 +141,10 @@ function changedBy(before: Map<string, string>, after: Map<string, string>): str
 
 /** The problems of a finished render's output: its warnings, its exit, and the html and docx it should have written. */
 function outputProblems(
-  node: string,
+  folder: string,
   result: { code: number; stdout: string; stderr: string; timedOut: boolean },
   timeoutMs: number,
+  draft: boolean,
 ): string[] {
   const problems: string[] = [];
   if (result.timedOut) problems.push(`quarto render timed out after ${timeoutMs} ms`);
@@ -145,13 +155,14 @@ function outputProblems(
   const warnings = `${result.stdout}\n${result.stderr}`
     .split(/\r?\n/)
     .map((line) => line.replace(ANSI, "").trim())
-    .filter((line) => /\bWARNING\b/.test(line));
+    .filter((line) => /\bWARNING\b/.test(line))
+    .filter((line) => !(draft && NUMERIC_CITATION.test(line)));
   for (const warning of new Set(warnings)) problems.push(`${WORKSPACE}/paper.qmd render: ${warning}`);
 
-  const html = fileOutput(node, `${RENDER_DIR}/paper.html`, problems);
-  fileOutput(node, `${RENDER_DIR}/paper.docx`, problems);
+  const html = fileOutput(folder, `${RENDER_DIR}/paper.html`, problems);
+  fileOutput(folder, `${RENDER_DIR}/paper.docx`, problems);
   if (html !== undefined) problems.push(...crossReferenceProblems(html));
-  return problems.concat(tableProblems(node, html));
+  return problems.concat(tableProblems(folder, html));
 }
 
 /** An unresolved cross-reference: Quarto prints `@fig-x` it cannot resolve as `?@fig-x`, with no WARNING. */
@@ -161,9 +172,9 @@ function crossReferenceProblems(html: Buffer): string[] {
 }
 
 /** The bytes of one render output, or nothing (a problem is added for a missing, empty or refused one). */
-function fileOutput(node: string, rel: string, problems: string[]): Buffer | undefined {
+function fileOutput(folder: string, rel: string, problems: string[]): Buffer | undefined {
   try {
-    const bytes = readRegular(path.join(node, WORKSPACE), rel);
+    const bytes = readRegular(folder, rel);
     if (bytes === undefined) problems.push(`${WORKSPACE}/${rel} is missing`);
     else if (bytes.length === 0) problems.push(`${WORKSPACE}/${rel} is empty`);
     else return bytes;
@@ -174,9 +185,9 @@ function fileOutput(node: string, rel: string, problems: string[]): Buffer | und
 }
 
 /** A shortfall: the paper has more table includes than the HTML has `<table` elements. Nothing is said without the HTML. */
-function tableProblems(node: string, html: Buffer | undefined): string[] {
+function tableProblems(folder: string, html: Buffer | undefined): string[] {
   if (html === undefined) return [];
-  const qmd = readRegular(node, `${WORKSPACE}/paper.qmd`)?.toString("utf8") ?? "";
+  const qmd = readRegular(folder, "paper.qmd")?.toString("utf8") ?? "";
   const tables = scanEmbeds(qmd).includes.filter((target) => target.startsWith("embeds/tables/")).length;
   const elements = (html.toString("utf8").match(/<table[\s>]/g) ?? []).length;
   if (tables <= elements) return [];
@@ -200,33 +211,132 @@ async function renderProblems(runDir: string, nodeDir: string, exec: Exec | unde
   const node = path.resolve(nodeDir);
   // The workspace is the container's mount source: it must be a real folder (not a link) before anything is read or run through it.
   if (!realFolder(node, WORKSPACE)) return [`${WORKSPACE} is missing`];
-  const manuscript = locate(path.join(node, WORKSPACE), "paper.qmd");
+  const workspace = path.join(node, WORKSPACE);
+  const manuscript = locate(workspace, "paper.qmd");
   if (manuscript.kind === "refused") return [manuscript.problem];
   if (manuscript.kind !== "file") return [];
 
   const config = readConfig(runDir);
-  const workspace = path.join(node, WORKSPACE);
-  realFolder(workspace, "checks");
-  if (realFolder(workspace, RENDER_DIR)) fs.rmSync(path.join(workspace, ...RENDER_DIR.split("/")), { recursive: true, force: true });
-  fs.mkdirSync(path.join(workspace, ...RENDER_DIR.split("/")), { recursive: true });
-  realFolder(workspace, RENDER_DIR);
+  const bibliography = locate(workspace, "references.bib");
+  if (bibliography.kind === "refused") return [bibliography.problem];
+  if (bibliography.kind === "absent") return draftProblems(runDir, node, config, exec);
 
-  const before = snapshot(workspace);
-  const ids = hostIds();
+  freshRenderDir(workspace);
+  const { problems } = await runRender(workspace, () => realFolder(node, WORKSPACE), config, exec, false);
+  return problems;
+}
+
+/**
+ * A draft: the render runs on a scratch copy of the workspace with an empty `references.bib`, and the real workspace
+ * gets the two outputs only when the render is clean. Its stale outputs are removed first, so none outlives a failure.
+ */
+async function draftProblems(runDir: string, node: string, config: ReturnType<typeof readConfig>, exec: Exec | undefined): Promise<string[]> {
+  const workspace = path.join(node, WORKSPACE);
+  const name = path.basename(node);
+  const scratchRoot = path.join(runDir, ".analysis", "paper-render");
+  const scratch = path.join(scratchRoot, name);
+  // `.analysis/` must be ignored before the first scratch file exists, or a partial run leaves the tree dirty.
+  ignoreScratch(runDir);
+  // The scratch is written by the harness only: a link or file on its path is refused before anything is written through it.
+  realFolderOrAbsent(runDir, ".analysis");
+  realFolderOrAbsent(runDir, ".analysis/paper-render");
+  const scratchFound = locate(runDir, `.analysis/paper-render/${name}`);
+  if (scratchFound.kind === "refused") return [scratchFound.problem];
+  for (const rel of OUTPUTS) {
+    const found = locate(workspace, rel);
+    if (found.kind === "refused") return [found.problem];
+    if (found.kind === "file") fs.rmSync(path.join(workspace, ...rel.split("/")), { force: true });
+  }
+
+  fs.rmSync(scratch, { recursive: true, force: true });
+  fs.mkdirSync(scratch, { recursive: true });
+  copyWorkspace(workspace, scratch);
+  fs.writeFileSync(path.join(scratch, "references.bib"), "");
+  freshRenderDir(scratch);
+  const { problems, clean } = await runRender(scratch, () => realFolder(runDir, `.analysis/paper-render/${name}`), config, exec, true);
+  if (!clean) return problems;
+
+  // Only the two outputs are written into the real workspace, through real folders only.
+  realFolderOrAbsent(workspace, "checks");
+  realFolderOrAbsent(workspace, RENDER_DIR);
+  for (const rel of OUTPUTS) {
+    const bytes = readRegular(scratch, rel);
+    if (bytes === undefined) return [`${WORKSPACE}/${rel} is missing`];
+    writeAtomic(path.join(workspace, ...rel.split("/")), bytes);
+  }
+  return problems;
+}
+
+/** A folder that is absent or real, created when absent; a link or a file where it belongs throws. */
+function realFolderOrAbsent(base: string, rel: string): void {
+  const found = locate(base, rel);
+  if (found.kind === "refused") throw new Error(found.problem);
+  if (found.kind === "file") throw new Error(`${rel} is not a folder`);
+  if (found.kind === "absent") fs.mkdirSync(path.join(base, ...rel.split("/")), { recursive: true });
+}
+
+/**
+ * Copies a draft workspace into `scratch`: regular files and folders only. The render's own folders (`checks/render`,
+ * `paper_files`, `.quarto`) and the deepis output (`deepis.bib`) are left out. A link, or anything else that is not a
+ * regular file or folder, throws with the path, so nothing is copied past it.
+ */
+function copyWorkspace(workspace: string, scratch: string): void {
+  const skip = new Set([RENDER_DIR, "paper_files", ".quarto", "deepis.bib"]);
+  const walk = (rel: string): void => {
+    const dir = rel === "" ? workspace : path.join(workspace, ...rel.split("/"));
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const shown = rel === "" ? entry.name : `${rel}/${entry.name}`;
+      if (skip.has(shown)) continue;
+      if (entry.isSymbolicLink()) throw new Error(`${WORKSPACE}/${shown} is a link: refusing to use it`);
+      if (entry.isDirectory()) {
+        fs.mkdirSync(path.join(scratch, ...shown.split("/")), { recursive: true });
+        walk(shown);
+      } else if (entry.isFile()) {
+        const bytes = readRegular(workspace, shown);
+        if (bytes !== undefined) fs.writeFileSync(path.join(scratch, ...shown.split("/")), bytes);
+      } else throw new Error(`${WORKSPACE}/${shown} is not a regular file or folder`);
+    }
+  };
+  walk("");
+}
+
+/** Makes `checks/render` in `base` a fresh empty folder: an earlier render's outputs are removed first. */
+function freshRenderDir(base: string): void {
+  realFolder(base, "checks");
+  if (realFolder(base, RENDER_DIR)) fs.rmSync(path.join(base, ...RENDER_DIR.split("/")), { recursive: true, force: true });
+  fs.mkdirSync(path.join(base, ...RENDER_DIR.split("/")), { recursive: true });
+  realFolder(base, RENDER_DIR);
+}
+
+/**
+ * One hardened render of `folder` (mounted at /work and the only writable mount), with the snapshot checks. `stillFolder`
+ * says whether the mount source is still a real folder after the run. `clean` is true when there are no problems.
+ */
+async function runRender(
+  folder: string,
+  stillFolder: () => boolean,
+  config: ReturnType<typeof readConfig>,
+  exec: Exec | undefined,
+  draft: boolean,
+): Promise<{ problems: string[]; clean: boolean }> {
+  const before = snapshot(folder);
   const result = await (exec ?? realExec)(
     paperDockerArgs({
       image: config.paperImage,
-      folder: workspace,
+      folder,
       command: ["quarto", "render", "paper.qmd", "--output-dir", RENDER_DIR],
-      ...ids,
+      ...hostIds(),
     }),
     { timeoutMs: config.paperTimeoutMs },
   );
   // The mount source is checked again after the run: the container could have replaced it with a link.
-  if (!realFolder(node, WORKSPACE)) return [`${WORKSPACE} was replaced by a link during the render: nothing is trusted`];
+  if (!stillFolder()) {
+    const problems = [`${WORKSPACE} was replaced by a link during the render: nothing is trusted`];
+    return { problems, clean: false };
+  }
   // Quarto's project state is not part of the paper; it is removed, and a link there is simply not followed.
-  if (realFolder(workspace, ".quarto")) fs.rmSync(path.join(workspace, ".quarto"), { recursive: true, force: true });
-  const problems = changedBy(before, snapshot(workspace));
-  problems.push(...outputProblems(node, result, config.paperTimeoutMs));
-  return problems;
+  if (realFolder(folder, ".quarto")) fs.rmSync(path.join(folder, ".quarto"), { recursive: true, force: true });
+  const problems = changedBy(before, snapshot(folder));
+  problems.push(...outputProblems(folder, result, config.paperTimeoutMs, draft));
+  return { problems, clean: problems.length === 0 };
 }
