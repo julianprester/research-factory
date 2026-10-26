@@ -521,6 +521,51 @@ test("run_analysis runs assets.R only for the greatest-lettered task", async (t)
   assert.equal(calls[0]?.args.at(-1), "scripts/assets.R");
 });
 
+/** render_diagram, registered by the worker extension (the Exec is the test's fake, so no docker runs). */
+function renderDiagramTool(): CapturedTool {
+  const { pi, tools } = fakePi();
+  workerExtension(pi);
+  const tool = tools.get("render_diagram");
+  assert.ok(tool, "the worker extension registers render_diagram");
+  return tool;
+}
+
+test("the worker extension registers render_diagram with a name parameter", () => {
+  assert.deepEqual(Object.keys((renderDiagramTool().parameters as { properties: Record<string, unknown> }).properties), ["name"]);
+});
+
+test("render_diagram refuses in an explanation node, which is not a paper", async (t) => {
+  enter(t, explanationNode(t));
+  await assert.rejects(() => renderDiagramTool().execute("call-1", { name: "theory" }), /paper nodes only/);
+});
+
+test("render_diagram in a paper node renders the spec and reports the PNG", async (t) => {
+  const paper = paperNode(t);
+  const run = findRunDir(paper);
+  assert.ok(run, "the paper sits in a run");
+  writeFileSync(path.join(run, "config.json"), JSON.stringify({ model: "test-model", phases: { "4": "harness/skills/phase-4" } }));
+  const argument = path.join(findNode(run, "E01").dir, "workspace", "argument.md");
+  mkdirSync(path.dirname(argument), { recursive: true });
+  writeFileSync(argument, "## Explanation\nText.\n");
+  const diagrams = path.join(paper, "workspace", "embeds", "diagrams");
+  mkdirSync(diagrams, { recursive: true });
+  writeFileSync(path.join(diagrams, "theory.yml"), "nodes:\n  - id: a\n    label: A\n    claim: Explanation\n");
+  enter(t, paper);
+  const exec: Exec = async (args) => {
+    const mount = args[args.indexOf("-v") + 1] ?? "";
+    writeFileSync(path.join(mount.slice(0, mount.lastIndexOf(":/work")), "theory.png"), "png");
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
+  };
+  setExecForTests(exec);
+  try {
+    const result = await renderDiagramTool().execute("call-1", { name: "theory" });
+    assert.equal(result.content[0]?.text, "rendered workspace/embeds/diagrams/theory.png (theory.png)");
+  } finally {
+    setExecForTests(undefined);
+  }
+  assert.equal(existsSync(path.join(diagrams, "diagrams.json")), true);
+});
+
 /** quote_source, registered by the worker extension (the tool's test hook is not needed: it reads only the exploration copy). */
 function quoteSourceTool(): CapturedTool {
   const { pi, tools } = fakePi();

@@ -25,6 +25,7 @@ import { Type } from "typebox";
 import { realExec, runScript, type Exec } from "./analysis/run.ts";
 import { ANALYSIS_TASK } from "./explain/names.ts";
 import { readConfig } from "./launch.ts";
+import { renderDiagram } from "./paper/diagram.ts";
 import { quoteSource } from "./paper/quotes.ts";
 import {
   datasetRefusal,
@@ -56,6 +57,9 @@ interface PiLike {
 const PreregisterParams = Type.Object({});
 const RunAnalysisParams = Type.Object({
   script: Type.String({ description: "The script's bare file name, for example A_01.R; it runs from workspace/scripts/." }),
+});
+const RenderDiagramParams = Type.Object({
+  name: Type.String({ description: "The diagram's name: its spec is workspace/embeds/diagrams/<name>.yml, for example theory." }),
 });
 const QuoteSourceParams = Type.Object({
   path: Type.String({ description: "The file's path relative to the exploration copy, for example handbook/rules.md." }),
@@ -273,6 +277,33 @@ export default function workerExtension(pi: PiLike): void {
       return {
         content: [{ type: "text", text: quote.embed }],
         details: { id: quote.id },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "render_diagram",
+    label: "Render theory diagram",
+    description:
+      "Check workspace/embeds/diagrams/<name>.yml against the argument and render it to <name>.png with Graphviz in the paper image. Records the rendering, so the PNG is not stale. Refuses a spec that does not check. Paper nodes only.",
+    parameters: RenderDiagramParams,
+    async execute(_toolCallId: string, params: { name: string }) {
+      const cwd = process.cwd();
+      const nodeDir = findNodeDir(cwd);
+      if (nodeDir === undefined) {
+        throw new Error(`Refusing to render: this session is not inside a node folder (no node.json above ${cwd})`);
+      }
+      if (!isPaperNode(nodeDir)) {
+        throw new Error("Refusing to render: render_diagram is for paper nodes only");
+      }
+      const runDir = findRunDir(nodeDir);
+      if (runDir === undefined) {
+        throw new Error(`Refusing to render: there is no .git repository above ${nodeDir}`);
+      }
+      const rendered = await renderDiagram(runDir, nodeDir, params.name, execForTests ?? realExec);
+      return {
+        content: [{ type: "text", text: `rendered workspace/embeds/diagrams/${params.name}.png (${path.basename(rendered.png)})` }],
+        details: { png: rendered.png },
       };
     },
   });

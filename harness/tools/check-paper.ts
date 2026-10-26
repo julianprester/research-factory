@@ -23,7 +23,9 @@
 // or fenced code; the quotations (`verifyQuotes`) and each quote fragment no include names; the citation keys;
 // the Predictions fragment (byte for byte: `sectionText` and a newline); the pins; the workspace root (no Quarto
 // project file, extension, filter or stylesheet); the bare numbers beyond the limit; then the outline problems
-// (`opts.outline`, Task 8) and the render problems (`opts.render`, Task 9).
+// (`opts.outline`, Task 8) and the render problems (`opts.render`, Task 9). The theory diagrams (`diagramProblems`,
+// Task 9) are checked before the quotes: each PNG in `embeds/diagrams/` must be the rendering `render_diagram` recorded
+// in `diagrams.json`, and its spec must not have changed since (a stale PNG).
 //
 // Warnings: an author placeholder in the front matter, and each bare number while the count is within the limit.
 //
@@ -37,6 +39,7 @@ import { fileURLToPath } from "node:url";
 import { argumentSha, loopDir, locate, readRegular } from "../explain/rounds.ts";
 import { parseCsv } from "../explain/reproduce.ts";
 import { PAPER_BARE_NUMBER_LIMIT, readConfig } from "../launch.ts";
+import { diagramProblems } from "../paper/diagram.ts";
 import { bibKeys, CITATION_TOKEN, IMAGE, INCLUDE_SHORTCODE, VAR_SHORTCODE, scanEmbeds, type EmbedSet } from "../paper/embeds.ts";
 import { coverage } from "../paper/outline.ts";
 import { verifyQuotes } from "../paper/quotes.ts";
@@ -157,6 +160,7 @@ export async function checkPaper(
   guarded(problems, "the explanation's registry", () => variableProblems(paper, explanation, embeds.vars));
   guarded(problems, "the paper's copies", () => sourceProblems(paper, explanation));
   if (qmd !== undefined) guarded(problems, "workspace/embeds", () => embedProblems(paper, embeds));
+  guarded(problems, "workspace/embeds/diagrams", () => diagramProblems(paper));
   guarded(problems, "workspace/embeds/quotes", () => verifyQuotes(runDir, paper));
   if (qmd !== undefined) guarded(problems, "workspace/embeds/quotes", () => unincludedQuotes(paper, embeds));
   if (qmd !== undefined) {

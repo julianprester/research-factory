@@ -13,7 +13,9 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import type { Exec } from "../analysis/run.ts";
 import { prepareExploration } from "../analysis/run.ts";
+import { renderDiagram } from "../paper/diagram.ts";
 import { quoteSource } from "../paper/quotes.ts";
 import { checkPaper } from "../tools/check-paper.ts";
 import { createChild, findNode, initRun, updateNode } from "../tree.ts";
@@ -1283,4 +1285,57 @@ test("a paper whose apa.csl differs from the harness template, or lacks one, is 
   assert.deepEqual((await check(f)).problems, ["workspace/apa.csl differs from the explanation's harness/templates/apa.csl"]);
   rmSync(at(f.paper, "workspace/apa.csl"));
   assert.deepEqual((await check(f)).problems, ["workspace/apa.csl is missing"]);
+});
+
+// ---------------------------------------------------------------------------
+// The theory diagrams (Task 9): a PNG is the rendering the render tool recorded, and a spec edited since makes it stale.
+
+const DIAGRAM_SPEC = [
+  "nodes:",
+  "  - id: example",
+  "    label: The first example",
+  "    claim: Explanation",
+  "  - id: copy",
+  "    label: Readers copy it",
+  "    claim: Mechanism and scope",
+  "edges:",
+  "  - from: example",
+  "    to: copy",
+  "    claim: Mechanism and scope",
+  "",
+].join("\n");
+
+/** A fake `dot` that writes the PNG bytes into the folder it is given, as the paper image would. */
+function fakeDot(): Exec {
+  return async (args) => {
+    const mount = args[args.indexOf("-v") + 1] ?? "";
+    writeFileSync(path.join(mount.slice(0, mount.lastIndexOf(":/work")), "theory.png"), "png bytes");
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
+  };
+}
+
+test("a rendered diagram that matches its record is clean; a spec edited since makes it stale", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/embeds/diagrams/theory.yml"), DIAGRAM_SPEC);
+  await renderDiagram(f.run, f.paper, "theory", fakeDot());
+  assert.deepEqual(await check(f), { problems: [], warnings: [] });
+  put(at(f.paper, "workspace/embeds/diagrams/theory.yml"), DIAGRAM_SPEC.replace("Readers copy it", "Readers copy"));
+  assert.deepEqual((await check(f)).problems, ["diagram theory is stale: render_diagram again"]);
+});
+
+test("a PNG no render recorded is a problem, and so is a diagrams.json that is garbage", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/embeds/diagrams/theory.png"), "hand-made");
+  assert.deepEqual((await check(f)).problems, [
+    "workspace/embeds/diagrams/diagrams.json is missing (diagrams were not rendered by render_diagram)",
+  ]);
+  put(at(f.paper, "workspace/embeds/diagrams/diagrams.json"), "garbage");
+  assert.ok((await check(f)).problems.some((p) => /diagrams\.json is unreadable/.test(p)));
+});
+
+test("the render check's problems come out as the paper's problems", async (t) => {
+  const f = fixture(t);
+  const warning = "workspace/paper.qmd render: [WARNING] Citeproc: citation 1 not found";
+  const render = async () => ({ problems: [warning] });
+  assert.deepEqual(await check(f, { render }), { problems: [warning], warnings: [] });
 });
