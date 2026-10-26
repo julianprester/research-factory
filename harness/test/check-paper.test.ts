@@ -983,3 +983,85 @@ test("the CLI exits 1, not 2, for an unreadable embeds folder", { skip: ROOT }, 
     chmodSync(embeds, 0o755);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Round 2: Quarto renders an include only when it stands alone. Probed with Quarto 1.9.37 (paper.qmd rendered from a
+// project folder with embeds/): on its own line after a blank line, the table renders; inside a text line it renders as
+// nothing, with a `Shortcode 'include' not found` warning; directly after a text line it renders as nothing and no
+// warning is logged. Whitespace around the shortcode on its line is fine.
+
+test("an include inside a text line is a problem naming its line", async (t) => {
+  const f = fixture(t);
+  withProse(f, "Text {{< include embeds/tables/T1.qmd >}} more.");
+  const { problems } = await check(f);
+  const line = PAPER_TEXT.split("\n").length + 1;
+  assert.ok(
+    problems.includes(
+      `workspace/paper.qmd line ${line}: an include must stand alone on its own line; Quarto renders one inside a text line as nothing`,
+    ),
+    problems.join("\n"),
+  );
+});
+
+test("an include directly after a text line, with no blank line before it, is a problem naming its line", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/paper.qmd"), `${PAPER_TEXT}\nAfter the table.\n{{< include embeds/tables/T1.qmd >}}\n`);
+  const { problems } = await check(f);
+  const line = `${PAPER_TEXT}\nAfter the table.\n{{< include embeds/tables/T1.qmd >}}\n`.split("\n").length - 1;
+  assert.ok(
+    problems.includes(
+      `workspace/paper.qmd line ${line}: an include must follow a blank line; Quarto renders one directly after a text line as nothing`,
+    ),
+    problems.join("\n"),
+  );
+});
+
+test("an include after a blank line, at the start of the body, or after the front matter is not a placement problem", async (t) => {
+  const f = fixture(t);
+  put(
+    at(f.paper, "workspace/paper.qmd"),
+    '---\ntitle: "T"\n---\n{{< include embeds/tables/T1.qmd >}}\n\nText.\n\n{{< include embeds/tables/T1.qmd >}}\n',
+  );
+  const { problems } = await check(f);
+  assert.deepEqual(
+    problems.filter((p) => /stand alone|follow a blank line/.test(p)),
+    [],
+    problems.join("\n"),
+  );
+});
+
+// The Quarto-backed claim: the render, not my reading of its documentation, decides what an include does.
+
+const QUARTO_PRESENT = spawnSync("quarto", ["--version"], { encoding: "utf8" }).status === 0;
+
+test(
+  "Quarto renders a table include that stands alone and renders nothing for one inside a text line; check-paper refuses the inline one",
+  { skip: QUARTO_PRESENT ? false : "quarto is not installed on this host", timeout: 600_000 },
+  async (t) => {
+    const project = mkdtempSync(path.join(tmpdir(), "ctc-check-paper-quarto-"));
+    t.after(() => rmSync(project, { recursive: true, force: true }));
+    put(path.join(project, "_quarto.yml"), "project:\n  type: default\n");
+    put(path.join(project, "embeds", "tables", "T1.qmd"), "| Group | N |\n|---|---|\n| A | 12 |\n");
+    put(
+      path.join(project, "own.qmd"),
+      '---\ntitle: "Own line"\n---\n\nBefore the table.\n\n{{< include embeds/tables/T1.qmd >}}\n\nAfter the table.\n',
+    );
+    put(path.join(project, "inline.qmd"), '---\ntitle: "Inline"\n---\n\nText {{< include embeds/tables/T1.qmd >}} more.\n');
+
+    const tablesIn = (name: string): number => {
+      const render = spawnSync("quarto", ["render", name, "--to", "html"], { cwd: project, encoding: "utf8" });
+      assert.equal(render.status, 0, render.stdout + render.stderr);
+      return (readFileSync(path.join(project, `${name.replace(/\.qmd$/, "")}.html`), "utf8").match(/<table/g) ?? []).length;
+    };
+    assert.equal(tablesIn("own.qmd"), 1, "a stand-alone include renders its table");
+    assert.equal(tablesIn("inline.qmd"), 0, "an include inside a text line renders nothing");
+
+    const f = fixture(t);
+    withProse(f, "Text {{< include embeds/tables/T1.qmd >}} more.");
+    const { problems } = await check(f);
+    assert.ok(
+      problems.some((p) => /an include must stand alone on its own line/.test(p)),
+      problems.join("\n"),
+    );
+  },
+);

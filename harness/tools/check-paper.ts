@@ -14,7 +14,8 @@
 // the run is a usage error and throws, as `check-argument.ts` does.
 //
 // The problems, in order: `workspace/paper.qmd` missing; the front matter (keys, `bibliography`, `csl`); the raw
-// syntax (fences, HTML, TeX commands, shortcodes, reference-style images, hand-typed block quotations); each
+// syntax (fences, HTML, TeX commands, shortcodes, reference-style images, hand-typed block quotations, an include that
+// does not stand alone after a blank line); each
 // `{{< var k >}}` not in `_variables.yml`, or with no source row that resolves to exactly one row of the
 // explanation's registry; the paper's copies of `_variables.yml` and `variables_sources.csv` (and `apa.csl`,
 // `_quarto.yml` when the harness templates exist), its table fragments and figures, each byte for byte against
@@ -132,6 +133,7 @@ export async function checkPaper(
     warnings.push(...authorWarnings(qmd));
     guarded(problems, "workspace/paper.qmd", () => frontProblems(qmd));
     guarded(problems, "workspace/paper.qmd", () => syntaxProblems(qmd));
+    guarded(problems, "workspace/paper.qmd", () => includePlacementProblems(qmd));
   }
   guarded(problems, "the explanation's registry", () => variableProblems(paper, explanation, embeds.vars));
   guarded(problems, "the paper's copies", () => sourceProblems(paper, explanation));
@@ -224,11 +226,17 @@ function entriesOf(dir: string, shown: string, problems: string[]): fs.Dirent[] 
 // ---------------------------------------------------------------------------
 // The front matter and the raw syntax.
 
+/** The index of the line that closes the front matter, or -1 when the file has none (or it is not closed). */
+function frontEndOf(lines: string[]): number {
+  if (lines[0]?.trim() !== "---") return -1;
+  return lines.findIndex((line, index) => index > 0 && /^(?:---|\.\.\.)\s*$/.test(line));
+}
+
 /** The front matter's top-level keys, and the values `bibliography` and `csl` must have. */
 function frontProblems(qmd: string): string[] {
   const lines = qmd.split(/\r?\n/);
   if (lines[0]?.trim() !== "---") return [];
-  const close = lines.findIndex((line, index) => index > 0 && /^(?:---|\.\.\.)\s*$/.test(line));
+  const close = frontEndOf(lines);
   if (close < 0) return ["workspace/paper.qmd front matter is not closed"];
   const problems: string[] = [];
   for (let index = 1; index < close; index++) {
@@ -291,6 +299,37 @@ function syntaxProblems(qmd: string): string[] {
       problems.push(`workspace/paper.qmd line ${index + 1}: a hand-typed block quotation; quote it with quote_source and include the fragment`);
     }
   });
+  return problems;
+}
+
+/**
+ * Each include stands alone on its own line (only whitespace around the shortcode), after a blank line, the front
+ * matter's closing fence or the start of the file. Quarto renders an include inside a text line as nothing, with a
+ * warning, and one directly after a text line as nothing with no warning (both probed with Quarto 1.9.37).
+ */
+function includePlacementProblems(qmd: string): string[] {
+  const raw = qmd.split(/\r?\n/);
+  const front = frontEndOf(raw);
+  const problems: string[] = [];
+  for (const match of qmd.matchAll(INCLUDE_SHORTCODE)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    const lineStart = qmd.lastIndexOf("\n", start - 1) + 1;
+    const lineEnd = qmd.indexOf("\n", end);
+    const line = lineOf(qmd, start);
+    const where = `workspace/paper.qmd line ${line}`;
+    const alone =
+      qmd.slice(lineStart, start).trim() === "" && qmd.slice(end, lineEnd === -1 ? qmd.length : lineEnd).trim() === "";
+    if (!alone) {
+      problems.push(`${where}: an include must stand alone on its own line; Quarto renders one inside a text line as nothing`);
+      continue;
+    }
+    const index = line - 1;
+    const framed = index === 0 || (raw[index - 1] ?? "").trim() === "" || index - 1 === front;
+    if (!framed) {
+      problems.push(`${where}: an include must follow a blank line; Quarto renders one directly after a text line as nothing`);
+    }
+  }
   return problems;
 }
 
