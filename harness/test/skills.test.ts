@@ -598,7 +598,13 @@ test("puzzle-review teaches every review heading and the rating lines", () => {
   }
 });
 
-test("the three book questions appear verbatim in docs/abduction.md and in puzzle-review.md", () => {
+// The design specifications live in the original development repository, not in this one; the checks that compare
+// the skills with them skip when docs/superpowers/specs is absent.
+const NO_DESIGN_DOCS = existsSync(path.resolve(HARNESS_ROOT, "docs/superpowers/specs")) ? false : "docs/superpowers/specs is not present (design notes are not distributed)";
+
+const NO_BOOK = existsSync(path.resolve(HARNESS_ROOT, "docs/abduction.md")) ? false : "docs/abduction.md is not present (the book is not distributed)";
+
+test("the three book questions appear verbatim in docs/abduction.md and in puzzle-review.md", { skip: NO_BOOK }, () => {
   const book = normalise(read("docs/abduction.md"));
   const review = normalise(read("harness/skills/roles/puzzle-review.md"));
   for (const question of BOOK_QUESTIONS) {
@@ -663,7 +669,7 @@ test("puzzle-evolve reads the parent's card and merge, and freezes the parent", 
   }
 });
 
-test("the design spec follows the Phase 2 design's §10 edits", () => {
+test("the design spec follows the Phase 2 design's §10 edits", { skip: NO_DESIGN_DOCS }, () => {
   const spec = read("docs/superpowers/specs/2026-10-12-ctc-research-factory-design.md");
   const phase2 = spec.slice(spec.indexOf("### Phase 2: Puzzles"), spec.indexOf("### Phase 3: Explanations"));
   for (const criterion of ["fit", "plausibility", "relevance"]) {
@@ -708,13 +714,13 @@ test("every evolution round teaches the seven-identity minimum", () => {
   assert.ok((example[1] as string).match(/P\d+/g)?.length === 8, "the example names the top 8 as entrants, so the round has nine identities");
 });
 
-test("the Phase 2 design requires seven identities in a later round", () => {
+test("the Phase 2 design requires seven identities in a later round", { skip: NO_DESIGN_DOCS }, () => {
   const design = normalise(read("docs/superpowers/specs/2026-10-21-ctc-phase2-puzzles-design.md"));
   assert.match(design, /at least 7 identities in total \(children plus incumbents\)/);
   assert.match(design, /a fresh child must play 6 matches and two puzzles meet once per round/);
 });
 
-test("an owner ruling cannot fake the STOP that promotion needs", () => {
+test("an owner ruling cannot fake the STOP that promotion needs", { skip: NO_DESIGN_DOCS }, () => {
   const body = normalise(read("harness/skills/phase-2/SKILL.md"));
   assert.match(body, /records no STOP/, "the skill says a ruling records no STOP");
   assert.match(body, /`loop truncated: no STOP recorded, nothing promotable`/);
@@ -773,7 +779,7 @@ test("promotion and distinctness use the latest round's scores and real files", 
   assert.match(body, /has files under `workspace\/scripts\/` or `workspace\/results\/` \(an empty directory passes\)/);
 });
 
-test("the design spec no longer lets Phase 2 run analyses", () => {
+test("the design spec no longer lets Phase 2 run analyses", { skip: NO_DESIGN_DOCS }, () => {
   const spec = normalise(read("docs/superpowers/specs/2026-10-12-ctc-research-factory-design.md"));
   assert.match(spec, /Phase 1 may use small analyses only; Phase 2 runs none \(its evidence is Phase 1's cards\)/);
   assert.doesNotMatch(spec, /Phases 1–2 may use small analyses/);
@@ -821,7 +827,7 @@ test("the reviewer recovery cap overrides phase-owner's and a breakdown stays in
   assert.doesNotMatch(body, /breakdown or a restatement/);
 });
 
-test("the Phase 2 design has no promoted status", () => {
+test("the Phase 2 design has no promoted status", { skip: NO_DESIGN_DOCS }, () => {
   const design = normalise(read("docs/superpowers/specs/2026-10-21-ctc-phase2-puzzles-design.md"));
   assert.match(design, /there is no `promoted` status/);
   assert.doesNotMatch(design, /→ promoted/);
@@ -1138,7 +1144,7 @@ test("explain-review is a report, not a score, with the finding and status forma
   }
 });
 
-test("the design spec follows the Phase 3 design's §12 edits", () => {
+test("the design spec follows the Phase 3 design's §12 edits", { skip: NO_DESIGN_DOCS }, () => {
   const spec = read("docs/superpowers/specs/2026-10-12-ctc-research-factory-design.md");
   const phase3 = spec.slice(spec.indexOf("### Phase 3: Explanations"), spec.indexOf("### Phase 4: Writing"));
   assert.ok(phase3.length > 100, "found the Phase 3 section");
@@ -1703,7 +1709,7 @@ test("paper-style.md edits prose only, applies a named vendored skill and never 
   assert.match(role, /Status: /);
 });
 
-test("the design spec follows the Phase 4 design's §11 edits", () => {
+test("the design spec follows the Phase 4 design's §11 edits", { skip: NO_DESIGN_DOCS }, () => {
   const spec = read("docs/superpowers/specs/2026-10-12-ctc-research-factory-design.md");
   const phase4 = spec.slice(spec.indexOf("### Phase 4: Writing"), spec.indexOf("### Phase 5"));
   assert.ok(phase4.length > 200, "found the Phase 4 section");

@@ -5,7 +5,7 @@
 // normalised before comparing: curly quotes to ASCII, any run of whitespace to
 // one space. The criteria file keeps the book's own spelling and punctuation.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -14,7 +14,10 @@ import { loadCriteria } from "../tournament/criteria.ts";
 
 const HARNESS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const CRITERIA = "harness/skills/criteria/tavory-timmermans.md";
+// The book is copyrighted and is not distributed with this repository. Put your own text copy at this path
+// (a Markdown conversion of Tavory & Timmermans 2014, Abductive Analysis) to run the two checks against it.
 const BOOK = "docs/abduction.md";
+const NO_BOOK = existsSync(path.join(HARNESS_ROOT, BOOK)) ? false : `${BOOK} is not present (the book is not distributed)`;
 
 /** The passages the plan requires: the three questions and their book detail. */
 const REQUIRED_QUOTES = [
@@ -51,7 +54,7 @@ function quotedSpans(markdown: string): string[] {
   return spans;
 }
 
-test("every passage the criteria file quotes appears verbatim in the book", () => {
+test("every passage the criteria file quotes appears verbatim in the book", { skip: NO_BOOK }, () => {
   const file = read(CRITERIA);
   // Every blockquote line is one whole book quote on one line: a curly-delimited
   // or wrapped quote would otherwise slip past the span check below unchecked.
