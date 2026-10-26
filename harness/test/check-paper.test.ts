@@ -1257,12 +1257,16 @@ test("an argument link the paper neither embeds nor omits is a check-paper probl
   );
 });
 
-test("a non-empty ## Needs blocks check-paper until a reopen has run, and an empty one does not", async (t) => {
+test("a non-empty ## Needs blocks check-paper before and after a reopen, and an empty one does not", async (t) => {
   const f = fixture(t);
   const needs = OUTLINE.replace("## Needs\n", "## Needs\n- the per-page rate of the subject-to-change class\n");
   put(at(f.paper, "workspace/outline.md"), needs);
   assert.deepEqual((await check(f)).problems, ["outline lists needs: send them in one reopen request"]);
   put(at(f.paper, "workspace/checks/pins.json"), pins(ARGUMENT, "hash-one", PREDICTIONS).replace('"reopens": 0', '"reopens": 1'));
+  assert.deepEqual((await check(f)).problems, [
+    "outline still lists needs: clear the ones the reopen satisfied, reopen again only if some remain and a reopen is left",
+  ]);
+  put(at(f.paper, "workspace/outline.md"), OUTLINE);
   assert.deepEqual(await check(f), { problems: [], warnings: [] });
 });
 

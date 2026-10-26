@@ -94,7 +94,7 @@ function stemOf(file: string): string {
 /**
  * The explanation's coverage targets, each embedded in the paper or listed under `## Omitted` with a reason. A
  * target that is neither is a problem naming it; so is an omission that is embedded, has no reason, or names a
- * target the argument does not link. A non-empty `## Needs` is a problem until a reopen has run (`pins.reopens`).
+ * target the argument does not link. A non-empty `## Needs` is a problem, before a reopen and after one (`pins.reopens` only picks the message).
  * `covered` counts the targets that are embedded or validly omitted.
  */
 export function coverage(runDir: string, nodeDir: string): { covered: number; problems: string[] } {
@@ -159,8 +159,14 @@ export function coverage(runDir: string, nodeDir: string): { covered: number; pr
       problems.push(`argument.md links ${target}, which paper.qmd does not embed and ## Omitted does not list`);
     }
 
-    if (outline.needs.length > 0 && reopensOf(paper) === 0) {
-      problems.push("outline lists needs: send them in one reopen request");
+    // A non-empty ## Needs blocks at every stage. Before a reopen the needs go out in one request; after one, the writer
+    // clears the ones the reopen satisfied, and asks again only if some remain and a reopen is left.
+    if (outline.needs.length > 0) {
+      problems.push(
+        reopensOf(paper) === 0
+          ? "outline lists needs: send them in one reopen request"
+          : "outline still lists needs: clear the ones the reopen satisfied, reopen again only if some remain and a reopen is left",
+      );
     }
     return { covered, problems };
   } catch (error) {

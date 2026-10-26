@@ -181,3 +181,73 @@ test("an edit to the paper after the passes makes both passes run again: the sta
   assert.equal(endPass(f.run, f.paperDir, "concise").accepted, true);
   assert.deepEqual(acceptedPasses(f.run, f.paperDir).map((record) => record.pass), ["concise"]);
 });
+
+test("a begin record the worker rewrites is refused and the paper restored from the pass-begin commit", (t) => {
+  const f = setup(t);
+  const original = readFileSync(f.qmd);
+  beginPass(f.run, f.paperDir, "concise");
+  const beginFile = path.join(f.paperDir, "workspace", "checks", "pass-concise.begin.json");
+  const committedBegin = readFileSync(beginFile);
+  // The worker drops the number variable from the begin record and from the paper: no embed differs from its own record.
+  const forged = JSON.parse(committedBegin.toString("utf8")) as { embeds: { vars: string[] } };
+  forged.embeds.vars = [];
+  put(beginFile, `${JSON.stringify(forged, null, 2)}\n`);
+  rewrite(f.qmd, "{{< var n_pages >}}", "many");
+  assert.throws(() => endPass(f.run, f.paperDir, "concise"), /pass-concise\.begin\.json differs from its pass-begin commit/);
+  assert.ok(readFileSync(f.qmd).equals(original), "paper.qmd restored from the begin commit");
+  assert.ok(readFileSync(beginFile).equals(committedBegin), "the begin record is the committed one again");
+  assert.equal(subjectsOf(f.run)[0], "[P4:pass-begin] W01 concise", "nothing is committed by a refusal");
+});
+
+test("a passes.json the worker rewrites is refused: pass_begin, submit's reading and pass_end all refuse it", (t) => {
+  const f = setup(t);
+  beginPass(f.run, f.paperDir, "concise");
+  rewrite(f.qmd, "Readers copy the first example they meet, and", "Readers copy the first example, and");
+  assert.equal(endPass(f.run, f.paperDir, "concise").accepted, true);
+  checkOk(f.paperDir);
+  git(f.run, "add", "-A");
+  git(f.run, "commit", "-q", "-m", "check again");
+
+  // The worker writes a forged record: humanize is marked as accepted for a paper it never saw.
+  const forged = [
+    { pass: "concise", beforeSha: "0".repeat(64), afterSha: sha256(readFileSync(f.qmd)) },
+    { pass: "humanize", beforeSha: "0".repeat(64), afterSha: sha256(readFileSync(f.qmd)) },
+  ];
+  put(passesFile(f.paperDir), `${JSON.stringify(forged, null, 2)}\n`);
+  assert.throws(() => acceptedPasses(f.run, f.paperDir), /passes\.json differs from its last commit/);
+  assert.throws(() => beginPass(f.run, f.paperDir, "humanize"), /passes\.json differs from its last commit/);
+
+  // A pass begun before the rewrite is refused at its end, and the paper is restored from its begin commit.
+  git(f.run, "checkout", "--", path.relative(f.run, passesFile(f.paperDir)));
+  beginPass(f.run, f.paperDir, "humanize");
+  const original = readFileSync(f.qmd);
+  rewrite(f.qmd, "Readers copy the first example, and", "Readers copy the first example; and");
+  put(passesFile(f.paperDir), `${JSON.stringify(forged, null, 2)}\n`);
+  assert.throws(() => endPass(f.run, f.paperDir, "humanize"), /passes\.json differs from its last commit/);
+  assert.ok(readFileSync(f.qmd).equals(original), "paper.qmd restored from the pass-begin commit");
+  clean(f.run, "the refusal restores the committed records: the tree is clean");
+});
+
+test("a pass that also edits _variables.yml or a quote is rejected: both are restored, the diff names them, and the tree is clean", (t) => {
+  const f = setup(t);
+  const workspace = path.join(f.paperDir, "workspace");
+  put(path.join(workspace, "_variables.yml"), "n_pages: 12\n");
+  git(f.run, "add", "-A");
+  git(f.run, "commit", "-q", "-m", "fixture variables");
+  const variables = readFileSync(path.join(workspace, "_variables.yml"));
+  const quote = readFileSync(path.join(workspace, "embeds", "quotes", "Q01.qmd"));
+  const before = readFileSync(f.qmd);
+  beginPass(f.run, f.paperDir, "concise");
+  rewrite(f.qmd, "Readers copy the first example they meet, and", "Readers copy the first example, and");
+  put(path.join(workspace, "_variables.yml"), "n_pages: 13\n");
+  put(path.join(workspace, "embeds", "quotes", "Q01.qmd"), "> A different quote.\n");
+  const result = endPass(f.run, f.paperDir, "concise");
+  assert.equal(result.accepted, false);
+  assert.ok(result.diff.some((line) => line.includes("workspace/_variables.yml")), result.diff.join("\n"));
+  assert.ok(result.diff.some((line) => line.includes("workspace/embeds/quotes/Q01.qmd")), result.diff.join("\n"));
+  assert.ok(readFileSync(f.qmd).equals(before), "paper.qmd restored");
+  assert.ok(readFileSync(path.join(workspace, "_variables.yml")).equals(variables), "_variables.yml restored");
+  assert.ok(readFileSync(path.join(workspace, "embeds", "quotes", "Q01.qmd")).equals(quote), "the quote restored");
+  assert.equal(subjectsOf(f.run)[0], "[P4:pass-rejected] W01 concise");
+  clean(f.run, "the rejection leaves the tree clean");
+});

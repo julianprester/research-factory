@@ -9,7 +9,9 @@
 //
 // `finalizeBib` runs `deepis bib paper.qmd` in the paper's workspace and checks what it did: each numeric chunk id is
 // rewritten to a key, every key the paper cites is in `references.bib`, and the embeds (variables, includes, images,
-// quotes) are unchanged. A rewrite that changes an embed is undone (the manuscript is restored byte for byte).
+// quotes) are unchanged. The real tool writes its bibliography to `deepis.bib` beside the paper, appending to what it
+// finds there, so `finalizeBib` seeds `deepis.bib` with the existing `references.bib` and moves the result back. A
+// refusal restores the manuscript and `references.bib` byte for byte.
 //
 // `repinPaper` is the writer's second step after a reopen: once the outline has been revised and the Predictions are
 // as they were pinned, the generated copies are refreshed from the explanation and the pins take its current argument
@@ -311,7 +313,11 @@ export function initPaper(runDir: string, paperDir: string): string {
   return summary.join("\n");
 }
 
-/** The default runner: `deepis` in the paper's workspace, so `paper.qmd` is rewritten in place and `references.bib` written beside it. */
+/**
+ * The default runner: `deepis` in the paper's workspace. The real tool rewrites `paper.qmd` in place and writes its
+ * bibliography to `deepis.bib` beside the paper (appending to a `deepis.bib` that already holds entries), not to
+ * `references.bib`.
+ */
 function deepisIn(workspace: string): (args: string[]) => { code: number; stderr: string } {
   return (args) => {
     const result = spawnSync("deepis", args, { cwd: workspace, encoding: "utf8", timeout: DEEPIS_TIMEOUT_MS });
@@ -322,9 +328,12 @@ function deepisIn(workspace: string): (args: string[]) => { code: number; stderr
 
 /**
  * Runs `deepis bib paper.qmd` on the paper (or `exec`, for tests) and returns what is wrong with the result: a failed
- * run; a numeric chunk id still cited; a cited key missing from `references.bib`; an embed (variable, include, image,
- * quote) changed, or a different number of citations. An embed change restores the manuscript and removes a bib the
- * run created. An empty list means the finalisation is sound.
+ * run; no `deepis.bib`; a numeric chunk id still cited; a cited key missing from `references.bib`; an embed (variable,
+ * include, image, quote) changed, or a different number of citations. The run is seeded with a copy of the paper's
+ * existing `references.bib` (as `workspace/deepis.bib`), so the tool appends only the new ids. On success its
+ * `deepis.bib` becomes `references.bib`. Whatever happens, `deepis.bib` is removed, and a refusal restores the
+ * manuscript and `references.bib` to their bytes before the call (or removes `references.bib` if there was none).
+ * An empty list means the finalisation is sound.
  */
 export function finalizeBib(
   runDir: string,
@@ -335,57 +344,71 @@ export function finalizeBib(
   const workspace = path.join(node.paper, "workspace");
   const before = readRegular(node.paper, "workspace/paper.qmd");
   if (before === undefined) return ["workspace/paper.qmd is missing"];
-  const hadBib = locate(node.paper, "workspace/references.bib").kind !== "absent";
+  const prevBib = readRegular(node.paper, "workspace/references.bib");
   const beforeEmbeds = scanEmbeds(before.toString("utf8"));
-
+  const deepisBib = path.join(workspace, "deepis.bib");
   const run = exec ?? deepisIn(workspace);
-  let result: { code: number; stderr: string };
-  try {
-    result = run(["bib", "paper.qmd"]);
-  } catch (error) {
-    return [`deepis bib paper.qmd could not run: ${error instanceof Error ? error.message : String(error)}`];
-  }
-  if (result.code !== 0) {
-    return [`deepis bib paper.qmd failed (exit ${result.code}): ${result.stderr.trim().split(/\r?\n/)[0] ?? ""}`.trimEnd()];
-  }
+  const problems: string[] = [];
 
+  try {
+    if (prevBib !== undefined) writeAtomic(deepisBib, prevBib);
+    else fs.rmSync(deepisBib, { force: true });
+    const result = run(["bib", "paper.qmd"]);
+    if (result.code !== 0) {
+      problems.push(`deepis bib paper.qmd failed (exit ${result.code}): ${result.stderr.trim().split(/\r?\n/)[0] ?? ""}`.trimEnd());
+    } else {
+      problems.push(...checkRun(node, before, beforeEmbeds));
+    }
+  } catch (error) {
+    problems.push(`deepis bib paper.qmd could not run: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    fs.rmSync(deepisBib, { force: true });
+  }
+  if (problems.length > 0) undo(node, before, prevBib);
+  return problems;
+}
+
+/**
+ * What the run did to `paper.qmd` and its bibliography, once it exited 0: the bibliography `deepis.bib` moves to
+ * `references.bib` (only when the embeds are unchanged), and the keys the paper cites are checked against it.
+ */
+function checkRun(node: PaperNode, before: Buffer, beforeEmbeds: EmbedSet): string[] {
   const after = readRegular(node.paper, "workspace/paper.qmd");
   if (after === undefined) return ["workspace/paper.qmd is missing after deepis bib"];
   const afterEmbeds = scanEmbeds(after.toString("utf8"));
-  const problems: string[] = [];
-
   const changed = embedSetDiff({ ...beforeEmbeds, citations: [] }, { ...afterEmbeds, citations: [] });
-  if (changed.length > 0) {
-    problems.push(...changed.map((line) => `deepis bib changed an embed: ${line}`));
-    undo(node, before, hadBib);
-    return problems;
-  }
+  if (changed.length > 0) return changed.map((line) => `deepis bib changed an embed: ${line}`);
+
+  const problems: string[] = [];
   if (beforeEmbeds.citations.length !== afterEmbeds.citations.length) {
     problems.push(
       `deepis bib changed the number of citations: ${beforeEmbeds.citations.length} before, ${afterEmbeds.citations.length} after`,
     );
   }
-
   const afterKeys = new Set(afterEmbeds.citations);
   for (const id of new Set(beforeEmbeds.citations.filter((key) => NUMERIC_ID.test(key)))) {
     if (afterKeys.has(id)) problems.push(`chunk id @${id} is still cited (not rewritten to a key)`);
   }
 
-  const bib = readRegular(node.paper, "workspace/references.bib");
-  if (bib === undefined) {
-    problems.push("workspace/references.bib is missing after deepis bib");
+  const produced = readRegular(node.paper, "workspace/deepis.bib");
+  if (produced === undefined) {
+    if (afterEmbeds.citations.length > 0) problems.push("deepis bib paper.qmd wrote no deepis.bib");
+    return problems;
   }
-  const keys = bib === undefined ? new Set<string>() : bibKeys(bib.toString("utf8"));
+  writeAtomic(path.join(node.paper, "workspace", "references.bib"), produced);
+  const keys = bibKeys(produced.toString("utf8"));
   for (const key of [...new Set(afterEmbeds.citations)].sort()) {
     if (!keys.has(key) && !NUMERIC_ID.test(key)) problems.push(`citation @${key} is not in references.bib`);
   }
   return problems;
 }
 
-/** Restores the manuscript to its bytes before `deepis bib`, and removes a `references.bib` the run created. */
-function undo(node: PaperNode, before: Buffer, hadBib: boolean): void {
+/** Restores the manuscript to `before`, and `references.bib` to `prevBib` (or removes it when there was none). */
+function undo(node: PaperNode, before: Buffer, prevBib: Buffer | undefined): void {
   writeAtomic(path.join(node.paper, "workspace", "paper.qmd"), before);
-  if (!hadBib) fs.rmSync(path.join(node.paper, "workspace", "references.bib"), { force: true });
+  const bib = path.join(node.paper, "workspace", "references.bib");
+  if (prevBib === undefined) fs.rmSync(bib, { force: true });
+  else writeAtomic(bib, prevBib);
 }
 
 /**

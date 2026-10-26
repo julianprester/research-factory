@@ -1,6 +1,6 @@
 // The outline (`workspace/outline.md`) and its coverage (design §7.1, §8.4): every link of the explanation's
 // `argument.md` that names a number, table or figure is embedded in the paper or listed under `## Omitted` with a
-// reason, and `## Needs` blocks the paper until a reopen has run. These tests pin each rule with one failing case.
+// reason, and a non-empty `## Needs` blocks the paper (before and after a reopen). These tests pin each rule with one failing case.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -223,13 +223,18 @@ test("coverage: an outline without its headings is named", (t) => {
   ]);
 });
 
-test("coverage: a non-empty ## Needs is a problem until a reopen has run", (t) => {
+test("coverage: a non-empty ## Needs is a problem before a reopen, and still a problem after one", (t) => {
   const f = fixture(t);
   const needs = outlineText("", [], ["- the per-page rate of the subject-to-change class"]);
   const pins = (reopens: number): string => JSON.stringify({ reopens, outlineShaAtReopen: null }) + "\n";
   build(f, { outline: needs, pins: pins(0) });
   assert.deepEqual(coverage(f.run, f.paper).problems, ["outline lists needs: send them in one reopen request"]);
+  // After a reopen the needs are still a problem: the reopen's answer is cleared from the list, and no more is asked for.
   build(f, { outline: needs, pins: pins(1) });
+  assert.deepEqual(coverage(f.run, f.paper).problems, [
+    "outline still lists needs: clear the ones the reopen satisfied, reopen again only if some remain and a reopen is left",
+  ]);
+  build(f, { outline: outlineText("", [], []), pins: pins(1) });
   assert.deepEqual(coverage(f.run, f.paper).problems, []);
   build(f, { outline: needs });
   assert.deepEqual(coverage(f.run, f.paper).problems, ["outline lists needs: send them in one reopen request"]);

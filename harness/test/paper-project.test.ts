@@ -3,6 +3,7 @@
 // so the explanation and its paper are the nodes the tools see. Every test names the rule it pins.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -10,6 +11,7 @@ import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { argumentSha } from "../explain/rounds.ts";
+import { bibKeys } from "../paper/embeds.ts";
 import { finalizeBib, initPaper, repinPaper } from "../paper/project.ts";
 import { checkPaper } from "../tools/check-paper.ts";
 import { sectionText } from "../tools/check-argument.ts";
@@ -360,13 +362,25 @@ const PAPER_WITH_CITES = [
   "",
 ].join("\n");
 
-/** A fake `deepis bib`: rewrites each chunk id to a key, and writes the bib the keys come from. */
-function fakeDeepis(paper: string, rewrite: (qmd: string) => string, bib: string | undefined) {
+/**
+ * A fake `deepis bib` that behaves as the real one does: it rewrites each chunk id in `paper.qmd` in place, and appends
+ * the entries of `entries` whose keys `workspace/deepis.bib` does not hold yet (the file it is given is the one it
+ * extends; it writes `deepis.bib` beside the paper, never `references.bib`).
+ */
+function fakeDeepis(paper: string, rewrite: (qmd: string) => string, entries: string | undefined) {
   return (args: string[]): { code: number; stderr: string } => {
     assert.deepEqual(args, ["bib", "paper.qmd"]);
     const file = at(paper, "workspace/paper.qmd");
     writeFileSync(file, rewrite(readFileSync(file, "utf8")));
-    if (bib !== undefined) writeFileSync(at(paper, "workspace/references.bib"), bib);
+    if (entries === undefined) return { code: 0, stderr: "" };
+    const bibFile = at(paper, "workspace/deepis.bib");
+    const existing = existsSync(bibFile) ? readFileSync(bibFile, "utf8") : "";
+    const have = bibKeys(existing);
+    const fresh = entries
+      .split(/\n\n+/)
+      .map((entry) => entry.trim())
+      .filter((entry) => entry !== "" && !have.has(entry.match(/^@\w+\{([^,]+),/)?.[1] ?? ""));
+    writeFileSync(bibFile, existing + fresh.map((entry) => `${entry}\n\n`).join(""));
     return { code: 0, stderr: "" };
   };
 }
@@ -416,6 +430,77 @@ test("finalizeBib: an embed lost in the rewrite is a problem, and the citations 
   assert.deepEqual(finalizeBib(f.run, f.paper, fakeDeepis(f.paper, extra, GOOD_BIB)), [
     "deepis bib changed the number of citations: 2 before, 3 after",
   ]);
+});
+
+test("finalizeBib: a deepis that writes no deepis.bib is a problem, and no references.bib is left behind", (t) => {
+  const f = fixture(t);
+  initPaper(f.run, f.paper);
+  paperWithCites(f);
+  const problems = finalizeBib(f.run, f.paper, fakeDeepis(f.paper, GOOD_REWRITE, undefined));
+  assert.deepEqual(problems, ["deepis bib paper.qmd wrote no deepis.bib"]);
+  assert.equal(existsSync(at(f.paper, "workspace/references.bib")), false);
+  assert.equal(existsSync(at(f.paper, "workspace/deepis.bib")), false);
+  assert.equal(read(f.paper, "paper.qmd"), PAPER_WITH_CITES, "the manuscript is restored");
+});
+
+test("finalizeBib: a second finalise appends only the new entry, keeps the old ones, and removes deepis.bib", (t) => {
+  const f = fixture(t);
+  initPaper(f.run, f.paper);
+  paperWithCites(f);
+  assert.deepEqual(finalizeBib(f.run, f.paper, fakeDeepis(f.paper, GOOD_REWRITE, GOOD_BIB)), []);
+  assert.equal(existsSync(at(f.paper, "workspace/deepis.bib")), false, "deepis.bib is removed after a clean run");
+  put(at(f.paper, "workspace/paper.qmd"), `${read(f.paper, "paper.qmd")}\nMore [@789].\n`);
+  const rewrite = (qmd: string): string => qmd.replace("[@789]", "[@ratz2003]");
+  assert.deepEqual(finalizeBib(f.run, f.paper, fakeDeepis(f.paper, rewrite, `${GOOD_BIB}\n@book{ratz2003,\n  title = {New}\n}\n`)), []);
+  const keys = [...bibKeys(read(f.paper, "references.bib"))].sort();
+  assert.deepEqual(keys, ["jones2011", "ratz2003", "smith2020"]);
+  assert.equal(existsSync(at(f.paper, "workspace/deepis.bib")), false);
+});
+
+test("finalizeBib: the real deepis bib on a scratch paper ends with both keys in references.bib, and a second finalise adds only the new one", (t) => {
+  const onPath = spawnSync("sh", ["-c", "command -v deepis"], { encoding: "utf8" }).status === 0;
+  if (!onPath) return t.skip("deepis is not on PATH: the real `deepis bib` is not run");
+  const f = fixture(t);
+  initPaper(f.run, f.paper);
+  put(at(f.paper, "workspace/paper.qmd"), ["---", 'title: "Crowd"', "bibliography: references.bib", "csl: apa.csl", "---", "", "A claim [@939306] [@961198].", ""].join("\n"));
+  const first = finalizeBib(f.run, f.paper);
+  if (first.some((line) => /deepis bib paper\.qmd failed/.test(line))) return t.skip(`the real deepis exits non-zero here: ${first[0]}`);
+  assert.deepEqual(first, []);
+  const cited = [...read(f.paper, "paper.qmd").matchAll(/\[@([^\],;\s]+)/g)].map((m) => m[1] ?? "");
+  assert.equal(cited.length, 2);
+  assert.equal(existsSync(at(f.paper, "workspace/deepis.bib")), false, "deepis.bib is gone");
+  const firstKeys = [...bibKeys(read(f.paper, "references.bib"))].sort();
+  assert.deepEqual(firstKeys, [...cited].sort(), "references.bib holds both keys");
+
+  put(at(f.paper, "workspace/paper.qmd"), `${read(f.paper, "paper.qmd")}\nAnother [@2003212].\n`);
+  assert.deepEqual(finalizeBib(f.run, f.paper), []);
+  const secondKeys = [...bibKeys(read(f.paper, "references.bib"))].sort();
+  assert.equal(secondKeys.length, 3, secondKeys.join(","));
+  for (const key of firstKeys) assert.ok(secondKeys.includes(key), `${key} kept`);
+  assert.equal(existsSync(at(f.paper, "workspace/deepis.bib")), false);
+});
+
+test("finalizeBib: a runner that throws, or an embed change, leaves references.bib and the draft as they were, and no deepis.bib", (t) => {
+  const f = fixture(t);
+  initPaper(f.run, f.paper);
+  paperWithCites(f);
+  put(at(f.paper, "workspace/references.bib"), GOOD_BIB);
+  const draft = read(f.paper, "paper.qmd");
+  const thrown = finalizeBib(f.run, f.paper, (args) => {
+    assert.deepEqual(args, ["bib", "paper.qmd"]);
+    writeFileSync(at(f.paper, "workspace/deepis.bib"), "half written");
+    throw new Error("spawn exploded");
+  });
+  assert.equal(thrown.length, 1);
+  assert.match(thrown[0] ?? "", /spawn exploded/);
+  assert.equal(read(f.paper, "references.bib"), GOOD_BIB);
+  assert.equal(existsSync(at(f.paper, "workspace/deepis.bib")), false);
+  assert.equal(read(f.paper, "paper.qmd"), draft);
+
+  const dropped = (qmd: string): string => GOOD_REWRITE(qmd).replace("{{< var m1_or_lspec >}}", "0.401");
+  assert.equal(finalizeBib(f.run, f.paper, fakeDeepis(f.paper, dropped, "@article{novel1999,\n  title = {N}\n}\n")).length, 1);
+  assert.equal(read(f.paper, "references.bib"), GOOD_BIB, "the bibliography is restored after an embed change");
+  assert.equal(existsSync(at(f.paper, "workspace/deepis.bib")), false);
 });
 
 test("finalizeBib: a failing deepis is a problem naming its exit code", (t) => {

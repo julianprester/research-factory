@@ -146,12 +146,19 @@ function fakeRender(): Exec {
   };
 }
 
-/** `deepis bib`'s fake: rewrites the draft's numeric chunk id to a key and writes the bibliography for it. */
+/**
+ * `deepis bib`'s fake, as the real tool behaves: rewrites the draft's numeric chunk id to a key in place, and writes its
+ * bibliography to `deepis.bib` beside the paper, appending the entry to what is there (never to `references.bib`).
+ */
 function fakeDeepis(workspace: string): (args: string[]) => { code: number; stderr: string } {
   return () => {
     const qmd = path.join(workspace, "paper.qmd");
     writeFileSync(qmd, read(qmd).replace(/@1001/g, "@smith2020"));
-    write(path.join(workspace, "references.bib"), "@article{smith2020,\n  title = {Etiquette by example},\n}\n");
+    const bib = path.join(workspace, "deepis.bib");
+    const existing = existsSync(bib) ? read(bib) : "";
+    if (!existing.includes("@article{smith2020,")) {
+      write(bib, `${existing}@article{smith2020,\n  title = {Etiquette by example},\n}\n`);
+    }
     return { code: 0, stderr: "" };
   };
 }
@@ -423,6 +430,26 @@ test("the reopen chain: the request, the extra loop, repin after the outline cha
   await tools.call(4, "pass_begin", { nodeId: "W01", pass: "humanize" });
   write(qmd, read(qmd).replace("Readers copy the first example, and", "Readers copy the first example; and"));
   assert.match(await tools.call(4, "pass_end", { nodeId: "W01", pass: "humanize" }), /accepted/);
+  assert.match(await tools.call(4, "check_paper", { nodeId: "W01" }), /checks ok/);
+
+  // The outline lists a need after the reopen: submit refuses at its final check, and the refusal leaves no file behind
+  // (the final render's output is removed, so git status is as it was).
+  const outlineOk = read(path.join(workspace, "outline.md"));
+  write(path.join(workspace, "outline.md"), outlineOk.replace("None.", "- the rate of the class, per page"));
+  const statusBefore = dirty(run);
+  setPaperExecForTests(async (args) => {
+    const mount = args[args.indexOf("-v") + 1] ?? "";
+    const folder = mount.slice(0, mount.lastIndexOf(":/work"));
+    write(path.join(folder, "checks", "render", "paper.html"), "<html><table><tr><td>A</td></tr></table></html>");
+    write(path.join(folder, "checks", "render", "paper.docx"), "PK docx");
+    write(path.join(folder, "checks", "render", "leftover.txt"), "scratch\n");
+    return { code: 0, stdout: "", stderr: "", timedOut: false };
+  });
+  assert.match(await tools.refused(4, "submit_paper", { nodeId: "W01" }), /gate "check"[\s\S]*outline still lists needs/);
+  assert.deepEqual(dirty(run), statusBefore, "a refused submit leaves git status as it was");
+  assert.equal(existsSync(path.join(workspace, "checks", "render", "leftover.txt")), false, "the render's scratch is removed");
+  setPaperExecForTests(fakeRender());
+  write(path.join(workspace, "outline.md"), outlineOk);
   assert.match(await tools.call(4, "check_paper", { nodeId: "W01" }), /checks ok/);
   assert.match(await tools.call(4, "submit_paper", { nodeId: "W01" }), /now ready in Phase 5/);
   assert.deepEqual([findNode(run, "W01").phase, findNode(run, "E01").status], [5, "closed"]);

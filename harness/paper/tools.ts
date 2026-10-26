@@ -17,6 +17,7 @@
 // generated copies and the pins (`repinPaper`).
 //
 // Every read is without following a link (`readRegular`, `locate`), and every write is a temp file and a rename.
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -210,6 +211,21 @@ function restore(paper: NodeRef, before: Snapshot): void {
 }
 
 /**
+ * Puts `checks/render` back as the last commit has it and removes what the render added: the render's outputs are
+ * scratch, so a refused submit leaves no file behind (git status is as it was).
+ */
+function discardRender(runDir: string, paper: NodeRef): void {
+  const folder = rel(runDir, path.join(paper.dir, WORKSPACE, "checks", "render"));
+  for (const args of [["checkout", "--", folder], ["clean", "-fdq", "--", folder]]) {
+    try {
+      execFileSync("git", args, { cwd: runDir, stdio: "ignore" });
+    } catch {
+      // Not tracked, or nothing to undo: the other step covers it.
+    }
+  }
+}
+
+/**
  * Submits the paper (design §8). Refuses, naming the gate and writing nothing, unless: the check is ok for the current
  * `paper.qmd`; both passes are accepted in order and the paper is what the last one left; the pins still match the
  * explanation; `finalizeBib` runs clean; and a final check with the render is clean. Then the paper, its references
@@ -270,10 +286,12 @@ export async function submitPaperTool(runDir: string, input: NoteInput): Promise
     final = await checkPaper(runDir, paper.dir, checkOptions(runDir));
   } catch (error) {
     restore(paper, before);
+    discardRender(runDir, paper);
     throw refusal(tool, "check", message(error));
   }
   if (final.problems.length > 0) {
     restore(paper, before);
+    discardRender(runDir, paper);
     throw refusal(tool, "check", `the finalised paper does not check (${final.problems.length} problem(s)):\n${final.problems.join("\n")}`);
   }
   const finalSha = sha256(readRegular(paper.dir, `${WORKSPACE}/paper.qmd`) ?? "");
