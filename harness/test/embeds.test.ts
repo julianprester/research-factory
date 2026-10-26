@@ -103,3 +103,16 @@ test("embedSetDiff reads a rewording that keeps every embed as no difference", (
   const reworded = PAPER.replace("The share is", "Put plainly, the share is").replace("agrees;", "agrees, and so on;");
   assert.deepEqual(embedSetDiff(scanEmbeds(PAPER), scanEmbeds(reworded)), []);
 });
+
+test("an include is found only in the two spellings Quarto renders: bare or quoted, single spaces, one line", () => {
+  assert.deepEqual(scanEmbeds("{{< include embeds/tables/T1.qmd >}}").includes, ["embeds/tables/T1.qmd"]);
+  assert.deepEqual(scanEmbeds('{{< include "embeds/tables/T1.qmd" >}}').includes, ["embeds/tables/T1.qmd"]);
+  const dropped = [
+    "{{< include embeds/tables/T1.qmd>}}",
+    "{{<include embeds/tables/T1.qmd >}}",
+    "{{<include embeds/tables/T1.qmd>}}",
+    '{{< include "embeds/tables/T1.qmd">}}',
+    "{{< include\nembeds/tables/T1.qmd >}}",
+  ];
+  for (const text of dropped) assert.deepEqual(scanEmbeds(text).includes, [], text);
+});

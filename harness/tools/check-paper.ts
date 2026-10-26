@@ -15,7 +15,7 @@
 //
 // The problems, in order: `workspace/paper.qmd` missing; the front matter (keys, `bibliography`, `csl`); the raw
 // syntax (fences, HTML, TeX commands, shortcodes, reference-style images, hand-typed block quotations, an include that
-// does not stand alone after a blank line); each
+// does not stand alone or does not follow a blank line, a heading or a fenced-div opener); each
 // `{{< var k >}}` not in `_variables.yml`, or with no source row that resolves to exactly one row of the
 // explanation's registry; the paper's copies of `_variables.yml` and `variables_sources.csv` (and `apa.csl`,
 // `_quarto.yml` when the harness templates exist), its table fragments and figures, each byte for byte against
@@ -91,12 +91,30 @@ const ROOT_FILE_REFUSED = /\.(?:lua|css)$/;
 const FENCE = /^\s*(?:`{3}|~{3})/;
 /** `<` followed by a letter, `/`, `!` or `?`: a tag, a closing tag, a comment or a declaration. `p < .05` and `x <3` are not. */
 const RAW_HTML = /<(?=[A-Za-z/!?])/;
+/**
+ * The spans pandoc reads as math, blanked for the raw-HTML test only. Matches are found left to right, so a code span,
+ * a link or image target or an escaped character that starts first is kept as it is (pandoc reads it first too). The
+ * math rules are pandoc's: `$$…$$` (no blank line inside); `\(…\)`; and `$…$` whose opening `$` is followed by a
+ * non-space and whose closing `$` is preceded by a non-space and not followed by a digit, so a currency `$5` does not
+ * close on a later `$10`. The math group is first, so `\(` is math and not an escaped `(`.
+ */
+const MATH_OR_KEPT =
+  /(?<math>\$\$(?:(?!\r?\n[ \t]*\r?\n)[\s\S])*?\$\$|\\\([^\n]*?\\\)|\$(?=[^\s$])[^$\n]*?(?<=[^\s$\\])\$(?!\d))|(?<ticks>`+)[\s\S]*?\k<ticks>(?!`)|\]\([^)\n]*\)|\\[\s\S]/g;
+/** A line that opens an include's allowed position without a blank line: a heading, or a fenced-div opener `::: {…}`. */
+const HEADING_LINE = /^\s*#{1,6}\s/;
+const DIV_OPENER = /^\s*:{3,}\s*\{.*\}\s*$/;
 const TEX_COMMAND = /\\(input|include|write|openin|read|immediate|usepackage|verbatiminput)(?![A-Za-z])/g;
 /** Any shortcode, closed or not on this text; masked before the HTML and TeX rules, since `{{<var x>}}` starts with `<v`. */
 const ANY_SHORTCODE = /\{\{<[\s\S]*?>\}\}/g;
 /** A block quotation, as a prose line starts: after leading spaces and list markers. */
 const QUOTE_LINE = /^\s*(?:(?:[-*+]|\d+[.)])\s+)*>/;
 const YEAR = /^\d{4}$/;
+/** A citation (a token with an `@` in a bracket): the bracket holds one, so its locators are read as locators. */
+const CITED = new RegExp(CITATION_TOKEN.source, "u");
+/** A locator inside a citation bracket: `p. 12`, `pp. 12-14`, `chap. 3`, `sec. 2`, with its numbers. */
+const LOCATOR = /(?<!\p{L})(?:pp?|chaps?|chapters?|secs?|sections?)\.?\s*\d+(?:\s*[-\u2013\u2014]\s*\d+)?/giu;
+/** The `date:` key and the value of a front matter line when the value is an ISO date (quoted or not). */
+const ISO_DATE_VALUE = /^(date:[ \t]*["']?)\d{4}-\d{2}-\d{2}(?=["']?[ \t\r]*$)/;
 
 /**
  * Checks the paper node at `nodeDir` inside the run at `runDir`. Throws for a `nodeDir` that is not a paper under an
@@ -267,14 +285,17 @@ function frontProblems(qmd: string): string[] {
 function syntaxProblems(qmd: string): string[] {
   const problems: string[] = [];
   const raw = qmd.split(/\r?\n/);
-  const hidden = blank(qmd, ANY_SHORTCODE).split(/\r?\n/);
+  const hidden = blank(qmd, ANY_SHORTCODE);
+  const hiddenLines = hidden.split(/\r?\n/);
+  const htmlLines = blankMath(hidden).split(/\r?\n/);
   const leftoverImages = blank(qmd, IMAGE).split(/\r?\n/);
   raw.forEach((line, index) => {
     const where = `workspace/paper.qmd line ${index + 1}`;
-    const text = hidden[index] ?? "";
     if (FENCE.test(line)) problems.push(`${where}: fenced code is not allowed (no code blocks, whatever the info string)`);
-    if (RAW_HTML.test(text)) problems.push(`${where}: raw HTML is not allowed`);
-    for (const match of text.matchAll(TEX_COMMAND)) problems.push(`${where}: TeX command \\${match[1]} is not allowed`);
+    if (RAW_HTML.test(htmlLines[index] ?? "")) problems.push(`${where}: raw HTML is not allowed`);
+    for (const match of (hiddenLines[index] ?? "").matchAll(TEX_COMMAND)) {
+      problems.push(`${where}: TeX command \\${match[1]} is not allowed`);
+    }
     if ((leftoverImages[index] ?? "").includes("![")) {
       problems.push(`${where}: reference-style image is not allowed; write it inline as ![alt](embeds/figures/F.png)`);
     }
@@ -303,9 +324,11 @@ function syntaxProblems(qmd: string): string[] {
 }
 
 /**
- * Each include stands alone on its own line (only whitespace around the shortcode), after a blank line, the front
- * matter's closing fence or the start of the file. Quarto renders an include inside a text line as nothing, with a
- * warning, and one directly after a text line as nothing with no warning (both probed with Quarto 1.9.37).
+ * Each include stands alone on its own line (only whitespace around the shortcode), and follows a blank line, the front
+ * matter's closing fence, the start of the file, a heading or a fenced-div opener (`::: {…}`). Quarto renders an include
+ * inside a text line as nothing, with a warning, and one directly after a text line as nothing with no warning (both
+ * probed with Quarto 1.9.37). After a heading or a fenced-div opener it renders (probed). After a list item or a figure
+ * line it does not, so those are refused.
  */
 function includePlacementProblems(qmd: string): string[] {
   const raw = qmd.split(/\r?\n/);
@@ -325,7 +348,8 @@ function includePlacementProblems(qmd: string): string[] {
       continue;
     }
     const index = line - 1;
-    const framed = index === 0 || (raw[index - 1] ?? "").trim() === "" || index - 1 === front;
+    const above = raw[index - 1] ?? "";
+    const framed = index === 0 || above.trim() === "" || index - 1 === front || HEADING_LINE.test(above) || DIV_OPENER.test(above);
     if (!framed) {
       problems.push(`${where}: an include must follow a blank line; Quarto renders one directly after a text line as nothing`);
     }
@@ -341,6 +365,11 @@ function lineOf(text: string, index: number): number {
 /** The text with every match of `pattern` blanked to spaces, newlines kept, so every line keeps its number. */
 function blank(text: string, pattern: RegExp): string {
   return text.replace(pattern, (span) => span.replace(/[^\n]/g, " "));
+}
+
+/** The text with its math spans blanked (newlines kept); code spans, link targets and escapes are left as they are. */
+function blankMath(text: string): string {
+  return text.replace(MATH_OR_KEPT, (span, math: string | undefined) => (math === undefined ? span : span.replace(/[^\n]/g, " ")));
 }
 
 // ---------------------------------------------------------------------------
@@ -673,16 +702,18 @@ function rootProblems(paper: string): string[] {
 /**
  * The bare numbers of the paper's text, each with its 1-based line. Counted: digit runs of two or more digits and
  * decimals, even when a letter or a percent sign follows (`12x`, `95th`, `12%`); in link text, image captions,
- * headings, citation brackets (only the `@key` is blanked) and front matter values. Not counted: the shortcodes
- * (includes and variables), link and image targets, URLs, identifiers in `{#…}`, block quotations, and a four-digit
- * year from 1900 to 2100.
+ * headings, citation brackets (only the `@key` and its locator are blanked) and front matter values. Not counted: the
+ * shortcodes (includes and variables), link and image targets, URLs, identifiers in `{#…}`, block quotations, an ISO
+ * date that is a front matter `date:` value, a locator (`p.`, `pp.`, `chap.`, `sec.`) inside a citation bracket, and a
+ * four-digit year from 1900 to 2100.
  */
 function paperNumbers(qmd: string): { line: number; token: string }[] {
   const raw = qmd.split(/\r?\n/);
-  let text = blank(qmd, ANY_SHORTCODE);
+  let text = blank(blankFrontDates(qmd), ANY_SHORTCODE);
   text = blank(text, /(?<=\])\([^)\n]*\)/g);
   text = text.replace(/^(\s*\[[^\]\n]+\]:)\s*(\S+)/gm, (span, label: string) => label + " ".repeat(span.length - label.length));
   text = blank(text, /[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+/g);
+  text = text.replace(/\[[^\]\n]*\]/g, (span) => (CITED.test(span) ? blank(span, LOCATOR) : span));
   text = blank(text, CITATION_TOKEN);
   text = blank(text, /\{#[A-Za-z][\w:.-]*\}/g);
   const hits: { line: number; token: string }[] = [];
@@ -695,6 +726,16 @@ function paperNumbers(qmd: string): { line: number; token: string }[] {
     }
   });
   return hits;
+}
+
+/** The front matter with each `date:` value that is an ISO date blanked to spaces: a date is not a count. */
+function blankFrontDates(qmd: string): string {
+  const lines = qmd.split("\n");
+  const close = frontEndOf(lines);
+  for (let index = 1; index < close; index++) {
+    lines[index] = (lines[index] ?? "").replace(ISO_DATE_VALUE, (span, key: string) => key + " ".repeat(span.length - key.length));
+  }
+  return lines.join("\n");
 }
 
 /** The author placeholder in the front matter, as a warning. */

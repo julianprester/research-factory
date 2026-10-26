@@ -11,8 +11,13 @@
 
 /** A var shortcode, in the spellings Quarto accepts: `{{<var x>}}`, extra spaces and a newline inside. The key is the first group. */
 export const VAR_SHORTCODE = /\{\{<\s*var\s+([^\s>}]+)\s*>\}\}/g;
-/** An include shortcode with its path bare or in quotation marks. The path is the first group, or the second when quoted. */
-export const INCLUDE_SHORTCODE = /\{\{<\s*include\s+(?:"([^"\n]+)"|([^\s>"}]+))\s*>\}\}/g;
+/**
+ * An include shortcode, in the two spellings Quarto renders: `{{< include X >}}` and `{{< include "X" >}}`, with single
+ * spaces exactly as written. Quarto renders the other spellings (no space before `>}}`, no space after `<`, a line break
+ * inside) as nothing, with exit 0, so they are not includes; `checkPaper` refuses them as malformed. The path is the first
+ * group, or the second when quoted.
+ */
+export const INCLUDE_SHORTCODE = /\{\{< include (?:"([^"\n]+)"|([^\s>"}]+)) >\}\}/g;
 /** An inline image `![alt](target "title")`; the target is the first group. A reference-style image is not one. */
 export const IMAGE = /!\[[^\]\n]*\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"\n]*")?\s*\)/g;
 /** A citation or cross-reference token: `@key`, or `-@key`, not preceded by a word, a dot, a slash or an `@`. The key is the first group. */

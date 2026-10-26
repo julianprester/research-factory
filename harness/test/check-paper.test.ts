@@ -1056,6 +1056,14 @@ test(
     assert.equal(tablesIn("own.qmd"), 1, "a stand-alone include renders its table");
     assert.equal(tablesIn("inline.qmd"), 0, "an include inside a text line renders nothing");
 
+    // Round 3: the spellings the checker refuses render nothing; the two it accepts each render their table.
+    const spelled = (name: string, spellings: string[]): void =>
+      put(path.join(project, name), `---\ntitle: "${name}"\n---\n\n${spellings.join("\n\n")}\n\nAfter.\n`);
+    spelled("dropped.qmd", DROPPED_INCLUDES);
+    spelled("accepted.qmd", ["{{< include embeds/tables/T1.qmd >}}", '{{< include "embeds/tables/T1.qmd" >}}']);
+    assert.equal(tablesIn("dropped.qmd"), 0, "each spelling the checker refuses renders nothing");
+    assert.equal(tablesIn("accepted.qmd"), 2, "the bare and the quoted spellings each render their table");
+
     const f = fixture(t);
     withProse(f, "Text {{< include embeds/tables/T1.qmd >}} more.");
     const { problems } = await check(f);
@@ -1063,5 +1071,164 @@ test(
       problems.some((p) => /an include must stand alone on its own line/.test(p)),
       problems.join("\n"),
     );
+
+    for (const text of DROPPED_INCLUDES) {
+      const g = fixture(t);
+      withProse(g, text);
+      assert.ok((await check(g)).problems.some((p) => /malformed \{\{< shortcode/.test(p)), JSON.stringify(text));
+    }
   },
 );
+
+// ---------------------------------------------------------------------------
+// Round 3 (review of the fix diff). Each probe was run against the checker, and against Quarto where the claim is
+// about rendering.
+
+// Include spellings (ruling 1): only `{{< include X >}}` and `{{< include "X" >}}`, with single spaces, are includes.
+// Quarto 1.9.37 renders the other spellings below as nothing, with exit 0 and no warning; the checker refuses them.
+
+const DROPPED_INCLUDES = [
+  "{{< include embeds/tables/T1.qmd>}}",
+  "{{<include embeds/tables/T1.qmd >}}",
+  "{{<include embeds/tables/T1.qmd>}}",
+  '{{< include "embeds/tables/T1.qmd">}}',
+  "{{< include\nembeds/tables/T1.qmd >}}",
+];
+
+test("each include spelling Quarto drops is a malformed shortcode problem naming its line", async (t) => {
+  for (const text of DROPPED_INCLUDES) {
+    const f = fixture(t);
+    withProse(f, text);
+    const { problems } = await check(f);
+    assert.ok(
+      problems.some((p) => p.startsWith(`workspace/paper.qmd line ${PAPER_LINE}: malformed {{< shortcode`)),
+      `${JSON.stringify(text)}\n${problems.join("\n")}`,
+    );
+  }
+});
+
+test("the two include spellings Quarto renders, bare and quoted with single spaces, are not malformed", async (t) => {
+  const f = fixture(t);
+  withProse(f, '{{< include embeds/tables/T1.qmd >}}\n\n{{< include "embeds/tables/T1.qmd" >}}');
+  assert.deepEqual((await check(f)).problems, []);
+});
+
+// Math (ruling 2): a span pandoc reads as math is not raw HTML. Currency is not math, and code is not math.
+
+test("inline and display math that Quarto renders are not raw HTML: $x<y$, $x<5$, $$x<y$$, \\(x<n\\)", async (t) => {
+  const f = fixture(t);
+  withProse(f, "Let $x<y$ and $x<5$ hold, $$x<y$$ too, and \\(x<n\\) as well.");
+  assert.deepEqual(await check(f), { problems: [], warnings: [] });
+});
+
+test("currency does not hide raw HTML: a $ amount beside a tag is still refused", async (t) => {
+  const f = fixture(t);
+  withProse(f, "costs $5 <script>x</script> and $10\n$5 <b>x</b> $10");
+  const { problems } = await check(f);
+  assert.ok(problems.some((p) => p.startsWith(`workspace/paper.qmd line ${PAPER_LINE}: raw HTML is not allowed`)), problems.join("\n"));
+  assert.ok(problems.some((p) => p.startsWith(`workspace/paper.qmd line ${PAPER_LINE + 1}: raw HTML is not allowed`)), problems.join("\n"));
+});
+
+test("an unclosed $ is not math: $x<y with no closing $ is raw HTML", async (t) => {
+  const f = fixture(t);
+  withProse(f, "The value $x<y is open.");
+  assert.ok((await check(f)).problems.some((p) => /raw HTML is not allowed/.test(p)));
+});
+
+test("a $ in inline code does not open math over a tag after the code", async (t) => {
+  const f = fixture(t);
+  withProse(f, "`$` <script>x</script> $y$\n`$` <script>x</script>$y$");
+  const { problems } = await check(f);
+  for (const offset of [0, 1]) {
+    assert.ok(problems.some((p) => p.startsWith(`workspace/paper.qmd line ${PAPER_LINE + offset}: raw HTML is not allowed`)), problems.join("\n"));
+  }
+});
+
+test("a $ followed by a space or a letter is not a closing $: a tag between two currency signs is still refused", async (t) => {
+  const f = fixture(t);
+  withProse(f, "costs $5 <script>x</script> and $ten\ncosts $5 <b>x</b> and $ok");
+  const { problems } = await check(f);
+  for (const offset of [0, 1]) {
+    assert.ok(problems.some((p) => p.startsWith(`workspace/paper.qmd line ${PAPER_LINE + offset}: raw HTML is not allowed`)), problems.join("\n"));
+  }
+});
+
+test("display math does not run across a blank line", async (t) => {
+  const f = fixture(t);
+  withProse(f, "$$ a\n\n<script>x</script>\n\n$$");
+  const { problems } = await check(f);
+  assert.ok(problems.some((p) => p.startsWith(`workspace/paper.qmd line ${PAPER_LINE + 2}: raw HTML is not allowed`)), problems.join("\n"));
+});
+
+test("a link target is not math: a $ in a URL does not hide a tag inside it", async (t) => {
+  const f = fixture(t);
+  withProse(f, "[t](http://x.org/$<b>$)");
+  assert.ok((await check(f)).problems.some((p) => /raw HTML is not allowed/.test(p)));
+});
+
+// Include placement (ruling 3): a heading or a fenced-div opener directly above an include is fine; a list item, a
+// figure line or a text line is not.
+
+test("an include directly after a heading or a fenced-div opener needs no blank line", async (t) => {
+  const f = fixture(t);
+  withProse(f, "## Results {#sec-results}\n{{< include embeds/tables/T1.qmd >}}\n\n::: {.callout-note}\n{{< include embeds/tables/T1.qmd >}}\n:::");
+  assert.deepEqual(await check(f), { problems: [], warnings: [] });
+});
+
+test("an include directly after a list item or a figure line is still refused", async (t) => {
+  const f = fixture(t);
+  withProse(f, "- item\n{{< include embeds/tables/T1.qmd >}}\n![x](embeds/figures/F1.png)\n{{< include embeds/tables/T1.qmd >}}");
+  const { problems } = await check(f);
+  for (const offset of [1, 3]) {
+    assert.ok(
+      problems.includes(
+        `workspace/paper.qmd line ${PAPER_LINE + offset}: an include must follow a blank line; Quarto renders one directly after a text line as nothing`,
+      ),
+      problems.join("\n"),
+    );
+  }
+});
+
+// Citation locators (minor 4): `p.`, `pp.`, `chap.` and `sec.` with their numbers inside a citation bracket are not
+// bare numbers. The same digits outside a bracket still count, and so do the other numbers in a bracket.
+
+test("a locator inside a citation bracket is not a bare number", async (t) => {
+  const f = fixture(t);
+  withProse(f, "As [@smith2020, p. 123] and [see @jones2019, pp. 12-14, chap. 3, sec. 2] show.");
+  const { problems } = await check(f, { bareNumberLimit: 0 });
+  assert.ok(!problems.some((p) => /bare number/.test(p)), problems.join("\n"));
+});
+
+test("a locator in a bracket with no citation still counts its number", async (t) => {
+  const f = fixture(t);
+  withProse(f, "Plain [see p. 78] text.");
+  const { problems } = await check(f, { bareNumberLimit: 0 });
+  assert.ok(/has 1 bare number in prose \(limit 0\): line \d+ 78$/.test(problems.join("\n")), problems.join("\n"));
+});
+
+test("the same locator digits outside a bracket still count, and so do the other numbers in a bracket", async (t) => {
+  const f = fixture(t);
+  withProse(f, "As [@smith2020] shows p. 123 and pp. 12-14.\n\nAnd [12 34, @jones2019, p. 56] too.");
+  const { problems } = await check(f, { bareNumberLimit: 0 });
+  assert.ok(
+    problems.some((p) => /has 5 bare numbers in prose \(limit 0\): line \d+ 123, line \d+ 12, line \d+ 14, line \d+ 12, line \d+ 34/.test(p)),
+    problems.join("\n"),
+  );
+});
+
+// The date in the front matter (minor 5): an ISO date value is a date, not bare numbers. A date in the prose still counts.
+
+test("an ISO date value in the front matter is not counted, quoted or not", async (t) => {
+  for (const line of ["date: 2026-10-26", 'date: "2026-10-26"']) {
+    const f = fixture(t);
+    put(at(f.paper, "workspace/paper.qmd"), withFront(line));
+    assert.deepEqual(await check(f, { bareNumberLimit: 0 }), { problems: [], warnings: [] }, line);
+  }
+});
+
+test("an ISO date in the prose still counts its month and day", async (t) => {
+  const f = fixture(t);
+  withProse(f, "Filed 2026-10-26.");
+  const { problems } = await check(f, { bareNumberLimit: 0 });
+  assert.ok(/has 2 bare numbers in prose \(limit 0\): line \d+ 10, line \d+ 26$/.test(problems.join("\n")), problems.join("\n"));
+});
