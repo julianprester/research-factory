@@ -45,7 +45,9 @@ The owner rejects the whole pass and restores the paper if any of these changes:
   whole; a number you see written out is a bare number, and you do not add one.
 
 Do not add a number, a citation, a quotation, a claim or a limitation the paper does
-not already have. Do not write a block quotation. Do not add code of any kind.
+not already have. Do not write a block quotation. Do not add code of any kind. If you
+cannot reword a sentence without touching an embed, leave it unchanged: an unchanged
+paper is an acceptable pass.
 
 ## 4. Check your work
 

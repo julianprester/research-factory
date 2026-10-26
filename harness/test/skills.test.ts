@@ -22,6 +22,7 @@ import {
 } from "../guard.ts";
 import { checkRevision, parseReport } from "../tools/check-argument.ts";
 import { parseReview, reviewProblems } from "../tools/merge-reviews.ts";
+import { parseDiagram } from "../paper/diagram.ts";
 import { INCLUDE_SHORTCODE, VAR_SHORTCODE, scanEmbeds } from "../paper/embeds.ts";
 
 const HARNESS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -1444,21 +1445,41 @@ test("the Phase 4 skill and roles only name tool and skill paths that exist", ()
   for (const file of named) assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
 });
 
+/**
+ * Each owner tool call a skill shows, as `{ tool, args }`: `name({ ... })` with the object's keys, over one line or many
+ * (the object holds no nested braces). Any tool name with an underscore, `tree_*` included.
+ */
+function toolCallsIn(text: string): { tool: string; args: string[] }[] {
+  return [...text.matchAll(/\b([a-z]+(?:_[a-z]+)+)\(\{([^{}]*)\}\)/g)].map((match) => ({
+    tool: match[1] as string,
+    args: [...(match[2] as string).matchAll(/(?:^|,)\s*(\w+):/g)].map((m) => m[1] as string),
+  }));
+}
+
+test("the parameter check reads multi-line calls and tree_* calls, and names what it cannot match", () => {
+  const sample = ['tree_update({', '  nodeId: "W01",', '  status: "active",', "})", 'tree_list({})', 'check_paper({ nodeId: "W01" })'].join("\n");
+  assert.deepEqual(toolCallsIn(sample), [
+    { tool: "tree_update", args: ["nodeId", "status"] },
+    { tool: "tree_list", args: [] },
+    { tool: "check_paper", args: ["nodeId"] },
+  ]);
+});
+
 test("every tool the Phase 4 skill calls is registered, and each call passes parameters the tool declares", () => {
   const registered = new Set([...read("harness/owner-extension.ts").matchAll(/registerTool\(\{\s*name: "(\w+)"/g)].map((m) => m[1] as string));
   for (const tool of PHASE4_TOOLS) assert.ok(registered.has(tool), `owner-extension registers ${tool}`);
   const body = read("harness/skills/phase-4/SKILL.md");
   for (const tool of PHASE4_TOOLS) {
-    if (tool.startsWith("tree_")) continue;
     assert.ok(new RegExp(`\\b${tool}\\(\\{`).test(body), `the skill shows a ${tool}({ ... }) call`);
   }
-  for (const match of body.matchAll(/\b([a-z]+(?:_[a-z]+)+)\(\{([^}]*)\}\)/g)) {
-    const tool = match[1] as string;
-    assert.ok(registered.has(tool), `${tool} is a registered owner tool`);
-    const declared = paramsOf(tool);
-    for (const name of [...(match[2] as string).matchAll(/(?:^|,)\s*(\w+):/g)].map((m) => m[1] as string)) {
-      assert.ok(declared.includes(name), `${tool} declares a parameter ${name}`);
-    }
+  const calls = toolCallsIn(body);
+  for (const tool of ["tree_create", "tree_update", "tree_list"]) {
+    assert.ok(calls.some((call) => call.tool === tool), `the skill's ${tool} calls are checked`);
+  }
+  for (const call of calls) {
+    assert.ok(registered.has(call.tool), `${call.tool} is a registered owner tool`);
+    const declared = paramsOf(call.tool);
+    for (const name of call.args) assert.ok(declared.includes(name), `${call.tool} declares a parameter ${name}`);
   }
   assert.match(body, /pass: "concise"/);
   assert.match(body, /pass: "humanize"/);
@@ -1580,6 +1601,82 @@ test("every shortcode example in paper-write.md is one the real embed scanner re
       const target = scanned.includes[0] as string;
       assert.ok(allowedInclude.some((pattern) => pattern.test(target)), `${example} includes an allowed target`);
     }
+  }
+});
+
+test("the owner re-checks before humanize and again before submit, since concise rewrote the paper", () => {
+  const prose = normalise(read("harness/skills/phase-4/SKILL.md"));
+  assert.ok(
+    prose.includes("after `pass_end` concise is accepted, run `check_paper` again (the paper changed), before `pass_begin` humanize"),
+    "the re-check before humanize is stated",
+  );
+  assert.ok(
+    prose.toLowerCase().includes("after humanize is accepted, run `check_paper` again, before `submit_paper`"),
+    "the re-check before submit is stated",
+  );
+});
+
+test("a style pass gets a second attempt with the diff and a third with the strict instruction; a third rejection parks", () => {
+  const prose = normalise(read("harness/skills/phase-4/SKILL.md"));
+  assert.ok(prose.includes("re-dispatch that style worker with the diff"), "the second attempt is re-dispatched with the diff");
+  assert.ok(
+    prose.toLowerCase().includes(
+      "the third attempt's brief adds, verbatim: \"change only words inside sentences; touch nothing else; if you cannot reword a sentence without touching an embed, leave it unchanged; an unchanged paper is an acceptable pass.\"",
+    ),
+    "the third attempt's instruction is verbatim",
+  );
+  assert.match(prose, /A third rejection: record a `Ruling:`[^.]*and park the paper/, "a third rejection rules and parks");
+  assert.match(prose, /`pass_end` accepts a pass that changed nothing/, "an unchanged paper is accepted by pass_end");
+});
+
+test("the Phase 3 reopen names are R<n>A with n unpadded, and the request folder is reopens/NN/request.md, padded", () => {
+  const body = read("harness/skills/phase-3/SKILL.md");
+  const prose = normalise(body);
+  assert.doesNotMatch(body, /R<NN>A/, "no padded task name");
+  assert.ok(prose.includes("each task is `R<n>A`, `R<n>B`, … with `n` the reopen number, unpadded (`R1A` for reopen 1, `R2A` for reopen 2)"));
+  assert.ok(prose.includes("`reopens/NN/request.md` under the node (`NN` = 01, 02, …)"), "the request folder is padded");
+  assert.ok(prose.includes("The number is padded in the folder name: `reopens/01/request.md`, `reopens/02/request.md`."), "both request folders are named, padded");
+});
+
+test("the paper-write examples name placeholders, and the writer uses the exact file names of the copied fragments", () => {
+  const role = normalise(read("harness/skills/roles/paper-write.md")).toLowerCase();
+  assert.ok(
+    role.includes("use the exact file names in `embeds/tables/` and `embeds/figures/` (ls them first); the example names are placeholders"),
+    "the exact names rule is stated",
+  );
+});
+
+test("the Needs rule: the writer clears the satisfied items after a reopen, and the owner checks ## Needs is - none before submit", () => {
+  const writer = normalise(read("harness/skills/roles/paper-write.md")).toLowerCase();
+  assert.ok(writer.includes("after a reopen returns"), "the writer clears needs after the reopen returns");
+  assert.ok(writer.includes("remove each need the reopen met"), "the writer removes the met needs");
+  const owner = normalise(read("harness/skills/phase-4/SKILL.md"));
+  assert.ok(owner.includes("Before `submit_paper`, the owner checks `## Needs` is `- none`"), "the owner checks Needs before submit");
+});
+
+test("deepis writes the bibliography to deepis.bib, the draft keeps numeric citations, and no skill says deepis writes references.bib", () => {
+  const owner = normalise(read("harness/skills/phase-4/SKILL.md"));
+  const writer = normalise(read("harness/skills/roles/paper-write.md"));
+  assert.doesNotMatch(owner, /references\.bib` beside the paper/, "the wrong placement is gone");
+  assert.match(owner, /deepis\.bib/, "the phase-4 skill names deepis.bib");
+  assert.ok(owner.toLowerCase().includes("citations stay as numeric `[@chunk_id]` in the draft; `submit_paper` finalises them with `deepis bib`"));
+  assert.ok(writer.includes("The owner's `submit_paper` turns each id into a key"));
+});
+
+test("every example diagram spec in paper-write parses with the real parser, and each claim is an argument heading", () => {
+  const role = read("harness/skills/roles/paper-write.md");
+  const block = /```yaml\n([\s\S]*?)```/.exec(role);
+  assert.ok(block, "the role shows a diagram spec");
+  // The example sits inside a list item, so its lines carry the item's indent: the spec is read without it.
+  const indent = Math.min(...(block[1] as string).split("\n").filter((line) => line.trim() !== "").map((line) => /^ */.exec(line)?.[0].length ?? 0));
+  const spec = (block[1] as string).split("\n").map((line) => line.slice(indent)).join("\n");
+  const diagram = parseDiagram(spec);
+  assert.ok(diagram !== null, "parseDiagram accepts the example");
+  const headings = new Set(sourceStrings("harness/tools/check-argument.ts", "ARGUMENT_HEADINGS").map((heading) => heading.replace(/^## /, "")));
+  for (const node of diagram.nodes) assert.ok(headings.has(node.claim), `node ${node.id} claims an argument heading`);
+  for (const edge of diagram.edges) {
+    assert.ok(headings.has(edge.claim), `edge ${edge.from} -> ${edge.to} claims an argument heading`);
+    for (const end of [edge.from, edge.to]) assert.ok(diagram.nodes.some((node) => node.id === end), `${end} is a node`);
   }
 });
 

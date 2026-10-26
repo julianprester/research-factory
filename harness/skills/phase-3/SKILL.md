@@ -458,16 +458,17 @@ line after it. A puzzle you cannot finish (budget) is parked with the reason
 Phase 4 may send a finished explanation back here (`reopen_explanation`, the
 paper writer's request for evidence the argument lacks). It puts the explanation
 back in phase 3 `ready`, with `reopens/NN/request.md` under the node (`NN` = 01,
-02, …). That is a **reopen**: a short extra loop on the same argument, not a new
-puzzle. The original loop's stop stays on the record, and no reopen lifts it.
+02, …). The number is padded in the folder name: `reopens/01/request.md`,
+`reopens/02/request.md`. That is a **reopen**: a short extra loop on the same
+argument, not a new puzzle. The original loop's stop stays on the record, and no reopen lifts it.
 
 - **Read the request first.** `reopens/NN/request.md` is the question for the
   extra loop: the numbers, tables or figures the paper needs, each with why and
   which part of the argument it bears on. Nothing is fetched: an analysis the
   data we have can run is a task; data we do not have is a data request.
 - **Start the loop.** Set the explanation `active` (`tree_update`). Then §2
-  applies with these differences: each task is `R<NN>A`, `R<NN>B`, … with `NN`
-  the reopen number (`R1A` for reopen 1), ascending from `A`; scripts are
+  applies with these differences: each task is `R<n>A`, `R<n>B`, … with `n`
+  the reopen number, unpadded (`R1A` for reopen 1, `R2A` for reopen 2), ascending from `A`; scripts are
   `R1A_01.R`; a plain letter is refused in a reopen; the assets task still takes
   the **highest** letter of its round. Round numbers continue (round 7, 8, …), and
   each reopen round's record carries its reopen number. The literature folder

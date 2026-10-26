@@ -117,7 +117,7 @@ The three headings are `## Sections`, `## Omitted` and `## Needs`. Each omission
 one line: the target as `argument.md` writes it, then ` — ` (or `--`), then the
 reason. A target that is embedded and also omitted is an error.
 
-**Needs go into one request.** When the outline shows needs, write
+**Needs go into one request.** After a reopen returns, the brief says so: remove each need the reopen met from `## Needs`, cover the argument's new links, and leave `- none` when all are met; the owner checks it before `submit_paper`. When the outline shows needs, write
 `workspace/reopen-request.md` once, with every need: what, why, which part of the
 argument. Then copy the same needs into `## Needs`. The owner sends that one request
 to Phase 3, which runs the analyses in an extra loop. Draft what the existing
@@ -162,7 +162,7 @@ prose; they do not change the content, so the content must already be right.
 ## 6. Embeds: the exact forms
 
 The check reads the raw text of the paper. It refuses anything else. Use only these
-forms, and nothing typed in their place.
+forms, and nothing typed in their place. Use the exact file names in `embeds/tables/` and `embeds/figures/` (ls them first); the example names are placeholders.
 
 - **Numbers** are variables: `{{< var workers >}}`, where the key is a row of
   `workspace/_variables.yml`. Write no formatted number yourself. This includes the
@@ -195,6 +195,9 @@ forms, and nothing typed in their place.
     - id: exposure
       label: "The first condition"
       claim: Explanation
+    - id: outcome
+      label: "The result"
+      claim: Mechanism and scope
   edges:
     - from: exposure
       to: outcome
