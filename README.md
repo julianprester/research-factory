@@ -99,7 +99,7 @@ harness/
 
 ## Licences and third-party material
 
-- No licence has been chosen for this code yet; until one is added, all rights are reserved.
+- The code and the skills written for this project are released under the MIT licence (`LICENSE`, copyright 2026 Julian Prester). The two items below keep their own terms and are not covered by it.
 - `harness/templates/apa.csl` is the APA 7th edition style from the Citation Style Language repository, licensed CC BY-SA 3.0, and is included unchanged.
-- `harness/skills/vendor/` holds two third-party skills copied unchanged; see `SOURCE.md` there for origin and check their terms before redistributing.
+- `harness/skills/vendor/` holds two skills copied unchanged from another repository; see `SOURCE.md` there for their origin. Check their terms before redistributing them, because the MIT licence above does not cover them.
 - The GitLab Handbook used in the reference run is MIT-licensed (copyright GitLab B.V.) and is not included.
