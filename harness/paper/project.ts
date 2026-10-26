@@ -54,7 +54,7 @@ interface Planned {
   bytes: Buffer;
 }
 
-interface PaperNode {
+export interface PaperNode {
   runDir: string;
   paper: string;
   explanation: string;
@@ -63,7 +63,7 @@ interface PaperNode {
 }
 
 /** The paper node at `paperDir` under its explanation in `runDir`; a path that is not one is an error. */
-function paperNodeOf(runDir: string, paperDir: string): PaperNode {
+export function paperNodeOf(runDir: string, paperDir: string): PaperNode {
   const paper = path.resolve(paperDir);
   const explanation = path.dirname(path.dirname(paper));
   const explanationId = nodeIdOf(explanation);
