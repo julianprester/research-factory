@@ -82,3 +82,8 @@ function countsOf(list: string[]): Map<string, number> {
   for (const item of list) counts.set(item, (counts.get(item) ?? 0) + 1);
   return counts;
 }
+
+/** The keys of the entries of a BibTeX file, `@type{key,`. */
+export function bibKeys(bib: string): Set<string> {
+  return new Set([...bib.matchAll(/@\w+\s*[{(]\s*([^,\s})]+)\s*,/g)].map((match) => match[1] ?? ""));
+}

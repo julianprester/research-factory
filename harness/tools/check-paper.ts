@@ -37,7 +37,7 @@ import { fileURLToPath } from "node:url";
 import { argumentSha, loopDir, locate, readRegular } from "../explain/rounds.ts";
 import { parseCsv } from "../explain/reproduce.ts";
 import { PAPER_BARE_NUMBER_LIMIT, readConfig } from "../launch.ts";
-import { CITATION_TOKEN, IMAGE, INCLUDE_SHORTCODE, VAR_SHORTCODE, scanEmbeds, type EmbedSet } from "../paper/embeds.ts";
+import { bibKeys, CITATION_TOKEN, IMAGE, INCLUDE_SHORTCODE, VAR_SHORTCODE, scanEmbeds, type EmbedSet } from "../paper/embeds.ts";
 import { coverage } from "../paper/outline.ts";
 import { verifyQuotes } from "../paper/quotes.ts";
 import { findRunDir, nodeIdOf } from "../tree.ts";
@@ -588,10 +588,6 @@ function citeProblems(paper: string, embeds: EmbedSet, citations: (file: string)
   return problems;
 }
 
-/** The keys of the entries of a BibTeX file, `@type{key,`. */
-function bibKeys(bib: string): Set<string> {
-  return new Set([...bib.matchAll(/@\w+\s*[{(]\s*([^,\s})]+)\s*,/g)].map((match) => match[1] ?? ""));
-}
 
 // ---------------------------------------------------------------------------
 // The Predictions, and the pins.

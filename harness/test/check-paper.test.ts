@@ -19,6 +19,8 @@ import { checkPaper } from "../tools/check-paper.ts";
 import { createChild, findNode, initRun, updateNode } from "../tree.ts";
 
 const CHECK_PAPER = fileURLToPath(new URL("../tools/check-paper.ts", import.meta.url));
+/** The harness templates every paper carries a copy of; the fixture copies them, so a planted change is the only difference. */
+const TEMPLATES = fileURLToPath(new URL("../templates/", import.meta.url));
 
 /** No citation problems: the unit tests never reach `deepis`. */
 const NO_CITATIONS = { citations: (): string[] => [] };
@@ -156,6 +158,7 @@ function fixture(t: TestContext): Fixture {
   put(at(paper, "workspace/embeds/predictions.qmd"), `${PREDICTIONS}\n`);
   put(at(paper, "workspace/checks/pins.json"), pins(ARGUMENT, "hash-one", PREDICTIONS));
   put(at(paper, "workspace/outline.md"), OUTLINE);
+  for (const name of ["apa.csl", "_quarto.yml"]) put(at(paper, `workspace/${name}`), readFileSync(path.join(TEMPLATES, name)));
   quoteSource(run, paper, { path: "handbook/rules.md", start: 3, end: 4 });
   return { run, explanation, paper };
 }
@@ -1265,4 +1268,19 @@ test("a paper with no outline is a check-paper problem naming it", async (t) => 
   const f = fixture(t);
   rmSync(at(f.paper, "workspace/outline.md"));
   assert.deepEqual((await check(f)).problems, ["workspace/outline.md is missing"]);
+});
+
+test("a paper whose _quarto.yml differs from the harness template is a problem naming the file", async (t) => {
+  const f = fixture(t);
+  const template = readFileSync(path.join(TEMPLATES, "_quarto.yml"), "utf8");
+  put(at(f.paper, "workspace/_quarto.yml"), template.replace("execute:", "filters:\n  - ./planted.lua\nexecute:"));
+  assert.deepEqual((await check(f)).problems, ["workspace/_quarto.yml differs from the explanation's harness/templates/_quarto.yml"]);
+});
+
+test("a paper whose apa.csl differs from the harness template, or lacks one, is a problem", async (t) => {
+  const f = fixture(t);
+  put(at(f.paper, "workspace/apa.csl"), "<style/>\n");
+  assert.deepEqual((await check(f)).problems, ["workspace/apa.csl differs from the explanation's harness/templates/apa.csl"]);
+  rmSync(at(f.paper, "workspace/apa.csl"));
+  assert.deepEqual((await check(f)).problems, ["workspace/apa.csl is missing"]);
 });
