@@ -10,7 +10,7 @@ node is done by a dispatched worker. Your job is the loop below and the ledger.
 You never wait for a human; when you must decide, decide and record a ruling.
 
 The run dir is `$CTC_RUN_DIR`. A node folder is the `<group>/<id>-*` directory
-under it (groups: `patterns/`, `puzzles/`, `explanations/`, `framings/`,
+under it (groups: `patterns/`, `puzzles/`, `explanations/`,
 `papers/`, `prep/`). A node whose status is `input` is your phase's job list:
 read it for its workspace, never brief it or dispatch it, and close it when your
 phase is complete.

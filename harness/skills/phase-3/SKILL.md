@@ -49,6 +49,8 @@ Then resume. Call `tree_list({})` (all phases) and read
   turn (or you were interrupted before creating its explanation). Take it when
   no other puzzle is in progress. Move any puzzle still `ready` to `input` first
   (§1).
+- An explanation `ready` in phase 3 with `reopens/NN/request.md` under it is a
+  reopen, not new work: continue it under §7, and do not create anything.
 - `owners/phase-3/loop/<E>/rounds.json` lists the **closed** rounds (the code
   wrote it; you cannot). Read it before anything else. A recorded STOP is final.
   The number of records is the number of closed rounds.
@@ -69,7 +71,7 @@ Then resume. Call `tree_list({})` (all phases) and read
 
 `tree_list({ phase: 3 })` with no status filter. The queue is the phase-3
 **puzzles** in `ready` (promoted by Phase 2), plus any `input` puzzle with no
-explanation under it (see §0).
+explanation under it (see §0), plus a reopened explanation (§7).
 
 **At the very start, before anything else, move every queued phase-3 puzzle to
 `input`** (`tree_update({ nodeId: "<P..>", status: "input" })` for each), so that
@@ -137,8 +139,8 @@ Inputs: <registry files and scripts it builds on>. Definition of Done: <what exi
 ...
 ```
 
-Each task heading is `### Task <L>: <aim>` with `<L>` one capital letter. The
-tool refuses a plan it cannot read, a letter listed twice, a letter that was
+Each task heading is `### Task <L>: <aim>` with `<L>` one capital letter (in a
+reopen loop, `R<n><L>`, such as `R1A`: §7). The tool refuses a plan it cannot read, a letter listed twice, a letter that was
 ever used and a letter that is not above the greatest letter already used. You
 may write `tasks/<L>/brief.md` before you call `open_round`: a task folder
 holding nothing but its `brief.md` does not count as used. On round 1 the tool
@@ -146,10 +148,10 @@ also prepares the exploration split: if it refuses with a message about the
 split lists, stop and tell the researcher; do not dispatch anything.
 
 **Letters.** A letter is unique across the node's whole life; round 2 continues
-from the next unused letter, upward, never a lower one (the tool refuses it). There are only 26 for
-all rounds, so plan **at most 4 lettered tasks per round, the assets task
-included** (2–3 analysis tasks plus the assets task): six rounds then fit in 26
-letters. Count what is left before you plan. Make each task one coherent line of
+from the next unused letter, upward, never a lower one (the tool refuses it). There are only 26 per loop (the
+original loop's, or one reopen's `R<n>A`…`R<n>Z`), so plan **at most 4 lettered
+tasks per round, the assets task included** (2–3 analysis tasks plus the assets
+task): six rounds then fit in 26 letters. Count what is left before you plan. Make each task one coherent line of
 analysis (a measure, a model family, a robustness battery).
 
 **The assets task.** `assets.R` or `assets.py` (the manuscript variables and
@@ -277,7 +279,7 @@ so round 1 is `lit-01`; `close_round` requires exactly this task's handoff and
 
 A second literature worker, when the results split into two bodies of
 literature, has the folder `tasks/lit-<NN2>` with `NN2` = 50 + the round number
-(round 1 is `lit-51`, round 2 `lit-52`; valid while `roundCap` < 50). It writes
+(round 1 is `lit-51`, round 2 `lit-52`; valid while `roundCap` + `maxReopens` × `reopenRounds` < 50, the run's last round). It writes
 `workspace/reports/<NN2>.md` (the guard accepts exactly that name for that
 folder), and its report's `Round:` line is still the **real round number** (`1`,
 not `51`). Write its `brief.md` in that folder; its Outputs name
@@ -450,6 +452,45 @@ tree call is your last; record "phase complete" in its `note` and write no ledge
 line after it. A puzzle you cannot finish (budget) is parked with the reason
 (`tree_update` to `parked`, with the explanation parked too); a stray `ready` or
 `input` puzzle keeps the supervisor nudging.
+
+## 7. Reopens
+
+Phase 4 may send a finished explanation back here (`reopen_explanation`, the
+paper writer's request for evidence the argument lacks). It puts the explanation
+back in phase 3 `ready`, with `reopens/NN/request.md` under the node (`NN` = 01,
+02, …). That is a **reopen**: a short extra loop on the same argument, not a new
+puzzle. The original loop's stop stays on the record, and no reopen lifts it.
+
+- **Read the request first.** `reopens/NN/request.md` is the question for the
+  extra loop: the numbers, tables or figures the paper needs, each with why and
+  which part of the argument it bears on. Nothing is fetched: an analysis the
+  data we have can run is a task; data we do not have is a data request.
+- **Start the loop.** Set the explanation `active` (`tree_update`). Then §2
+  applies with these differences: each task is `R<NN>A`, `R<NN>B`, … with `NN`
+  the reopen number (`R1A` for reopen 1), ascending from `A`; scripts are
+  `R1A_01.R`; a plain letter is refused in a reopen; the assets task still takes
+  the **highest** letter of its round. Round numbers continue (round 7, 8, …), and
+  each reopen round's record carries its reopen number. The literature folder
+  follows the global round number (`lit-07`, and `lit-57` for a second worker).
+- **Caps.** A reopen has at most `reopenRounds` rounds (the run's config, default
+  2); it ends early on two consecutive quiet rounds, as in §3. The code refuses a
+  reopen past `maxReopens` (default 2 per explanation).
+- **Predictions stay pinned.** The `## Predictions` section may not change: the
+  first submit's text is the preregistration, and `submit` refuses a reopened
+  node whose Predictions differ. A prediction the extra loop wants is recorded
+  as a deviation in **Limitations**, with its reason, not as a prediction.
+- **Argument.** Edit `argument.md` as in §2 (the seven headings, the
+  `Contribution:` line, the links). Limitations say what the reopen could not
+  supply.
+- **End.** When the loop stops (round count reached or two quiet rounds), run
+  the end gate of §5 again: check-argument, reproduce, one reviewer, one
+  revision, then `submit`. `submit` for a reopened node requires the extra
+  loop's stop, and returns the explanation to Phase 4 `ready`. The puzzle was
+  closed at the first submit and stays closed.
+
+A reopen never reopens the puzzle and never touches a paper: Phase 4's owner
+takes the explanation from `ready` (it repins its paper and re-dispatches the
+writer).
 
 ## Never
 

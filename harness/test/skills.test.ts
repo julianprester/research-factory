@@ -4,7 +4,7 @@
 // does not exist, or a role file nobody briefs, is a broken dispatch).
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,7 @@ import {
 } from "../guard.ts";
 import { checkRevision, parseReport } from "../tools/check-argument.ts";
 import { parseReview, reviewProblems } from "../tools/merge-reviews.ts";
+import { INCLUDE_SHORTCODE, VAR_SHORTCODE, scanEmbeds } from "../paper/embeds.ts";
 
 const HARNESS_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SKILLS = path.join(HARNESS_ROOT, "harness", "skills");
@@ -1348,4 +1349,267 @@ test("the paths the Phase 3 skill and roles name pass the guards", (t) => {
   // The hold-out word is refused in any bash command, a deepis query included: the literature role warns about it.
   assert.notEqual(holdoutRefusal("bash", { command: 'timeout 60 deepis search "hold-out validation" -n 10' }), undefined);
   assert.equal(holdoutRefusal("bash", { command: 'timeout 60 deepis search "validation sample" -n 10' }), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Phase 4: the paper owner's skill, the writer and style roles, the vendored style skills, the Phase 3 reopen text.
+
+const PHASE4_ROLES = ["paper-write", "paper-style"];
+const PHASE4_TOOLS = [
+  "init_paper",
+  "check_paper",
+  "pass_begin",
+  "pass_end",
+  "submit_paper",
+  "reopen_explanation",
+  "repin_paper",
+  "tree_list",
+  "tree_create",
+  "tree_update",
+];
+const SCIPI_SKILLS = path.join(homedir(), "Development", "scipi", "skills");
+
+/** The parameter names an owner tool declares: its registration's `parameters:` names a `Type.Object` in owner-extension.ts. */
+function paramsOf(tool: string): string[] {
+  const source = read("harness/owner-extension.ts");
+  const register = new RegExp(`registerTool\\(\\{\\s*name: "${tool}"[\\s\\S]*?parameters: (\\w+)`).exec(source);
+  assert.ok(register, `owner-extension registers ${tool} with a parameters schema`);
+  const declared = register[1] as string;
+  const block = new RegExp(`const ${declared} = Type\\.Object\\(\\{([\\s\\S]*?)\\n\\}\\);`).exec(source);
+  assert.ok(block, `${declared} is declared`);
+  return [...(block[1] as string).matchAll(/^  (\w+)\??: /gm)].map((m) => m[1] as string);
+}
+
+test("phase-4 has the phase-4 frontmatter and describes the paper workflow", () => {
+  const file = "harness/skills/phase-4/SKILL.md";
+  const markdown = read(file);
+  const fields = frontmatter(markdown);
+  assert.equal(fields.name, "phase-4");
+  assert.match(fields.description ?? "", /Phase 4/);
+  assert.doesNotMatch(markdown, /Placeholder/, "the placeholder is replaced");
+  const body = markdown.slice(markdown.indexOf("\n---\n") + 5);
+  for (const needed of [
+    "tree_list",
+    "Ruling:",
+    "input",
+    "active",
+    "init_paper",
+    "check_paper",
+    "pass_begin",
+    "pass_end",
+    "submit_paper",
+    "reopen_explanation",
+    "repin_paper",
+    "ctc-worker",
+    "paper-write",
+    "paper-style",
+    "brief.md",
+    "Status:",
+    "reopen-request.md",
+    "held-back split",
+    "one reopen request",
+    "papers/",
+    "checks/",
+    "cap",
+  ]) {
+    assert.ok(body.includes(needed), `the body mentions ${needed}`);
+  }
+  const prose = normalise(body);
+  assert.ok(prose.indexOf("concise") !== -1 && prose.indexOf("concise") < prose.indexOf("humanize"), "concise before humanize");
+  assert.match(prose, /one paper at a time/i, "one paper at a time");
+  assert.match(prose, /never tree_update|never `tree_update`/i, "a paper is never set to submitted by tree_update");
+  assert.match(prose, /never read|never reads/i, "the owner never reads the dataset");
+  assert.match(body, /phase-owner\/SKILL\.md/, "phase-4 follows phase-owner");
+  assert.ok(body.includes(path.join(SKILLS, "phase-owner", "SKILL.md")) || body.includes("harness/skills/phase-owner/SKILL.md"));
+});
+
+test("every Phase 4 role file exists and is named by absolute path in the phase-4 skill", () => {
+  const body = read("harness/skills/phase-4/SKILL.md");
+  for (const role of PHASE4_ROLES) {
+    const file = path.join(SKILLS, "roles", `${role}.md`);
+    assert.ok(existsSync(file), `${file} exists`);
+    assert.match(frontmatter(readFileSync(file, "utf8")).name ?? "", new RegExp(role), `${role}.md names itself`);
+    assert.ok(body.includes(file), `phase-4 names the absolute path ${file}`);
+  }
+});
+
+test("the Phase 4 skill and roles only name tool and skill paths that exist", () => {
+  const files = ["harness/skills/phase-4/SKILL.md", ...PHASE4_ROLES.map((role) => `harness/skills/roles/${role}.md`)];
+  const named = new Set<string>();
+  for (const file of files) {
+    for (const match of read(file).matchAll(/harness\/(?:tools|skills)\/[\w./-]+\.(?:ts|md)/g)) named.add(match[0].replace(/\.$/, ""));
+  }
+  assert.ok(named.has("harness/tools/check-citations.ts"), "a Phase 4 file names check-citations.ts");
+  assert.ok(named.has("harness/skills/vendor/humanize-ai-writing/SKILL.md"), "phase-4 names the vendored humanize skill");
+  for (const file of named) assert.ok(existsSync(path.join(HARNESS_ROOT, file)), `${file} exists`);
+});
+
+test("every tool the Phase 4 skill calls is registered, and each call passes parameters the tool declares", () => {
+  const registered = new Set([...read("harness/owner-extension.ts").matchAll(/registerTool\(\{\s*name: "(\w+)"/g)].map((m) => m[1] as string));
+  for (const tool of PHASE4_TOOLS) assert.ok(registered.has(tool), `owner-extension registers ${tool}`);
+  const body = read("harness/skills/phase-4/SKILL.md");
+  for (const tool of PHASE4_TOOLS) {
+    if (tool.startsWith("tree_")) continue;
+    assert.ok(new RegExp(`\\b${tool}\\(\\{`).test(body), `the skill shows a ${tool}({ ... }) call`);
+  }
+  for (const match of body.matchAll(/\b([a-z]+(?:_[a-z]+)+)\(\{([^}]*)\}\)/g)) {
+    const tool = match[1] as string;
+    assert.ok(registered.has(tool), `${tool} is a registered owner tool`);
+    const declared = paramsOf(tool);
+    for (const name of [...(match[2] as string).matchAll(/(?:^|,)\s*(\w+):/g)].map((m) => m[1] as string)) {
+      assert.ok(declared.includes(name), `${tool} declares a parameter ${name}`);
+    }
+  }
+  assert.match(body, /pass: "concise"/);
+  assert.match(body, /pass: "humanize"/);
+});
+
+test("the Phase 4 skill sends each queued explanation to input and records the wall-clock ruling", () => {
+  const body = read("harness/skills/phase-4/SKILL.md");
+  const prose = normalise(body);
+  assert.match(prose, /Ruling: Phase 4 budget/, "a wall-clock budget ruling");
+  assert.match(prose, /move (every|each) (queued )?(phase-4 )?explanation to `?input/i, "the queue moves to input at the start");
+  assert.match(prose, /one paper at a time/i);
+  assert.match(prose, /held-back split/);
+  assert.doesNotMatch(prose, /hold-out/i, "the owner never names the hold-out in its own skill text");
+});
+
+test("the phase-owner skill lists papers/ and no longer framings/", () => {
+  const owner = read("harness/skills/phase-owner/SKILL.md");
+  assert.doesNotMatch(owner, /framings\//, "no framings group");
+  assert.match(owner, /papers\//, "the papers group is listed");
+});
+
+test("the vendored style skills are the scipi originals, and SOURCE.md names their origin, date and commit", () => {
+  const files = [
+    "writing-clearly-and-concisely/SKILL.md",
+    "writing-clearly-and-concisely/references/elements-of-style.md",
+    "humanize-ai-writing/SKILL.md",
+  ];
+  const source = read("harness/skills/vendor/SOURCE.md");
+  for (const rel of files) {
+    const vendored = path.join(SKILLS, "vendor", rel);
+    assert.ok(existsSync(vendored), `${rel} is vendored`);
+    const origin = path.join(SCIPI_SKILLS, rel);
+    if (existsSync(origin)) assert.ok(readFileSync(vendored).equals(readFileSync(origin)), `${rel} is byte-identical to its origin`);
+    assert.ok(source.includes(`scipi/skills/${rel}`), `SOURCE.md names the origin of ${rel}`);
+  }
+  assert.match(source, /\b\d{4}-\d{2}-\d{2}\b/, "SOURCE.md has a date");
+  assert.match(source, /\b[0-9a-f]{7,40}\b|no git/, "SOURCE.md has the scipi commit, or says there is none");
+});
+
+test("the phase-3 skill describes the reopen loop: R<n><L> tasks, reopens/, the caps, the pinned Predictions and the return to Phase 4", () => {
+  const body = read("harness/skills/phase-3/SKILL.md");
+  for (const needed of ["R1A", "reopens/", "reopenRounds", "maxReopens", "Predictions", "R<n><L>"]) {
+    assert.ok(body.includes(needed), `phase-3 mentions ${needed}`);
+  }
+  const prose = normalise(body);
+  assert.match(prose, /Predictions[^.]*may not change/i, "the Predictions section may not change in a reopen");
+  assert.match(prose, /returns (it|the explanation) to Phase 4/i, "submit returns it to Phase 4");
+  assert.match(prose, /two quiet rounds|two consecutive/i, "a reopen ends early on two quiet rounds");
+  assert.doesNotMatch(body, /valid while roundCap < 50/, "the stale bound is gone");
+  assert.match(body, /`roundCap` \+ `maxReopens` \u00d7 `reopenRounds` < 50/, "the real bound is stated");
+  assert.match(body, /reopen loop, `R<n><L>`/, "the letter rule names the reopen letters");
+});
+
+test("paper-write teaches the genre, the outline first, the honesty rule and the exact embed forms", () => {
+  const role = read("harness/skills/roles/paper-write.md");
+  for (const needed of [
+    "quote_source",
+    "render_diagram",
+    "## Needs",
+    "## Omitted",
+    "## Sections",
+    "outline.md",
+    "reopen-request.md",
+    "Contribution:",
+    "stand alone",
+    "held-back split",
+    "check-citations.ts",
+    "deepis",
+    "{{< var",
+    "{{< include",
+    "embeds/quotes/",
+    "embeds/diagrams/",
+    "embeds/predictions.qmd",
+    "audit/index.md",
+    "task H",
+    "round three",
+  ]) {
+    assert.ok(role.includes(needed), `paper-write names ${needed}`);
+  }
+  for (const heading of [
+    "Introduction",
+    "Conceptual Background",
+    "Research Method",
+    "Findings",
+    "Theory Development",
+    "Discussion",
+    "Conclusion",
+    "Appendix",
+    "References",
+  ]) {
+    assert.ok(role.includes(heading), `paper-write names the section ${heading}`);
+  }
+  assert.match(role, /computationally intensive theory construction/i);
+  assert.match(role, /abstract[\s\S]{0,400}variable/i, "the abstract numbers are variables");
+  assert.match(role, /bare number/i, "the bare-number rule");
+  assert.match(normalise(role), /theoretical[^.]{0,200}propositions/i, "a theoretical contribution develops propositions");
+  assert.match(normalise(role), /pattern[^.]{0,200}(does not|not) (pretend|develop)/i, "a pattern does not pretend to propositions");
+  assert.match(normalise(role), /reflexive/i, "the short reflexive passage");
+  assert.match(role, /absolute paths/i);
+  assert.match(role, /handoff\.md/);
+  assert.match(role, /Status: /, "the handoff's first line is Status");
+});
+
+test("every shortcode example in paper-write.md is one the real embed scanner reads as a variable or an include", () => {
+  const role = read("harness/skills/roles/paper-write.md");
+  const examples = [...role.matchAll(/\{\{<[\s\S]*?>\}\}/g)].map((m) => m[0]);
+  assert.ok(examples.length >= 3, "the role shows shortcode examples");
+  const varForm = new RegExp(`^(?:${VAR_SHORTCODE.source})$`);
+  const includeForm = new RegExp(`^(?:${INCLUDE_SHORTCODE.source})$`);
+  const allowedInclude = [/^embeds\/tables\/[^/]+\.qmd$/, /^embeds\/quotes\/Q\d+\.qmd$/, /^embeds\/predictions\.qmd$/];
+  for (const example of examples) {
+    const scanned = scanEmbeds(example);
+    if (varForm.test(example)) {
+      assert.equal(scanned.vars.length, 1, `${example} is one variable`);
+      assert.equal(scanned.includes.length, 0);
+    } else {
+      assert.ok(includeForm.test(example), `${example} is a var or include in the checker's exact form`);
+      assert.equal(scanned.includes.length, 1, `${example} is one include`);
+      const target = scanned.includes[0] as string;
+      assert.ok(allowedInclude.some((pattern) => pattern.test(target)), `${example} includes an allowed target`);
+    }
+  }
+});
+
+test("paper-style.md edits prose only, applies a named vendored skill and never touches an embed", () => {
+  const file = "harness/skills/roles/paper-style.md";
+  const role = read(file);
+  assert.equal(frontmatter(role).name, "paper-style");
+  for (const vendored of [
+    path.join(SKILLS, "vendor", "writing-clearly-and-concisely", "SKILL.md"),
+    path.join(SKILLS, "vendor", "humanize-ai-writing", "SKILL.md"),
+  ]) {
+    assert.ok(role.includes(vendored) || role.includes(path.relative(HARNESS_ROOT, vendored)), `paper-style names ${vendored}`);
+  }
+  for (const forbidden of ["{{<", "![", "[@", "{#", "front matter"]) assert.ok(role.includes(forbidden), `paper-style forbids touching ${forbidden}`);
+  assert.match(role, /prose/i);
+  assert.match(role, /handoff\.md/);
+  assert.match(role, /Status: /);
+});
+
+test("the design spec follows the Phase 4 design's §11 edits", () => {
+  const spec = read("docs/superpowers/specs/2026-10-12-ctc-research-factory-design.md");
+  const phase4 = spec.slice(spec.indexOf("### Phase 4: Writing"), spec.indexOf("### Phase 5"));
+  assert.ok(phase4.length > 200, "found the Phase 4 section");
+  assert.doesNotMatch(phase4, /framings|framing proposals|framing tournament/i, "the Phase 4 section lists no framings");
+  assert.doesNotMatch(phase4, /road map/i, "the Phase 4 section has no road map");
+  assert.doesNotMatch(phase4, /generated from the tree/i, "no history-generated text");
+  assert.match(phase4, /one paper per explanation/i);
+  assert.match(phase4, /reopen/i);
+  assert.match(phase4, /check-paper/);
+  assert.doesNotMatch(spec, /road map/i, "no road map anywhere in the spec");
+  assert.doesNotMatch(spec, /framings\//, "the tree no longer lists framings/");
+  assert.doesNotMatch(spec, /framing proposals/i);
 });
