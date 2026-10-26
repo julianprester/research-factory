@@ -371,6 +371,8 @@ export async function renderDiagram(runDir: string, nodeDir: string, name: strin
   fs.rmSync(path.join(paper, ...pngRel.split("/")), { force: true });
 
   const config = readConfig(runDir);
+  // The mount source is a real folder before the run (the checks above read through it) and after it.
+  if (!realFolder(paper, "workspace") || !realFolder(paper, DIAGRAMS)) throw new Error(`${DIAGRAMS} must be a real folder`);
   const result = await (exec ?? realExec)(
     paperDockerArgs({ image: config.paperImage, folder, command: ["dot", "-Tpng", "-o", `${name}.png`, `${name}.dot`], ...hostIds() }),
     { timeoutMs: config.paperTimeoutMs },
@@ -380,6 +382,7 @@ export async function renderDiagram(runDir: string, nodeDir: string, name: strin
     const reason = (result.stderr || result.stdout).trim().split(/\r?\n/).at(-1) ?? "";
     throw new Error(`dot failed (exit ${result.code})${reason === "" ? "" : `: ${reason}`}`);
   }
+  if (!realFolder(paper, "workspace") || !realFolder(paper, DIAGRAMS)) throw new Error(`${DIAGRAMS} was replaced by a link during the render`);
 
   // The container could write this folder: what it rendered must be the spec and DOT that were checked.
   const specAfter = readRegular(paper, specRel);

@@ -4,7 +4,7 @@
 // test skips with its reason when ctc-paper:1 is not built.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -191,6 +191,16 @@ test("renderDiagram throws when dot fails or writes no PNG, and records nothing"
   await assert.rejects(renderDiagram(f.run, f.paper, "theory", fakeDot(undefined, 1, "Error: bad\n").exec), /dot failed \(exit 1\)/);
   await assert.rejects(renderDiagram(f.run, f.paper, "theory", fakeDot(undefined).exec), /dot wrote no theory\.png/);
   assert.equal(diagramProblems(f.paper).length, 0, "no PNG, no record: nothing to check");
+});
+
+test("renderDiagram refuses a symlinked workspace and runs nothing", async (t) => {
+  const f = paperRun(t, SPEC);
+  const moved = path.join(f.run, "moved-workspace");
+  renameSync(path.join(f.paper, "workspace"), moved);
+  symlinkSync(moved, path.join(f.paper, "workspace"));
+  const fake = fakeDot(Buffer.from("x"));
+  await assert.rejects(renderDiagram(f.run, f.paper, "theory", fake.exec), /is a link/);
+  assert.equal(fake.calls.length, 0, "no container is run");
 });
 
 test("renderDiagram refuses a link where the diagrams folder belongs", async (t) => {

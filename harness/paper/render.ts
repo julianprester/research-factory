@@ -26,6 +26,10 @@ import { scanEmbeds } from "./embeds.ts";
 export const WORKSPACE = "workspace";
 /** Where the render writes its html and docx, relative to the workspace. */
 export const RENDER_DIR = "checks/render";
+/** Terminal colour codes Quarto may print in a WARNING line. */
+const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+/** A cross-reference Quarto could not resolve: printed as `?@` and a label. */
+const UNRESOLVED_REFERENCE = /\?@[\p{L}\p{N}_-]+/gu;
 
 export interface PaperDockerOptions {
   image: string;
@@ -50,6 +54,10 @@ export function paperDockerArgs(o: PaperDockerOptions): string[] {
     "--rm",
     "--network",
     "none",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges",
     "--read-only",
     "--tmpfs",
     "/tmp",
@@ -136,13 +144,20 @@ function outputProblems(
   }
   const warnings = `${result.stdout}\n${result.stderr}`
     .split(/\r?\n/)
-    .map((line) => line.trim())
+    .map((line) => line.replace(ANSI, "").trim())
     .filter((line) => /\bWARNING\b/.test(line));
   for (const warning of new Set(warnings)) problems.push(`${WORKSPACE}/paper.qmd render: ${warning}`);
 
   const html = fileOutput(node, `${RENDER_DIR}/paper.html`, problems);
   fileOutput(node, `${RENDER_DIR}/paper.docx`, problems);
+  if (html !== undefined) problems.push(...crossReferenceProblems(html));
   return problems.concat(tableProblems(node, html));
+}
+
+/** An unresolved cross-reference: Quarto prints `@fig-x` it cannot resolve as `?@fig-x`, with no WARNING. */
+function crossReferenceProblems(html: Buffer): string[] {
+  const hits = new Set(html.toString("utf8").match(UNRESOLVED_REFERENCE) ?? []);
+  return [...hits].map((hit) => `${WORKSPACE}/${RENDER_DIR}/paper.html has an unresolved cross-reference: ${hit}`);
 }
 
 /** The bytes of one render output, or nothing (a problem is added for a missing, empty or refused one). */
@@ -183,6 +198,8 @@ export async function renderPaper(runDir: string, nodeDir: string, exec?: Exec):
 
 async function renderProblems(runDir: string, nodeDir: string, exec: Exec | undefined): Promise<string[]> {
   const node = path.resolve(nodeDir);
+  // The workspace is the container's mount source: it must be a real folder (not a link) before anything is read or run through it.
+  if (!realFolder(node, WORKSPACE)) return [`${WORKSPACE} is missing`];
   const manuscript = locate(path.join(node, WORKSPACE), "paper.qmd");
   if (manuscript.kind === "refused") return [manuscript.problem];
   if (manuscript.kind !== "file") return [];
@@ -205,6 +222,8 @@ async function renderProblems(runDir: string, nodeDir: string, exec: Exec | unde
     }),
     { timeoutMs: config.paperTimeoutMs },
   );
+  // The mount source is checked again after the run: the container could have replaced it with a link.
+  if (!realFolder(node, WORKSPACE)) return [`${WORKSPACE} was replaced by a link during the render: nothing is trusted`];
   // Quarto's project state is not part of the paper; it is removed, and a link there is simply not followed.
   if (realFolder(workspace, ".quarto")) fs.rmSync(path.join(workspace, ".quarto"), { recursive: true, force: true });
   const problems = changedBy(before, snapshot(workspace));

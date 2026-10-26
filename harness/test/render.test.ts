@@ -4,7 +4,7 @@
 // image-backed tests skip with their reason when ctc-paper:1 is not built.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
@@ -66,6 +66,10 @@ test("paperDockerArgs runs with no network, a read-only root, tmpfs /tmp, the ho
     "--rm",
     "--network",
     "none",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges",
     "--read-only",
     "--tmpfs",
     "/tmp",
@@ -153,6 +157,31 @@ test("renderPaper refuses a link where the render folder belongs, and runs nothi
   assert.ok(result.problems.some((p) => /checks\/render is a link/.test(p)), result.problems.join("\n"));
 });
 
+test("renderPaper strips ANSI colour codes from a WARNING line", async (t) => {
+  const f = setup(t);
+  const stdout = "\u001b[33m[WARNING]\u001b[39m Citeproc: citation x not found\n";
+  const result = await renderPaper(f.run, f.paper, fakeQuarto({ write: CLEAN, stdout }).exec);
+  assert.deepEqual(result.problems, ["workspace/paper.qmd render: [WARNING] Citeproc: citation x not found"]);
+});
+
+test("renderPaper names an unresolved cross-reference Quarto printed as ?@fig-nope, with no WARNING", async (t) => {
+  const f = setup(t);
+  const html = "<table><tr><td>A</td></tr></table><p>See ?@fig-nope.</p>";
+  const result = await renderPaper(f.run, f.paper, fakeQuarto({ write: { "checks/render/paper.html": html, "checks/render/paper.docx": "PK" } }).exec);
+  assert.deepEqual(result.problems, ["workspace/checks/render/paper.html has an unresolved cross-reference: ?@fig-nope"]);
+});
+
+test("renderPaper refuses a symlinked workspace and runs nothing", async (t) => {
+  const f = setup(t);
+  const moved = path.join(f.run, "moved-workspace");
+  renameSync(path.join(f.paper, "workspace"), moved);
+  symlinkSync(moved, path.join(f.paper, "workspace"));
+  const fake = fakeQuarto({ write: CLEAN });
+  const result = await renderPaper(f.run, f.paper, fake.exec);
+  assert.equal(fake.calls.length, 0, "no container is run");
+  assert.ok(result.problems.some((p) => /workspace is a link/.test(p)), result.problems.join("\n"));
+});
+
 test("renderPaper reports a missing config and a missing paper without throwing", async (t) => {
   const f = setup(t);
   rmSync(path.join(f.run, "config.json"));
@@ -181,6 +210,12 @@ test("the paper image renders an include that stands in a text line as nothing, 
   const f = setup(t, PAPER.replace(TABLE_INCLUDE, `Text ${TABLE_INCLUDE} more.`));
   const result = await renderPaper(f.run, f.paper);
   assert.ok(result.problems.some((p) => /1 table include but the HTML has 0 <table elements/.test(p)), result.problems.join("\n"));
+});
+
+test("the paper image flags an unresolved cross-reference it renders as ?@label", { skip: SKIP, timeout: 600_000 }, async (t) => {
+  const f = setup(t, PAPER.replace("Readers copy.", "Readers copy, see @fig-nope."));
+  const result = await renderPaper(f.run, f.paper);
+  assert.ok(result.problems.some((p) => /unresolved cross-reference: \?@fig-nope/.test(p)), result.problems.join("\n"));
 });
 
 test("a render that changes or adds a file the checks read is a problem", async (t) => {
